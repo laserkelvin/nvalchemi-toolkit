@@ -274,8 +274,9 @@ class GPUBuffer(DataSink):
         self._max_edges = max_edges
         self._device = torch.device(device) if isinstance(device, str) else device
         self._buffer: Batch | None = None
-        # Pre-allocated masks to avoid allocation in hot path
+        # _copied_mask is allocated fresh on each write (per-write output mask)
         self._copied_mask: torch.Tensor | None = None
+        # Pre-allocated dest_mask tracks which buffer slots are occupied (capacity-sized)
         self._dest_mask: torch.Tensor | None = None
 
     def _ensure_buffer(self, template: Batch) -> None:
@@ -299,12 +300,9 @@ class GPUBuffer(DataSink):
             template=template,
             device=self._device,
         )
-        # Pre-allocate masks for system-level occupancy tracking
+        # Pre-allocate dest_mask for system-level occupancy tracking
         self._dest_mask = torch.zeros(
             self._capacity, dtype=torch.bool, device=self._device
-        )
-        self._copied_mask = torch.zeros(
-            template.num_graphs, dtype=torch.bool, device=self._device
         )
         # Trigger lazy init of _batch_ptr for all groups so zero() can preserve it
         for group in self._buffer._storage.groups.values():
@@ -383,7 +381,6 @@ class GPUBuffer(DataSink):
                 raise ValueError(
                     f"mask length {mask.shape[0]} != num_graphs {num_total}"
                 )
-
         # Ensure buffer is allocated with full capacity (lazy init on first write)
         self._ensure_buffer(template=batch)
 
@@ -419,7 +416,7 @@ class GPUBuffer(DataSink):
                     f"but buffer max_edges={self._max_edges}"
                 )
 
-        # Allocate fresh _copied_mask
+        # Allocate fresh per-write output mask indicating which src graphs were placed
         self._copied_mask = torch.zeros(
             num_total, dtype=torch.bool, device=self._device
         )
@@ -450,25 +447,32 @@ class GPUBuffer(DataSink):
         ------
         RuntimeError
             If the buffer is empty.
-
-        Notes
-        -----
-        The current implementation uses ``to_data_list`` for extraction,
-        which is slower than ``index_select``. Direct ``index_select``
-        fails due to Warp dtype incompatibility (int32 batch_ptr vs int64
-        expected by Warp kernels). This is a known limitation that could
-        be optimized once Warp dtype handling is fixed upstream.
         """
         if self._buffer is None or len(self) == 0:
             raise RuntimeError("Cannot read from empty buffer.")
         if len(self) == self._capacity:
             # Buffer is full — return clone of entire buffer
             return self._buffer.clone()
-        # Extract only the filled portion via to_data_list.
-        # NOTE: index_select would be faster, but fails due to Warp dtype
-        # issues with int32 batch_ptr. See docstring Notes for details.
-        data_list = self._buffer.to_data_list()[: len(self)]
-        return Batch.from_data_list(data_list, device=self._device)
+
+        # Cast int32 batch_ptr → int64 for index_select compatibility.
+        # Warp stores batch_ptr as int32; PyTorch index_select expects int64.
+        # Save originals and restore afterwards to keep Warp kernel compatibility.
+        saved_ptrs: dict[str, torch.Tensor] = {}
+        for name, group in self._buffer._storage.groups.items():
+            bp = getattr(group, "_batch_ptr", None)
+            if bp is not None and bp.dtype != torch.int64:
+                saved_ptrs[name] = bp
+                group._batch_ptr = bp.to(torch.int64)
+
+        try:
+            indices = torch.arange(len(self), dtype=torch.long, device=self._device)
+            result = self._buffer.index_select(indices)
+        finally:
+            # Restore int32 batch_ptr for subsequent Warp put() calls
+            for name, original in saved_ptrs.items():
+                self._buffer._storage.groups[name]._batch_ptr = original
+
+        return result
 
     def zero(self) -> None:
         """Clear all stored data and reset the buffer.
@@ -481,17 +485,16 @@ class GPUBuffer(DataSink):
         # Reset occupancy masks
         if self._dest_mask is not None:
             self._dest_mask.zero_()
-        if self._copied_mask is not None:
-            self._copied_mask.zero_()
         if self._buffer is None:
             return
         # Delegate buffer reset to Batch.zero() which properly handles
         # both UniformLevelStorage and SegmentedLevelStorage bookkeeping.
         self._buffer.zero()
-        # Clear _num_segments cache (not handled by Batch.zero)
+        # Clear _num_segments / _num_elements_kept caches (not handled by Batch.zero)
         for group in self._buffer._storage.groups.values():
             if hasattr(group, "_num_segments"):
                 object.__delattr__(group, "_num_segments")
+                object.__delattr__(group, "_num_elements_kept")
 
     def __len__(self) -> int:
         """Return the number of samples currently stored.

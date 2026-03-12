@@ -17,7 +17,7 @@ End-to-end tests for inflight batching in the dynamics framework.
 
 This module tests the full inflight batching workflow including:
 - FusedStage.run() Mode 2 (batch=None with sampler)
-- BaseDynamics._refill_check() graduated sample replacement
+- BaseDynamics.refill_check() graduated sample replacement
 - Integration with ConvergenceHook for sample migration
 """
 
@@ -134,12 +134,10 @@ def create_batch_with_status(n_graphs: int = 3, device: str = "cpu") -> Batch:
         for _ in range(n_graphs)
     ]
     batch = Batch.from_data_list(data_list, device=device)
-    batch.__dict__["forces"] = torch.zeros(batch.num_nodes, 3)
-    batch.__dict__["energies"] = torch.zeros(batch.num_graphs, 1)
-    batch.__dict__["status"] = torch.zeros(batch.num_graphs, 1, dtype=torch.long)
-    batch.__dict__["fmax"] = torch.full(
-        (batch.num_graphs, 1), float("inf"), dtype=torch.float32
-    )
+    batch["forces"] = torch.zeros(batch.num_nodes, 3)
+    batch["energies"] = torch.zeros(batch.num_graphs, 1)
+    batch["status"] = torch.zeros(batch.num_graphs, 1, dtype=torch.long)
+    batch["fmax"] = torch.full((batch.num_graphs, 1), float("inf"), dtype=torch.float32)
     return batch
 
 
@@ -159,8 +157,8 @@ def initialize_batch_for_dynamics(batch: Batch) -> Batch:
     Batch
         The same batch with forces and energies initialized.
     """
-    batch.__dict__["forces"] = torch.zeros(batch.num_nodes, 3, device=batch.device)
-    batch.__dict__["energies"] = torch.zeros(batch.num_graphs, 1, device=batch.device)
+    batch["forces"] = torch.zeros(batch.num_nodes, 3, device=batch.device)
+    batch["energies"] = torch.zeros(batch.num_graphs, 1, device=batch.device)
     return batch
 
 
@@ -204,9 +202,7 @@ class TestFusedStageInflight:
         batch = sampler.build_initial_batch()
         initialize_batch_for_dynamics(batch)
         # Set fmax below threshold so samples converge
-        batch.__dict__["fmax"] = torch.full(
-            (batch.num_graphs, 1), 0.05, dtype=torch.float32
-        )
+        batch["fmax"] = torch.full((batch.num_graphs, 1), 0.05, dtype=torch.float32)
 
         result = fused.run(batch=batch)
 
@@ -215,9 +211,9 @@ class TestFusedStageInflight:
         assert fused.inflight_mode is True
 
     def test_graduates_and_replaces_samples(self) -> None:
-        """_refill_check should replace graduated samples in-place.
+        """refill_check should replace graduated samples in-place.
 
-        This tests the _refill_check mechanism directly, verifying that
+        This tests the refill_check mechanism directly, verifying that
         graduated samples are written to sinks and replacements are fetched
         into the same batch object (in-place modification).
         """
@@ -239,10 +235,10 @@ class TestFusedStageInflight:
         initial_batch = sampler.build_initial_batch()
         initialize_batch_for_dynamics(initial_batch)
         # Mark 2 samples as graduated (status=1)
-        initial_batch.__dict__["status"] = torch.tensor([[0], [1], [1]])
+        initial_batch["status"] = torch.tensor([[0], [1], [1]])
 
-        # Call _refill_check directly (not through run loop)
-        result = dynamics._refill_check(initial_batch, exit_status=1)
+        # Call refill_check directly (not through run loop)
+        result = dynamics.refill_check(initial_batch, exit_status=1)
 
         # Graduated samples should be written to sink
         assert len(sink) == 2
@@ -252,7 +248,7 @@ class TestFusedStageInflight:
         assert result.num_graphs == 3
 
     def test_terminates_on_dataset_exhaustion(self) -> None:
-        """_refill_check should return None when sampler is exhausted.
+        """refill_check should return None when sampler is exhausted.
 
         When all samples are consumed and all current samples have graduated,
         _refill_check should return None and set done=True.
@@ -275,10 +271,10 @@ class TestFusedStageInflight:
         assert sampler.exhausted  # All 3 consumed
 
         # Mark all as graduated (status=1)
-        batch.__dict__["status"] = torch.tensor([[1], [1], [1]])
+        batch["status"] = torch.tensor([[1], [1], [1]])
 
-        # Call _refill_check - should return None since no replacements available
-        result = dynamics._refill_check(batch, exit_status=1)
+        # Call refill_check - should return None since no replacements available
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # Should return None when all consumed and graduated
         assert result is None
@@ -301,9 +297,7 @@ class TestFusedStageInflight:
         )  # No sampler
 
         batch = create_batch_with_status(n_graphs=3)
-        batch.__dict__["fmax"] = torch.tensor(
-            [[0.05], [0.05], [0.05]]
-        )  # Below threshold
+        batch["fmax"] = torch.tensor([[0.05], [0.05], [0.05]])  # Below threshold
 
         with fused:
             result = fused.run(batch=batch)
@@ -345,7 +339,7 @@ class TestFusedStageInflight:
 
         batch = create_batch_with_status(n_graphs=5)
         # Set fmax below threshold so all samples converge after 1 step
-        batch.__dict__["fmax"] = torch.tensor([[0.05]] * 5)
+        batch["fmax"] = torch.tensor([[0.05]] * 5)
 
         result = fused.run(batch=batch)
 
@@ -359,7 +353,7 @@ class TestFusedStageInflight:
     def test_graduated_samples_written_to_sinks(self) -> None:
         """Graduated samples should be written to configured sinks.
 
-        When _refill_check runs, graduated samples should be stored
+        When refill_check runs, graduated samples should be stored
         in the sink before being replaced.
         """
         dataset = MockDataset([(2, 0)] * 10)
@@ -379,10 +373,10 @@ class TestFusedStageInflight:
         batch = sampler.build_initial_batch()
         initialize_batch_for_dynamics(batch)
         # Mark 2 samples as graduated
-        batch.__dict__["status"] = torch.tensor([[0], [1], [1]])
+        batch["status"] = torch.tensor([[0], [1], [1]])
 
-        # Call _refill_check directly
-        dynamics._refill_check(batch, exit_status=1)
+        # Call refill_check directly
+        dynamics.refill_check(batch, exit_status=1)
 
         # Sink should contain the 2 graduated samples
         assert len(sink) == 2
@@ -425,7 +419,7 @@ class TestFusedStageInflight:
 
 
 class TestRefillCheck:
-    """Unit tests for BaseDynamics._refill_check()."""
+    """Unit tests for BaseDynamics.refill_check()."""
 
     def setup_method(self) -> None:
         """Set up test fixtures before each test method."""
@@ -448,10 +442,10 @@ class TestRefillCheck:
         # Build initial batch (consumes 5 samples)
         batch = sampler.build_initial_batch()
         # Mark 2 samples as graduated (status=1, exit_status=1)
-        batch.__dict__["status"] = torch.tensor([[0], [1], [0], [1], [0]])
+        batch["status"] = torch.tensor([[0], [1], [0], [1], [0]])
 
         # Refill with exit_status=1
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # Returns a new batch (not same identity)
         assert result is not None
@@ -480,9 +474,9 @@ class TestRefillCheck:
 
         batch = sampler.build_initial_batch()
         # Set mixed statuses: 0, 1, 0, 1, 0 (graduated at positions 1, 3)
-        batch.__dict__["status"] = torch.tensor([[0], [1], [0], [1], [0]])
+        batch["status"] = torch.tensor([[0], [1], [0], [1], [0]])
 
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # Returns a new batch (not same identity)
         assert result is not None
@@ -512,9 +506,9 @@ class TestRefillCheck:
 
         batch = sampler.build_initial_batch()
         # Mark all as graduated
-        batch.__dict__["status"] = torch.tensor([[1], [1], [1], [1], [1]])
+        batch["status"] = torch.tensor([[1], [1], [1], [1], [1]])
 
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # Returns a new batch (not same identity)
         assert result is not None
@@ -540,9 +534,9 @@ class TestRefillCheck:
         assert sampler.exhausted  # All 3 consumed
 
         # Mark all as graduated
-        batch.__dict__["status"] = torch.tensor([[1], [1], [1]])
+        batch["status"] = torch.tensor([[1], [1], [1]])
 
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # No replacements available, no remaining
         assert result is None
@@ -551,14 +545,14 @@ class TestRefillCheck:
     def test_refill_raises_without_sampler(self) -> None:
         """Should raise RuntimeError when sampler is None.
 
-        _refill_check requires a sampler to be configured.
+        refill_check requires a sampler to be configured.
         """
         dynamics = BaseDynamics(model=self.model, device_type="cpu")
 
         batch = create_batch_with_status(n_graphs=3)
 
         with pytest.raises(RuntimeError, match="requires a sampler"):
-            dynamics._refill_check(batch, exit_status=1)
+            dynamics.refill_check(batch, exit_status=1)
 
     def test_refill_noop_when_no_graduated(self) -> None:
         """Should return batch unchanged when no samples graduated.
@@ -575,9 +569,9 @@ class TestRefillCheck:
 
         batch = sampler.build_initial_batch()
         # All samples at status=0 (not graduated)
-        batch.__dict__["status"] = torch.tensor([[0], [0], [0], [0], [0]])
+        batch["status"] = torch.tensor([[0], [0], [0], [0], [0]])
 
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # Should return same batch unchanged
         assert result is batch
@@ -585,7 +579,7 @@ class TestRefillCheck:
     def test_refill_writes_bookkeeping_to_storage(self) -> None:
         """Dynamics bookkeeping fields are written to result storage.
 
-        After _refill_check, ``status`` and ``fmax`` should live in the
+        After refill_check, ``status`` and ``fmax`` should live in the
         result batch's storage groups (not in ``__dict__``).  Remaining
         samples keep their values; replacements get defaults (status=0,
         fmax=inf).
@@ -598,10 +592,10 @@ class TestRefillCheck:
         dynamics = BaseDynamics(model=self.model, sampler=sampler, device_type="cpu")
 
         batch = sampler.build_initial_batch()
-        batch.__dict__["status"] = torch.tensor([[0], [1], [0], [1], [0]])
-        batch.__dict__["fmax"] = torch.full((batch.num_graphs, 1), 0.5)
+        batch["status"] = torch.tensor([[0], [1], [0], [1], [0]])
+        batch["fmax"] = torch.full((batch.num_graphs, 1), 0.5)
 
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         assert result is not None
         assert result.num_graphs == 5
@@ -624,8 +618,6 @@ class TestRefillCheck:
         assert fmax[3].item() == float("inf")
         assert fmax[4].item() == float("inf")
 
-        assert "status" not in result.__dict__
-        assert "fmax" not in result.__dict__
         assert "status" in result
         assert "fmax" in result
 
@@ -649,9 +641,9 @@ class TestRefillCheck:
         assert len(sampler) == 1  # Only 1 sample left
 
         # Graduate 3 samples (positions 0, 1, 2)
-        batch.__dict__["status"] = torch.tensor([[1], [1], [1], [0], [0]])
+        batch["status"] = torch.tensor([[1], [1], [1], [0], [0]])
 
-        result = dynamics._refill_check(batch, exit_status=1)
+        result = dynamics.refill_check(batch, exit_status=1)
 
         # Returns a new batch (not same identity)
         assert result is not None
@@ -710,7 +702,7 @@ class TestInflightWithConvergence:
         # Create batch with 5 samples at status=0
         batch = create_batch_with_status(n_graphs=5)
         # Set fmax below threshold so samples converge
-        batch.__dict__["fmax"] = torch.tensor([[0.01]] * 5)
+        batch["fmax"] = torch.tensor([[0.01]] * 5)
 
         # Run until all samples reach exit_status=2
         result = fused.run(batch=batch)
@@ -756,7 +748,7 @@ class TestInflightWithConvergence:
         batch = sampler.build_initial_batch()
         initialize_batch_for_dynamics(batch)
         # Start with very low fmax so convergence is immediate
-        batch.__dict__["fmax"] = torch.full((batch.num_graphs, 1), 0.01)
+        batch["fmax"] = torch.full((batch.num_graphs, 1), 0.01)
 
         # After 1 step: status should migrate 0 -> 1 -> 2
         batch, _converged = fused.step(batch)
@@ -790,7 +782,7 @@ class TestInflightWithConvergence:
         batch = sampler.build_initial_batch()
         initialize_batch_for_dynamics(batch)
         # Mixed fmax: 2 converged (0.05 < 0.1), 2 not (0.2 > 0.1)
-        batch.__dict__["fmax"] = torch.tensor([[0.05], [0.05], [0.2], [0.2]])
+        batch["fmax"] = torch.tensor([[0.05], [0.05], [0.2], [0.2]])
 
         batch, _converged = fused.step(batch)
 
@@ -820,7 +812,7 @@ class TestStepConvergenceReturn:
 
         batch = create_batch_with_status(n_graphs=4)
         # 2 samples converge (fmax < 0.1), 2 do not
-        batch.__dict__["fmax"] = torch.tensor([[0.05], [0.05], [0.5], [0.5]])
+        batch["fmax"] = torch.tensor([[0.05], [0.05], [0.5], [0.5]])
 
         batch, converged = dynamics.step(batch)
 
@@ -843,7 +835,7 @@ class TestStepConvergenceReturn:
 
         batch = create_batch_with_status(n_graphs=3)
         # All samples above threshold — none converge
-        batch.__dict__["fmax"] = torch.tensor([[0.5], [0.5], [0.5]])
+        batch["fmax"] = torch.tensor([[0.5], [0.5], [0.5]])
 
         batch, converged = dynamics.step(batch)
 

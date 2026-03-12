@@ -60,6 +60,10 @@ if TYPE_CHECKING:
     from nvalchemi.data import Batch
     from nvalchemi.dynamics.base import BaseDynamics
 
+# Boltzmann constant in eV/K — consistent with typical atomistic MD unit
+# systems (positions in Å, masses in amu, velocities in Å/fs, energy in eV).
+_KB_EV_PER_K: float = 8.617333262e-5
+
 __all__ = ["LoggingHook"]
 
 LogBackend = Literal["csv", "tensorboard", "custom"]
@@ -102,6 +106,12 @@ class LoggingHook(_ObserverHook):
         with LoggingHook(backend="csv", log_path="out.csv") as hook:
             dynamics.register_hook(hook)
             dynamics.run(batch)
+
+    This hook is non-blocking: scalar computation and the D2H transfer
+    run on a dedicated CUDA side stream (when available), and all
+    ``.item()`` calls and I/O happen in a background
+    :class:`~concurrent.futures.ThreadPoolExecutor` worker, so the
+    GPU pipeline is not stalled.
 
     Parameters
     ----------
