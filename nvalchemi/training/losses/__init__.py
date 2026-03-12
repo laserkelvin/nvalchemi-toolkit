@@ -15,3 +15,16 @@
 """Loss components for MLIP training."""
 
 from __future__ import annotations
+
+from nvalchemi.training.losses._base import CompositeLoss, LossComponent
+from nvalchemi.training.losses.energy import EnergyLoss
+from nvalchemi.training.losses.forces import ForceLoss
+from nvalchemi.training.losses.stress import StressLoss
+
+__all__ = [
+    "CompositeLoss",
+    "EnergyLoss",
+    "ForceLoss",
+    "LossComponent",
+    "StressLoss",
+]
