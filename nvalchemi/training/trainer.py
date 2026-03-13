@@ -401,13 +401,12 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
-        with torch.no_grad():
-            for batch in self.val_loader:
-                outputs = self.model(batch)
-                loss, _ = self.loss(batch, outputs)
-                total_loss += loss.item()
-                n_batches += 1
-                self.model.zero_grad(set_to_none=True)
+        for batch in self.val_loader:
+            outputs = self.model(batch)
+            loss, _ = self.loss(batch, outputs)
+            total_loss += loss.item()
+            n_batches += 1
+            self.model.zero_grad(set_to_none=True)
 
         avg_loss = total_loss / max(n_batches, 1)
         metrics = {"val_loss": avg_loss}
