@@ -30,6 +30,9 @@ $ python -c "import nvalchemi; print(nvalchemi.__version__)"
 ## Core Components
 
 - [AtomicData and Batch](data)
+- [Data Loading Pipeline](datapipes)
+- [Models: Wrapping ML Interatomic Potentials](models)
+- [Dynamics: Optimization and MD](dynamics)
 
 ## Advanced Usage
 
@@ -41,6 +44,7 @@ $ python -c "import nvalchemi; print(nvalchemi.__version__)"
 about/install
 about/intro
 about/faq
+about/contributing
 
 ```
 
@@ -50,6 +54,9 @@ about/faq
 :hidden:
 
 data
+datapipes
+models
+dynamics
 ```
 
 ```{toctree}
