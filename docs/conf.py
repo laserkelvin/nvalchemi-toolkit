@@ -148,6 +148,7 @@ sphinx_gallery_conf = {
     "min_reported_time": 0,
     "capture_repr": ("_repr_html_", "__repr__"),
     "expected_failing_examples": [
-        "../examples/05_distributed_pipeline_example.py",
+        "../examples/distributed/01_distributed_pipeline.py",
+        "../examples/distributed/02_distributed_monitoring.py",
     ],
 }
