@@ -122,3 +122,6 @@ pipeline configuration.
    MLIP.
 4. Explore the [dynamics guide](dynamics_guide) to run your first simulation.
 5. Check the `examples/` directory for complete working scripts.
+6. Copy the `.claude/skills` folder contents into your project
+   or home directory to allow agents to access skills to accelerate
+   workflows using `nvalchemi`.
