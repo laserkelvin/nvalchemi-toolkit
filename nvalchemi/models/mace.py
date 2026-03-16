@@ -47,7 +47,7 @@ with ``format=NeighborListFormat.COO`` so that ``edge_index`` and
 Notes
 -----
 * Forces are computed **conservatively** via MACE's internal autograd, so
-  :attr:`~ModelCard.forces_are_conservative` is ``True``.
+  :attr:`~ModelCard.forces_via_autograd` is ``True``.
 * ``node_attrs`` (one-hot atomic-number encodings) are computed via a
   pre-built GPU lookup table — no CPU round-trips per step.
 * For PBC systems, both ``unit_shifts`` (integer image indices ``[E, 3]``)
@@ -153,7 +153,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
     @property
     def model_card(self) -> ModelCard:
         return ModelCard(
-            forces_are_conservative=True,
+            forces_via_autograd=True,
             supports_energies=True,
             supports_forces=True,
             supports_stresses=True,

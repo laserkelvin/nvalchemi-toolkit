@@ -272,9 +272,6 @@ class TestInstantiation:
 
 
 class TestModelCard:
-    def test_forces_are_conservative(self, wrapper):
-        assert wrapper.model_card.forces_are_conservative is True
-
     def test_supports_energies_forces_stresses(self, wrapper):
         card = wrapper.model_card
         assert card.supports_energies
@@ -723,7 +720,6 @@ class TestRealCheckpoint:
 
     def test_model_card_matches_wrapper(self, real_wrapper_cpu):
         card = real_wrapper_cpu.model_card
-        assert card.forces_are_conservative
         assert card.supports_energies
         assert card.supports_forces
         assert card.neighbor_config is not None

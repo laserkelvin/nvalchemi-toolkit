@@ -40,7 +40,7 @@ Usage
 Notes
 -----
 * Forces are computed **analytically** inside the Warp kernel (not via
-  autograd), so :attr:`~ModelCard.forces_are_conservative` is ``False``.
+  autograd), so :attr:`~ModelCard.forces_via_autograd` is ``False``.
 * Only a **single species** is supported in this wrapper.  Epsilon and sigma
   are scalar parameters shared across all atom pairs.
 * Stress/virial computation (needed for NPT/NPH) is available via
@@ -137,7 +137,7 @@ class LennardJonesModelWrapper(nn.Module, BaseModelMixin):
     @property
     def model_card(self) -> ModelCard:
         return ModelCard(
-            forces_are_conservative=False,
+            forces_via_autograd=False,
             supports_energies=True,
             supports_forces=True,
             supports_stresses=True,
