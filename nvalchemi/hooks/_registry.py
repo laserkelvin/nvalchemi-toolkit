@@ -29,16 +29,24 @@ class HookRegistryMixin:
     The host class must provide a ``step_count`` attribute. Override
     ``_build_context`` to populate workflow-specific fields.
 
+    Set ``_stage_type`` on the host class to restrict which stage enum
+    types may be registered. When set, ``register_hook`` raises
+    :class:`TypeError` if ``hook.stage`` is not an instance of the
+    declared type(s).
+
     Attributes
     ----------
     hooks : list[Hook]
         Flat list of registered hooks.
     step_count : int
         Current step number (must be provided by the engine).
+    _stage_type : type[Enum] | tuple[type[Enum], ...] | None
+        Accepted stage enum type(s). ``None`` disables validation.
     """
 
     hooks: list[Hook]
     step_count: int
+    _stage_type: type[Enum] | tuple[type[Enum], ...] | None = None
 
     def _init_hooks(self, hooks: list[Hook] | None = None) -> None:
         """Initialize hook storage and register provided hooks.
@@ -65,10 +73,25 @@ class HookRegistryMixin:
         ------
         ValueError
             If ``hook.frequency`` is not a positive integer.
+        TypeError
+            If ``hook.stage`` is not an instance of the accepted
+            ``_stage_type`` declared on the engine.
         """
         if not isinstance(hook.frequency, int) or hook.frequency < 1:
             raise ValueError(
                 f"Hook frequency must be a positive integer, got {hook.frequency}"
+            )
+        stage_type = self._stage_type
+        if stage_type is not None and not isinstance(hook.stage, stage_type):
+            expected = (
+                stage_type.__name__
+                if isinstance(stage_type, type)
+                else " | ".join(t.__name__ for t in stage_type)
+            )
+            raise TypeError(
+                f"Hook {hook!r} has stage={hook.stage!r} "
+                f"(type {type(hook.stage).__name__}), but this engine "
+                f"only accepts {expected} stages."
             )
         self.hooks.append(hook)
 

@@ -27,7 +27,19 @@ class _TestStage(Enum):
     B = 1
 
 
+class _OtherStage(Enum):
+    X = 0
+
+
 class _MinimalEngine(HookRegistryMixin):
+    def __init__(self):
+        self.step_count = 0
+        self._init_hooks()
+
+
+class _TypedEngine(HookRegistryMixin):
+    _stage_type = _TestStage
+
     def __init__(self):
         self.step_count = 0
         self._init_hooks()
@@ -204,3 +216,95 @@ class TestHookRegistryMixin:
         engine._init_hooks(hooks=[SimpleHook()])
 
         assert len(engine.hooks) == 1
+
+
+class TestStageTypeValidation:
+    def test_register_hook_accepts_matching_stage_type(self):
+        engine = _TypedEngine()
+
+        class GoodHook:
+            frequency = 1
+            stage = _TestStage.A
+
+            def __call__(self, ctx, stage):
+                pass
+
+        engine.register_hook(GoodHook())
+        assert len(engine.hooks) == 1
+
+    def test_register_hook_rejects_wrong_stage_type(self):
+        engine = _TypedEngine()
+
+        class BadHook:
+            frequency = 1
+            stage = _OtherStage.X
+
+            def __call__(self, ctx, stage):
+                pass
+
+        with pytest.raises(TypeError, match="only accepts _TestStage"):
+            engine.register_hook(BadHook())
+
+    def test_no_validation_when_stage_type_is_none(self):
+        engine = _MinimalEngine()  # _stage_type defaults to None
+
+        class AnyStageHook:
+            frequency = 1
+            stage = _OtherStage.X
+
+            def __call__(self, ctx, stage):
+                pass
+
+        engine.register_hook(AnyStageHook())
+        assert len(engine.hooks) == 1
+
+    def test_tuple_stage_type_accepts_multiple_enums(self):
+        class MultiEngine(HookRegistryMixin):
+            _stage_type = (_TestStage, _OtherStage)
+
+            def __init__(self):
+                self.step_count = 0
+                self._init_hooks()
+
+        engine = MultiEngine()
+
+        class HookA:
+            frequency = 1
+            stage = _TestStage.A
+
+            def __call__(self, ctx, stage):
+                pass
+
+        class HookX:
+            frequency = 1
+            stage = _OtherStage.X
+
+            def __call__(self, ctx, stage):
+                pass
+
+        engine.register_hook(HookA())
+        engine.register_hook(HookX())
+        assert len(engine.hooks) == 2
+
+    def test_tuple_stage_type_rejects_unlisted_enum(self):
+        class ThirdStage(Enum):
+            Z = 0
+
+        class MultiEngine(HookRegistryMixin):
+            _stage_type = (_TestStage, _OtherStage)
+
+            def __init__(self):
+                self.step_count = 0
+                self._init_hooks()
+
+        engine = MultiEngine()
+
+        class BadHook:
+            frequency = 1
+            stage = ThirdStage.Z
+
+            def __call__(self, ctx, stage):
+                pass
+
+        with pytest.raises(TypeError, match="only accepts _TestStage | _OtherStage"):
+            engine.register_hook(BadHook())
