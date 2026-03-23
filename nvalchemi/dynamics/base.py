@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Hook",
     "HookStageEnum",
+    "DynamicsStage",
     "ConvergenceHook",
     "DistributedPipeline",
     "BufferConfig",
@@ -103,9 +104,9 @@ class BufferConfig(BaseModel):
     ]
 
 
-class HookStageEnum(Enum):
+class DynamicsStage(Enum):
     """
-    Enumeration of stages in the dynamics step where hooks can be executed.
+    Enumeration of stages in the dynamics step where hooks can fire.
 
     Each stage corresponds to a specific point in the simulation step,
     allowing hooks to be triggered before or after key operations.
@@ -141,6 +142,9 @@ class HookStageEnum(Enum):
     AFTER_POST_UPDATE = 6
     AFTER_STEP = 7
     ON_CONVERGE = 8
+
+
+HookStageEnum = DynamicsStage
 
 
 @runtime_checkable

@@ -207,6 +207,12 @@ class TestHookStageEnum:
         )
         assert HookStageEnum.AFTER_POST_UPDATE.value < HookStageEnum.AFTER_STEP.value
 
+    def test_alias_identity(self) -> None:
+        """Verify HookStageEnum is DynamicsStage."""
+        from nvalchemi.dynamics.base import DynamicsStage
+
+        assert HookStageEnum is DynamicsStage
+
 
 class TestHookProtocol:
     """Test suite for the Hook protocol."""
