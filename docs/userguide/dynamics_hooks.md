@@ -51,8 +51,8 @@ opt = FIRE(
     dt=0.1,
     n_steps=500,
     hooks=[
-        ConvergenceHook(fmax=0.05),
-        LoggingHook(interval=10),
+        ConvergenceHook.from_fmax(0.05),
+        LoggingHook(backend="csv", log_path="hooks.csv", frequency=10),
     ],
 )
 ```
@@ -118,7 +118,7 @@ as `Enum` for any stage type not explicitly handled.
 
 ### ConvergenceHook
 
-{py:class}`~nvalchemi.dynamics.hooks.ConvergenceHook` evaluates one or more
+{py:class}`~nvalchemi.dynamics.base.ConvergenceHook` evaluates one or more
 convergence criteria at each step and marks systems as converged when **all** of
 them are satisfied (AND semantics).
 
@@ -196,7 +196,7 @@ those systems to stop being updated.
 ```python
 from nvalchemi.dynamics.hooks import LoggingHook
 
-hook = LoggingHook(interval=10)  # log every 10 steps
+hook = LoggingHook(backend="csv", log_path="hooks.csv", frequency=10)  # log every 10 steps
 ```
 
 The hook implements the context manager protocol to manage its logger lifecycle.
@@ -213,7 +213,7 @@ from nvalchemi.dynamics.sinks import ZarrData
 
 hook = SnapshotHook(
     sink=ZarrData("/path/to/trajectory.zarr"),
-    interval=50,  # save every 50 steps
+    frequency=50,  # save every 50 steps
 )
 ```
 
@@ -363,9 +363,8 @@ Hooks are independent and composable. A typical production setup combines
 convergence, logging, and trajectory recording:
 
 ```python
-from nvalchemi.dynamics import FIRE
+from nvalchemi.dynamics import FIRE, ConvergenceHook
 from nvalchemi.dynamics.hooks import (
-    ConvergenceHook,
     ConvergedSnapshotHook,
     LoggingHook,
     SnapshotHook,
@@ -377,9 +376,9 @@ with FIRE(
     dt=0.1,
     n_steps=500,
     hooks=[
-        ConvergenceHook(fmax=0.05),
-        LoggingHook(interval=10),
-        SnapshotHook(sink=ZarrData("/tmp/traj.zarr"), interval=50),
+        ConvergenceHook.from_fmax(0.05),
+        LoggingHook(backend="csv", log_path="hooks.csv", frequency=10),
+        SnapshotHook(sink=ZarrData("/tmp/traj.zarr"), frequency=50),
         ConvergedSnapshotHook(sink=ZarrData("/tmp/relaxed.zarr")),
     ],
 ) as opt:
