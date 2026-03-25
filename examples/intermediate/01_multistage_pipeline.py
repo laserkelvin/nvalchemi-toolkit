@@ -51,6 +51,7 @@ from nvalchemi.dynamics import FIRE, NVE, NVTLangevin, SizeAwareSampler
 from nvalchemi.dynamics.base import ConvergenceHook, DynamicsStage, FusedStage
 from nvalchemi.dynamics.hooks import LoggingHook
 from nvalchemi.dynamics.sinks import HostMemory
+from nvalchemi.hooks import HookContext
 from nvalchemi.models.demo import DemoModelWrapper
 
 logging.basicConfig(level=logging.INFO)
@@ -130,10 +131,11 @@ class StageTransitionLogger:
         self._t0 = time.monotonic()
         self._n_transitions = 0
 
-    def __call__(self, batch: Batch, dynamics) -> None:
+    def __call__(self, ctx: HookContext, stage_: DynamicsStage) -> None:
         self._n_transitions += 1
         if self._n_transitions % self.frequency != 0:
             return
+        batch = ctx.batch
         elapsed = time.monotonic() - self._t0
         if batch.status is not None:
             dist: dict[int, int] = defaultdict(int)
@@ -145,7 +147,7 @@ class StageTransitionLogger:
         logging.info(
             "[%s] CONVERGE at step=%d  elapsed=%.2fs  %s",
             self.label,
-            dynamics.step_count,
+            ctx.step_count,
             elapsed,
             dist_str,
         )
@@ -363,11 +365,12 @@ class StatusSnapshotHook:
         self._print_count = 0
         self._max_steps = max_steps
 
-    def __call__(self, batch: Batch, dynamics) -> None:
+    def __call__(self, ctx: HookContext, stage_: DynamicsStage) -> None:
         if self._print_count >= self._max_steps:
             return
-        if dynamics.step_count % self.frequency != 0:
+        if ctx.step_count % self.frequency != 0:
             return
+        batch = ctx.batch
         # NOTE: .cpu() transfers synchronize the GPU.  This hook is limited to
         # ``max_steps`` invocations and is used here for illustration only.
         # For production monitoring prefer LoggingHook which uses async I/O.
@@ -382,7 +385,7 @@ class StatusSnapshotHook:
         if batch.energies is not None:
             e_mean = batch.energies.squeeze(-1).mean().cpu().item()
             e_str = f"  E_mean={e_mean:.4f}"
-        logging.info("step=%3d  [%s]%s", dynamics.step_count, dist_str, e_str)
+        logging.info("step=%3d  [%s]%s", ctx.step_count, dist_str, e_str)
         self._print_count += 1
 
 
