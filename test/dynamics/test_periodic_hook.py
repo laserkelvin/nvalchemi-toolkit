@@ -67,11 +67,19 @@ def _make_dynamics() -> BaseDynamics:
 
 def _make_ctx(batch: Batch, dynamics: BaseDynamics) -> HookContext:
     """Build a HookContext from a batch and dynamics instance."""
+    converged = dynamics._last_converged
+    if converged is not None:
+        mask = torch.zeros(
+            batch.num_graphs, dtype=torch.bool, device=batch.positions.device
+        )
+        mask[converged] = True
+    else:
+        mask = None
     return HookContext(
         batch=batch,
         step_count=dynamics.step_count,
         model=dynamics.model,
-        converged_mask=dynamics._last_converged,
+        converged_mask=mask,
         global_rank=dynamics.global_rank,
     )
 

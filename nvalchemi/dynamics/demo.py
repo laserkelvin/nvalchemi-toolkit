@@ -82,8 +82,8 @@ class DemoDynamics(BaseDynamics):
         The integration timestep.
     step_count : int
         The current step number.
-    hooks : dict[DynamicsStage, list[Hook]]
-        Registered hooks organized by stage.
+    hooks : list[Hook]
+        Registered hooks.
     _prev_accelerations : torch.Tensor | None
         Cached accelerations from the previous step for the velocity
         half-step. ``None`` on the first step.

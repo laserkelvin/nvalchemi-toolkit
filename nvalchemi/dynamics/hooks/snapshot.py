@@ -170,22 +170,18 @@ class ConvergedSnapshotHook:
         self.stage = stage
 
     @torch.compiler.disable
-    def _write_converged(self, batch: Batch, converged: torch.Tensor | None) -> None:
+    def _write_converged(self, batch: Batch, mask: torch.Tensor | None) -> None:
         """Write converged samples to the configured sink.
 
         Parameters
         ----------
         batch : Batch
             The current batch of atomic data.
-        converged : torch.Tensor | None
-            Integer tensor of converged sample indices, or None if none converged.
+        mask : torch.Tensor | None
+            Boolean mask of converged samples, or None if none converged.
         """
-        if converged is None or converged.numel() == 0:
+        if mask is None or not mask.any():
             return
-        mask = torch.zeros(
-            batch.num_graphs, dtype=torch.bool, device=batch.positions.device
-        )
-        mask[converged] = True
         self.sink.write(batch, mask=mask)
 
     def __call__(self, ctx: HookContext, stage: Enum) -> None:

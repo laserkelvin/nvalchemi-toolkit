@@ -1428,11 +1428,18 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
 
     def _build_context(self, batch: Batch) -> HookContext:
         """Build a dynamics-specific HookContext."""
+        if self._last_converged is not None:
+            _mask = torch.zeros(
+                batch.num_graphs, dtype=torch.bool, device=batch.positions.device
+            )
+            _mask[self._last_converged] = True
+        else:
+            _mask = None
         return HookContext(
             batch=batch,
             step_count=self.step_count,
             model=self.model,
-            converged_mask=self._last_converged,
+            converged_mask=_mask,
             global_rank=self.global_rank,
         )
 

@@ -75,14 +75,23 @@ class HookRegistryMixin:
             If ``hook.frequency`` is not a positive integer.
         TypeError
             If ``hook.stage`` is not an instance of the accepted
-            ``_stage_type`` declared on the engine.
+            ``_stage_type`` declared on the engine **and** the hook does
+            not define ``_runs_on_stage`` (cross-category hooks that
+            manage their own stage dispatch bypass this check).
         """
         if not isinstance(hook.frequency, int) or hook.frequency < 1:
             raise ValueError(
                 f"Hook frequency must be a positive integer, got {hook.frequency}"
             )
         stage_type = self._stage_type
-        if stage_type is not None and not isinstance(hook.stage, stage_type):
+        # Hooks that define ``_runs_on_stage`` handle stage dispatch
+        # themselves (e.g. cross-category hooks); skip the type check.
+        has_custom_dispatch = getattr(hook, "_runs_on_stage", None) is not None
+        if (
+            stage_type is not None
+            and not has_custom_dispatch
+            and not isinstance(hook.stage, stage_type)
+        ):
             expected = (
                 stage_type.__name__
                 if isinstance(stage_type, type)
