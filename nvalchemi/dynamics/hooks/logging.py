@@ -237,7 +237,7 @@ class LoggingHook:
         self,
         batch: Batch,
         step_count: int,
-        ctx: HookContext | None = None,
+        ctx: HookContext,
     ) -> None:
         """Compute per-graph scalars and dispatch to the logging backend.
 
@@ -247,8 +247,8 @@ class LoggingHook:
             The current batch of atomic data.
         step_count : int
             The current step number.
-        ctx : HookContext | None
-            The hook context (for custom_scalars that need it).
+        ctx : HookContext
+            The hook context (required for custom_scalars).
         """
         device = batch.device
         use_stream = self._stream is not None and device.type == "cuda"
@@ -280,7 +280,7 @@ class LoggingHook:
         self,
         batch: Batch,
         step_count: int,
-        ctx: HookContext | None = None,
+        ctx: HookContext,
     ) -> TensorDict:
         """Build a ``TensorDict(batch_size=[B])`` of per-graph scalars.
 
@@ -290,8 +290,8 @@ class LoggingHook:
             The current batch of atomic data.
         step_count : int
             The current step number.
-        ctx : HookContext | None
-            The hook context (for custom_scalars that need it).
+        ctx : HookContext
+            The hook context (required for custom_scalars).
         """
         dev = batch.device
         num_graphs = batch.num_graphs
