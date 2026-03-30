@@ -292,39 +292,60 @@ class AtomicData(BaseModel, DataMixin):
     ] = None
 
     info: dict[str, torch.Tensor] = Field(default_factory=dict)
-    __node_keys__: set[str] = {
-        "atomic_masses",
-        "positions",
-        "forces",
-        "positions",
-        "node_charges",
-        "node_embeddings",
-        "atomic_numbers",
-        "node_attrs",
-        "node_alpha_spins",
-        "node_beta_spins",
-        "atom_categories",
-        "velocities",
-        "momenta",
-        "kinetic_energies",
-    }
-    __edge_keys__: set[str] = {"shifts", "unit_shifts", "edge_index", "edge_embeddings"}
-    __system_keys__: set[str] = {
-        "energies",
-        "stresses",
-        "virials",
-        "dipoles",
-        "graph_charges",
-        "graph_embeddings",
-        "cell",
-        "pbc",
-        "graph_spins",
-    }
+    _default_node_keys: ClassVar[frozenset[str]] = frozenset(
+        {
+            "atomic_masses",
+            "positions",
+            "forces",
+            "node_charges",
+            "node_embeddings",
+            "atomic_numbers",
+            "node_attrs",
+            "node_alpha_spins",
+            "node_beta_spins",
+            "atom_categories",
+            "velocities",
+            "momenta",
+            "kinetic_energies",
+        }
+    )
+    _default_edge_keys: ClassVar[frozenset[str]] = frozenset(
+        {"shifts", "unit_shifts", "edge_index", "edge_embeddings"}
+    )
+    _default_system_keys: ClassVar[frozenset[str]] = frozenset(
+        {
+            "energies",
+            "stresses",
+            "virials",
+            "dipoles",
+            "graph_charges",
+            "graph_embeddings",
+            "cell",
+            "pbc",
+            "graph_spins",
+        }
+    )
 
     # Pydantic configuration
     model_config: ClassVar[ConfigDict] = ConfigDict(
         arbitrary_types_allowed=True, validate_assignment=True, extra="allow"
     )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Create per-instance mutable copies of the key sets.
+
+        The class-level defaults are frozen to prevent accidental mutation.
+        Each instance gets its own mutable set so that ``add_node_property``
+        and friends only affect the instance they are called on.
+
+        Uses ``model_post_init`` rather than ``model_validator`` because
+        ``validate_assignment=True`` causes model validators to re-run on
+        every ``setattr`` call, which would reset the key sets and lose
+        previously added custom keys.
+        """
+        object.__setattr__(self, "__node_keys__", set(self._default_node_keys))
+        object.__setattr__(self, "__edge_keys__", set(self._default_edge_keys))
+        object.__setattr__(self, "__system_keys__", set(self._default_system_keys))
 
     @model_validator(mode="after")
     def check_node_consistency(self) -> AtomicData:
@@ -344,8 +365,8 @@ class AtomicData(BaseModel, DataMixin):
             If any node-level property has an inconsistent number of nodes.
         """
         num_atoms = len(self.atomic_numbers)
-
-        for key in self.__node_keys__:
+        node_keys = self.__dict__.get("__node_keys__", self._default_node_keys)
+        for key in node_keys:
             tensor = getattr(self, key, None)
             if isinstance(tensor, torch.Tensor):
                 if tensor.size(0) != num_atoms:
@@ -376,7 +397,8 @@ class AtomicData(BaseModel, DataMixin):
             return self
         num_edges = self.edge_index.size(0)
 
-        for key in self.__edge_keys__:
+        edge_keys = self.__dict__.get("__edge_keys__", self._default_edge_keys)
+        for key in edge_keys:
             tensor = getattr(self, key, None)
             if isinstance(tensor, torch.Tensor):
                 if tensor.size(0) != num_edges:
