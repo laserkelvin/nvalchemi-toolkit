@@ -204,18 +204,21 @@ print(
     f"-> {OUTPUT_DIR}/cu111_co_initial.xyz"
 )
 
-data_list_fused = [atoms_to_data(sys) for sys in adsorbate_systems]
+# Mark slab atoms for freezing using ASE tags.
+# tag 0 = adsorbate (CO), tag >= 1 = slab (Cu) -> SPECIAL so FreezeAtomsHook freezes them.
+data_list_fused = []
+for sys in adsorbate_systems:
+    data = atoms_to_data(sys)
+    tags = torch.tensor(sys.get_tags())
+    data.atom_categories = torch.where(
+        tags > 0, AtomCategory.SPECIAL.value, AtomCategory.GAS.value
+    )
+    data_list_fused.append(data)
+
 batch_fused = Batch.from_data_list(data_list_fused)
 
-# Mark slab atoms for freezing.  ``from_atoms`` maps ASE tags to
-# AtomCategory: tag 0 (adsorbate) -> GAS, tag 1 -> SURFACE, tag >= 2 -> BULK.
-# Override SURFACE and BULK to SPECIAL so FreezeAtomsHook freezes them.
-cats = batch_fused.atom_categories
-slab_mask = cats != AtomCategory.GAS.value
-cats[slab_mask] = AtomCategory.SPECIAL.value
-
-n_frozen = int(slab_mask.sum().item())
-n_free = int((~slab_mask).sum().item())
+n_frozen = int((batch_fused.atom_categories == AtomCategory.SPECIAL.value).sum().item())
+n_free = int((batch_fused.atom_categories == AtomCategory.GAS.value).sum().item())
 print(f"  Frozen (slab): {n_frozen} atoms, Free (adsorbate): {n_free} atoms")
 
 # All systems start in the FIRE stage (status = 0).
