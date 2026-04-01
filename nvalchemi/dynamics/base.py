@@ -3124,6 +3124,35 @@ class FusedStage(BaseDynamics):
         finally:
             self._close_hooks()
 
+    def refill_check(self, batch: Batch, exit_status: int) -> Batch | None:
+        """Replace graduated samples and clear stale convergence indices.
+
+        Delegates to the parent :meth:`BaseDynamics.refill_check` to remove
+        graduated graphs and append replacements from the sampler.  When the
+        batch composition changes, ``_last_converged`` is cleared on this
+        ``FusedStage`` and all its sub-stages so that subsequent hooks do not
+        receive an invalid ``converged_mask``.
+
+        Parameters
+        ----------
+        batch : Batch
+            The current batch with a ``status`` field.
+        exit_status : int
+            Status code indicating graduation.
+
+        Returns
+        -------
+        Batch | None
+            A new batch with graduated graphs replaced by fresh samples,
+            or ``None`` if no active samples remain.
+        """
+        result = super().refill_check(batch, exit_status)
+        # Clear stale convergence indices since the batch configuration has changed
+        self._last_converged = None
+        for _, dynamics in self.sub_stages:
+            dynamics._last_converged = None
+        return result
+
     def __add__(self, other: BaseDynamics) -> FusedStage:
         """Append a sub-stage to this fused stage via ``fused + dyn``.
 
