@@ -34,7 +34,7 @@ def _minimal_atomic_data(
     atomic_numbers = torch.ones(num_nodes, dtype=torch.long, device=device)
     kwargs: dict = {"positions": positions, "atomic_numbers": atomic_numbers}
     if num_edges > 0:
-        edge_index = torch.zeros(2, num_edges, dtype=torch.long, device=device)
+        edge_index = torch.zeros(num_edges, 2, dtype=torch.long, device=device)
         kwargs["edge_index"] = edge_index
     return AtomicData(**kwargs)
 
@@ -60,7 +60,7 @@ def _atomic_data_with_edges_and_system(
     return AtomicData(
         positions=torch.randn(num_nodes, 3, device=device),
         atomic_numbers=torch.ones(num_nodes, dtype=torch.long, device=device),
-        edge_index=torch.zeros(2, num_edges, dtype=torch.long, device=device),
+        edge_index=torch.zeros(num_edges, 2, dtype=torch.long, device=device),
         energies=torch.tensor([[0.0]], device=device),
     )
 
@@ -296,13 +296,14 @@ class TestBatchReconstruction:
 class TestBatchIndexing:
     """Tests for index_select and __getitem__ with indices."""
 
-    def test_index_select_slice(self):
+    def test_index_select_slice(self, device):
         batch = Batch.from_data_list(
             [
                 _minimal_atomic_data(2),
                 _minimal_atomic_data(3),
                 _minimal_atomic_data(4),
-            ]
+            ],
+            device=device,
         )
         sub = batch[1:3]
         assert isinstance(sub, Batch)
@@ -310,35 +311,38 @@ class TestBatchIndexing:
         assert sub.num_nodes_list == [3, 4]
         assert sub.num_nodes == 7
 
-    def test_index_select_int(self):
+    def test_index_select_int(self, device):
         batch = Batch.from_data_list(
             [
                 _minimal_atomic_data(2),
                 _minimal_atomic_data(3),
-            ]
+            ],
+            device=device,
         )
         one = batch[1]
         assert isinstance(one, AtomicData)
         assert one.num_nodes == 3
 
-    def test_index_select_tensor(self):
+    def test_index_select_tensor(self, device):
         batch = Batch.from_data_list(
             [
                 _minimal_atomic_data(2),
                 _minimal_atomic_data(3),
                 _minimal_atomic_data(4),
-            ]
+            ],
+            device=device,
         )
-        sub = batch[torch.tensor([0, 2])]
+        sub = batch[torch.tensor([0, 2], device=device)]
         assert sub.num_graphs == 2
         assert sub.num_nodes_list == [2, 4]
 
-    def test_index_select_list(self):
+    def test_index_select_list(self, device):
         batch = Batch.from_data_list(
             [
                 _minimal_atomic_data(2),
                 _minimal_atomic_data(3),
-            ]
+            ],
+            device=device,
         )
         sub = batch[[1, 0]]
         assert sub.num_graphs == 2
@@ -483,6 +487,41 @@ class TestBatchMutation:
         with pytest.raises(ValueError, match="Group 'edges' not found"):
             batch.add_key("edge_attr", [torch.randn(1, 4)], level="edge")
 
+    def test_append_preserves_other_edge_index(self):
+        """append() must not mutate the other batch's edge_index."""
+        b1 = Batch.from_data_list(
+            [_atomic_data_with_edges_and_system(num_nodes=2, num_edges=3)]
+        )
+        b2 = Batch.from_data_list(
+            [_atomic_data_with_edges_and_system(num_nodes=3, num_edges=2)]
+        )
+        ei_before = b2["edge_index"].clone()
+        b1.append(b2)
+        assert torch.equal(b2["edge_index"], ei_before), (
+            "append() mutated other batch's edge_index"
+        )
+        # Verify result is structurally correct.
+        assert b1.num_graphs == 2
+        assert b1.num_nodes_list == [2, 3]
+        assert b1.num_edges_list == [3, 2]
+
+    def test_append_self_raises(self):
+        """Appending a batch to itself must raise ValueError."""
+        batch = Batch.from_data_list(
+            [_atomic_data_with_edges_and_system(num_nodes=2, num_edges=2)]
+        )
+        with pytest.raises(ValueError, match="shares storage"):
+            batch.append(batch)
+
+    def test_append_shared_storage_raises(self):
+        """Appending a batch that shares the same storage must raise ValueError."""
+        batch = Batch.from_data_list(
+            [_atomic_data_with_edges_and_system(num_nodes=2, num_edges=2)]
+        )
+        alias = Batch(device=batch.device, storage=batch._storage)
+        with pytest.raises(ValueError, match="shares storage"):
+            batch.append(alias)
+
 
 # -----------------------------------------------------------------------------
 # Round-trip: added keys appear correctly in to_data_list()
@@ -545,6 +584,97 @@ class TestBatchRoundTripAddedKeys:
                 torch.as_tensor(single.temperature),
                 torch.as_tensor(data_list_out[i].temperature),
             )
+
+    def test_dynamic_system_key_survives_full_round_trip(self) -> None:
+        """Dynamically-added system properties (e.g. system_id) must survive
+        the full HostMemory-style round-trip:
+        from_data_list → index_select → to_data_list → .to(cpu) → from_data_list.
+
+        Regression test for the crash in examples/intermediate/04_inflight_batching.py.
+        """
+        d1 = AtomicData(
+            positions=torch.randn(3, 3),
+            atomic_numbers=torch.tensor([6, 6, 6]),
+        )
+        d1.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
+
+        d2 = AtomicData(
+            positions=torch.randn(5, 3),
+            atomic_numbers=torch.tensor([8, 8, 8, 8, 8]),
+        )
+        d2.add_system_property("system_id", torch.tensor([[1]], dtype=torch.long))
+
+        batch = Batch.from_data_list([d1, d2])
+        assert hasattr(batch, "system_id")
+        assert batch.system_id.shape == (2, 1)
+
+        # index_select → to_data_list (what ConvergedSnapshotHook does)
+        sub = batch.index_select([0])
+        data_list = sub.to_data_list()
+        assert "system_id" in data_list[0].__system_keys__
+
+        # .to(cpu) (what HostMemory.write does)
+        cpu_data = [d.to(torch.device("cpu")) for d in data_list]
+        assert "system_id" in cpu_data[0].__system_keys__
+
+        # from_data_list (what HostMemory.read / drain does)
+        result = Batch.from_data_list(cpu_data)
+        assert hasattr(result, "system_id")
+        assert result.system_id.squeeze(-1).tolist() == [0]
+
+    def test_clone_preserves_custom_keys(self) -> None:
+        """AtomicData.clone() must preserve dynamically-added key sets."""
+        data = AtomicData(
+            positions=torch.randn(3, 3),
+            atomic_numbers=torch.tensor([6, 6, 6]),
+        )
+        data.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
+
+        cloned = data.clone()
+
+        # Key set metadata is preserved
+        assert "system_id" in cloned.__system_keys__
+        # Value is preserved and independent
+        assert torch.equal(cloned.system_id, data.system_id)
+        assert cloned.system_id is not data.system_id
+        # Key sets are independent copies (mutating one doesn't affect the other)
+        assert cloned.__system_keys__ is not data.__system_keys__
+
+    def test_model_copy_preserves_custom_keys(self) -> None:
+        """AtomicData.model_copy(deep=True) must preserve dynamically-added key sets."""
+        data = AtomicData(
+            positions=torch.randn(3, 3),
+            atomic_numbers=torch.tensor([6, 6, 6]),
+        )
+        data.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
+
+        copied = data.model_copy(deep=True)
+
+        # Key set metadata is preserved
+        assert "system_id" in copied.__system_keys__
+        # Value is preserved
+        assert torch.equal(copied.system_id, data.system_id)
+
+    def test_batch_clone_preserves_custom_keys(self) -> None:
+        """Batch.clone() must preserve dynamically-added keys."""
+        d1 = AtomicData(
+            positions=torch.randn(3, 3),
+            atomic_numbers=torch.tensor([6, 6, 6]),
+        )
+        d1.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
+
+        d2 = AtomicData(
+            positions=torch.randn(5, 3),
+            atomic_numbers=torch.tensor([8, 8, 8, 8, 8]),
+        )
+        d2.add_system_property("system_id", torch.tensor([[1]], dtype=torch.long))
+
+        batch = Batch.from_data_list([d1, d2])
+        cloned = batch.clone()
+
+        assert hasattr(cloned, "system_id")
+        assert torch.equal(cloned.system_id, batch.system_id)
+        assert cloned.system_id is not batch.system_id
 
 
 # -----------------------------------------------------------------------------

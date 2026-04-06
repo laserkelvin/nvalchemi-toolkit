@@ -60,7 +60,8 @@ from nvalchemi.dynamics._ops.velocity_verlet import vv_velocity_finalize
 from nvalchemi.dynamics.base import BaseDynamics
 
 if TYPE_CHECKING:
-    from nvalchemi.dynamics.base import ConvergenceHook, Hook
+    from nvalchemi.dynamics.base import ConvergenceHook
+    from nvalchemi.hooks import Hook
     from nvalchemi.models.base import BaseModelMixin
 
 __all__ = ["FIRE", "FIREVariableCell"]
@@ -459,9 +460,9 @@ class FIREVariableCell(BaseDynamics):
             Current batch; *positions*, *velocities*, and *cell*
             updated in-place.
         """
-        cells_inv = torch.linalg.inv(batch.cell)
+        cells_inv = torch.linalg.inv_ex(batch.cell)[0].contiguous()
         volumes = torch.linalg.det(batch.cell).abs()
-        num_atoms = torch.bincount(batch.batch.long(), minlength=batch.num_graphs).to(
+        num_atoms = torch.bincount(batch.batch, minlength=batch.num_graphs).to(
             dtype=torch.int32, device=batch.device
         )
         nph_velocity_half_step(

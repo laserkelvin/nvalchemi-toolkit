@@ -57,7 +57,8 @@ from nvalchemi.dynamics.base import BaseDynamics
 from nvalchemi.dynamics.hooks._utils import KB_EV
 
 if TYPE_CHECKING:
-    from nvalchemi.dynamics.base import ConvergenceHook, Hook
+    from nvalchemi.dynamics.base import ConvergenceHook
+    from nvalchemi.hooks import Hook
     from nvalchemi.models.base import BaseModelMixin
 
 __all__ = ["NPT"]
@@ -153,7 +154,7 @@ class NPT(BaseDynamics):
         pressure = _to_per_system(self._pressure_init, M, dev, dtype)
         tau_p = _to_per_system(self._barostat_time_init, M, dev, dtype)
         tau_t = _to_per_system(self._thermostat_time_init, M, dev, dtype)
-        counts = torch.bincount(batch.batch.long(), minlength=M)
+        counts = torch.bincount(batch.batch, minlength=M)
         num_atoms_per_system = counts.to(dtype=torch.int32, device=dev)
         W = torch.zeros(M, dtype=dtype, device=dev)
         compute_barostat_mass(kT, tau_p, num_atoms_per_system, W)
@@ -260,7 +261,7 @@ class NPT(BaseDynamics):
         return compute_pressure_tensor(
             batch.velocities,
             batch.atomic_masses,
-            batch.stress,
+            batch.stresses,
             batch.cell,
             self._state.kinetic_tensors,
             self._state.pressure_tensors,
@@ -289,7 +290,7 @@ class NPT(BaseDynamics):
         """
         M = batch.num_graphs
         volumes = self._compute_volumes(batch)
-        cells_inv = torch.linalg.inv(batch.cell)
+        cells_inv = torch.linalg.inv_ex(batch.cell)[0].contiguous()
         KE = self._compute_ke(batch)
 
         # Particle thermostat half step.
@@ -377,7 +378,7 @@ class NPT(BaseDynamics):
         """
         M = batch.num_graphs
         volumes = self._compute_volumes(batch)
-        cells_inv = torch.linalg.inv(batch.cell)
+        cells_inv = torch.linalg.inv_ex(batch.cell)[0].contiguous()
         KE = self._compute_ke(batch)
 
         npt_velocity_half_step(

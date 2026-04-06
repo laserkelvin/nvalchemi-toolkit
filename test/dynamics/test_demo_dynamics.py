@@ -34,8 +34,8 @@ from nvalchemi.dynamics.base import (
     BaseDynamics,
     ConvergenceHook,
     DistributedPipeline,
+    DynamicsStage,
     FusedStage,
-    HookStageEnum,
 )
 from nvalchemi.dynamics.demo import DemoDynamics
 from nvalchemi.models.demo import DemoModelWrapper
@@ -125,6 +125,23 @@ class TestFirstStep:
         dynamics = DemoDynamics(model=model, n_steps=1, dt=1.0)
 
         batch = _make_batch()
+        dynamics.step(batch)
+
+        assert dynamics.step_count == 1
+
+    @pytest.mark.parametrize("int_dtype", [torch.int32, torch.int64])
+    def test_first_step_with_int_dtypes(self, device, int_dtype: torch.dtype) -> None:
+        """Dynamics step works with both int32 and int64 atomic_numbers."""
+        model = DemoModelWrapper().to(device)
+        dynamics = DemoDynamics(model=model, n_steps=1, dt=1.0)
+
+        data = AtomicData(
+            atomic_numbers=torch.tensor([6, 6, 6], dtype=int_dtype),
+            positions=torch.zeros(3, 3),
+        )
+        batch = Batch.from_data_list([data]).to(device)
+        batch.forces = torch.zeros(3, 3, device=device)
+        batch.energies = torch.zeros(1, 1, device=device)
         dynamics.step(batch)
 
         assert dynamics.step_count == 1
@@ -245,14 +262,14 @@ class TestInterfaceContract:
 
         record_list: list[str] = []
         stages = [
-            HookStageEnum.BEFORE_STEP,
-            HookStageEnum.BEFORE_PRE_UPDATE,
-            HookStageEnum.AFTER_PRE_UPDATE,
-            HookStageEnum.BEFORE_COMPUTE,
-            HookStageEnum.AFTER_COMPUTE,
-            HookStageEnum.BEFORE_POST_UPDATE,
-            HookStageEnum.AFTER_POST_UPDATE,
-            HookStageEnum.AFTER_STEP,
+            DynamicsStage.BEFORE_STEP,
+            DynamicsStage.BEFORE_PRE_UPDATE,
+            DynamicsStage.AFTER_PRE_UPDATE,
+            DynamicsStage.BEFORE_COMPUTE,
+            DynamicsStage.AFTER_COMPUTE,
+            DynamicsStage.BEFORE_POST_UPDATE,
+            DynamicsStage.AFTER_POST_UPDATE,
+            DynamicsStage.AFTER_STEP,
         ]
         for stage in stages:
             dynamics.register_hook(
@@ -507,7 +524,7 @@ class TestConvergenceHookParam:
 
         assert dynamics.convergence_hook is hook
         assert len(dynamics.convergence_hook.criteria) == 1
-        assert dynamics.convergence_hook.criteria[0].key == "fmax"
+        assert dynamics.convergence_hook.criteria[0].key == "forces"
         assert dynamics.convergence_hook.criteria[0].threshold == 0.05
 
     def test_convergence_hook_from_dict(self) -> None:

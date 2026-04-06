@@ -52,6 +52,11 @@ from nvalchemi.data.level_storage import (
     UniformLevelStorage,
 )
 
+# Edge-level keys whose values are node indices and therefore need
+# cumulative node-offset correction when batching (from_data_list) and
+# the reverse correction when extracting a single graph (get_data).
+# This set does NOT control concatenation dimension or shape semantics;
+# all edge tensors are stored as (E, ...) and concatenated on dim 0.
 _INDEX_KEYS = frozenset({"edge_index"})
 _EXCLUDED_KEYS = frozenset({"batch", "ptr", "device", "dtype", "info"})
 
@@ -166,7 +171,7 @@ class Batch(DataMixin):
         atoms = self._atoms_group
         if atoms is None:
             return torch.tensor([], dtype=torch.long, device=self.device)
-        return atoms.batch_idx.long()
+        return atoms.batch_idx
 
     @property
     def ptr(self) -> Tensor:
@@ -193,10 +198,9 @@ class Batch(DataMixin):
         if edges is None or edges.num_elements() == 0:
             N = self.num_nodes
             return torch.zeros(N + 1, dtype=torch.int32, device=self.device)
-        # edge_index is stored as (E, 2); column 0 holds the sender (source) indices.
         ei = edges["edge_index"]  # (E, 2)
         N = self.num_nodes
-        src = ei[:, 0].long()  # (E,)
+        src = ei[:, 0]  # (E,)
         counts = torch.zeros(N, dtype=torch.int32, device=self.device)
         counts.scatter_add_(
             0, src, torch.ones(src.shape[0], dtype=torch.int32, device=self.device)
@@ -227,7 +231,7 @@ class Batch(DataMixin):
         atoms = self._atoms_group
         if atoms is None:
             return torch.tensor([], dtype=torch.long, device=self.device)
-        return atoms.segment_lengths[: len(atoms)].long()
+        return atoms.segment_lengths[: len(atoms)]
 
     @property
     def num_edges_per_graph(self) -> Tensor:
@@ -235,7 +239,7 @@ class Batch(DataMixin):
         edges = self._edges_group
         if edges is None:
             return torch.tensor([], dtype=torch.long, device=self.device)
-        return edges.segment_lengths[: len(edges)].long()
+        return edges.segment_lengths[: len(edges)]
 
     @property
     def max_num_nodes(self) -> int:
@@ -303,10 +307,11 @@ class Batch(DataMixin):
         if attr_map is None:
             attr_map = LevelSchema()
 
-        data_cls = data_list[0].__class__
-        node_keys = data_cls.__node_keys__
-        edge_keys = data_cls.__edge_keys__
-        system_keys = data_cls.__system_keys__
+        representative = data_list[0]
+        data_cls = representative.__class__
+        node_keys = representative.__node_keys__
+        edge_keys = representative.__edge_keys__
+        system_keys = representative.__system_keys__
 
         excluded = _EXCLUDED_KEYS | set(exclude_keys or [])
         actual_keys = set(data_list[0].model_dump(exclude_none=True).keys()) - excluded
@@ -344,10 +349,7 @@ class Batch(DataMixin):
         atoms_data = {k: torch.cat(v, dim=0) for k, v in node_tensors.items()}
         edges_data: dict[str, Tensor] = {}
         for k, v in edge_tensors.items():
-            cat_dim = -1 if k in _INDEX_KEYS else 0
-            edges_data[k] = torch.cat(v, dim=cat_dim)
-            if k in _INDEX_KEYS:
-                edges_data[k] = edges_data[k].transpose(0, 1)
+            edges_data[k] = torch.cat(v, dim=0)
         system_data = {k: torch.cat(v, dim=0) for k, v in system_tensors.items()}
 
         validate = not skip_validation
@@ -600,9 +602,7 @@ class Batch(DataMixin):
             node_offset = atoms._batch_ptr[idx] if atoms is not None else 0
             for key, tensor in edges.items():
                 if key in _INDEX_KEYS:
-                    data[key] = (
-                        tensor[edge_start:edge_end].transpose(0, 1) - node_offset
-                    )
+                    data[key] = tensor[edge_start:edge_end] - node_offset
                 else:
                     data[key] = tensor[edge_start:edge_end]
 
@@ -610,6 +610,15 @@ class Batch(DataMixin):
         if system is not None:
             for key, tensor in system.items():
                 data[key] = tensor[idx].unsqueeze(0)
+
+        # Pass storage-group key sets so dynamically-added keys
+        # (e.g. system_id) survive the round-trip through model_post_init.
+        if atoms is not None:
+            data["__node_keys__"] = set(atoms.keys())
+        if edges is not None and edges.num_elements() > 0:
+            data["__edge_keys__"] = set(edges.keys())
+        if system is not None:
+            data["__system_keys__"] = set(system.keys())
 
         return self._data_class(**data)
 
@@ -666,7 +675,7 @@ class Batch(DataMixin):
                 new_edges._lazy_init_batch_ptr()
                 ei = new_edges["edge_index"]
                 edge_batch_idx = new_edges.batch_idx
-                correction = offset_diff[edge_batch_idx.long()]
+                correction = offset_diff[edge_batch_idx]
                 new_edges._data["edge_index"] = ei - correction.unsqueeze(1)
             new_groups["edges"] = new_edges
 
@@ -958,17 +967,25 @@ class Batch(DataMixin):
         Parameters
         ----------
         other : Batch
-            Batch to append.
+            Batch to append.  Must not share storage with *self* —
+            use ``batch.append(batch.clone())`` to double a batch.
         """
+        if other is self or other._storage is self._storage:
+            raise ValueError(
+                "Cannot append a Batch that shares storage with the "
+                "receiver (would corrupt both).  Use "
+                "batch.append(batch.clone()) instead."
+            )
+
         atoms = self._atoms_group
         other_atoms = other._atoms_group
+        saved_ei = None
         if atoms is not None and other_atoms is not None:
             total_nodes = atoms.num_elements()
             other_edges = other._edges_group
             if other_edges is not None and "edge_index" in other_edges:
-                other_edges._data["edge_index"] = (
-                    other_edges["edge_index"] + total_nodes
-                )
+                saved_ei = other_edges._data["edge_index"]
+                other_edges._data["edge_index"] = saved_ei + total_nodes
 
         n_other = other.num_graphs
         for group_name, group in self._storage.groups.items():
@@ -977,6 +994,10 @@ class Batch(DataMixin):
                 group.concatenate(other_group)
             else:
                 group.extend_for_appended_graphs(n_other)
+
+        # Restore other's edge_index to avoid mutating the input batch.
+        if saved_ei is not None:
+            other_edges._data["edge_index"] = saved_ei
 
     def append_data(
         self,

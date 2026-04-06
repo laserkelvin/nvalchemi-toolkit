@@ -51,7 +51,8 @@ from nvalchemi.dynamics.base import BaseDynamics
 from nvalchemi.dynamics.hooks._utils import KB_EV
 
 if TYPE_CHECKING:
-    from nvalchemi.dynamics.base import ConvergenceHook, Hook
+    from nvalchemi.dynamics.base import ConvergenceHook
+    from nvalchemi.hooks import Hook
     from nvalchemi.models.base import BaseModelMixin
 
 __all__ = ["NPH"]
@@ -130,7 +131,7 @@ class NPH(BaseDynamics):
         dt = _to_per_system(self._dt_init, M, dev, dtype)
         pressure = _to_per_system(self._pressure_init, M, dev, dtype)
         barostat_time = _to_per_system(self._barostat_time_init, M, dev, dtype)
-        counts = torch.bincount(batch.batch.long(), minlength=M)
+        counts = torch.bincount(batch.batch, minlength=M)
         num_atoms_per_system = counts.to(dtype=torch.int32, device=dev)
         # Use a representative kT estimate for W; NPH temperature is not
         # controlled, so we use 300 K → kT as a sensible default.
@@ -191,7 +192,7 @@ class NPH(BaseDynamics):
         return compute_pressure_tensor(
             batch.velocities,
             batch.atomic_masses,
-            batch.stress,
+            batch.stresses,
             batch.cell,
             self._state.kinetic_tensors,
             self._state.pressure_tensors,
@@ -220,7 +221,7 @@ class NPH(BaseDynamics):
         """
         volumes = self._compute_volumes(batch)
         # Compute cells_inv for velocity and position updates.
-        cells_inv = torch.linalg.inv(batch.cell)
+        cells_inv = torch.linalg.inv_ex(batch.cell)[0].contiguous()
         KE = self._compute_ke(batch)
         P_inst = self._compute_P(batch, volumes)
         nph_barostat_half_step(
@@ -268,7 +269,7 @@ class NPH(BaseDynamics):
             Current batch; *velocities* updated in-place.
         """
         volumes = self._compute_volumes(batch)
-        cells_inv = torch.linalg.inv(batch.cell)
+        cells_inv = torch.linalg.inv_ex(batch.cell)[0].contiguous()
         KE = self._compute_ke(batch)
         nph_velocity_half_step(
             batch.velocities,

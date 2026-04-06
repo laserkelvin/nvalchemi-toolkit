@@ -54,7 +54,8 @@ from nvalchemi.dynamics._ops.npt_nph import stress_to_cell_force
 from nvalchemi.dynamics.base import BaseDynamics
 
 if TYPE_CHECKING:
-    from nvalchemi.dynamics.base import ConvergenceHook, Hook
+    from nvalchemi.dynamics.base import ConvergenceHook
+    from nvalchemi.hooks import Hook
     from nvalchemi.models.base import BaseModelMixin
 
 __all__ = ["FIRE2", "FIRE2VariableCell"]
@@ -337,10 +338,10 @@ class FIRE2VariableCell(BaseDynamics):
             updated in-place.
         """
         volumes = torch.linalg.det(batch.cell).abs()
-        # batch.stress is the raw virial W_phys (energy units, eV).
+        # batch.stresses is the raw virial W_phys (energy units, eV).
         # stress_to_cell_force expects the mechanical stress σ = W_phys / V
         # (energy/volume units), so divide by volume here.
-        stress_sigma = batch.stress / volumes.view(-1, 1, 1)
+        stress_sigma = batch.stresses / volumes.view(-1, 1, 1)
         cell_force = stress_to_cell_force(stress_sigma, batch.cell, volumes)
         fire2_step_coord_cell(
             batch.positions,

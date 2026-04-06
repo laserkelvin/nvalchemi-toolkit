@@ -39,6 +39,7 @@ from nvalchemi.data.datapipes.backends.zarr import (
     ZarrWriteConfig,
     _get_cat_dim,
     _get_field_level,
+    _slice_edge_array,
 )
 from nvalchemi.data.datapipes.dataset import _PrefetchResult
 
@@ -69,7 +70,8 @@ def _make_atomic_data(num_atoms: int, num_edges: int) -> AtomicData:
             [
                 torch.randint(0, num_atoms, (num_edges,)),
                 torch.randint(0, num_atoms, (num_edges,)),
-            ]
+            ],
+            dim=1,
         ),
         shifts=torch.randn(num_edges, 3),
     )
@@ -99,7 +101,7 @@ class TestAtomicDataZarrWriter:
 
         # Compute expected pointer values from each data item
         atom_counts = [d.atomic_numbers.shape[0] for d in data_list]
-        edge_counts = [d.edge_index.shape[1] for d in data_list]
+        edge_counts = [d.edge_index.shape[0] for d in data_list]
         total_atoms = sum(atom_counts)
         total_edges = sum(edge_counts)
 
@@ -120,7 +122,7 @@ class TestAtomicDataZarrWriter:
         # Check total sizes
         assert root["core"]["atomic_numbers"].shape == (total_atoms,)
         assert root["core"]["positions"].shape == (total_atoms, 3)
-        assert root["core"]["edge_index"].shape == (2, total_edges)
+        assert root["core"]["edge_index"].shape == (total_edges, 2)
         assert root["core"]["shifts"].shape == (total_edges, 3)
 
         # Check system-level fields
@@ -145,7 +147,7 @@ class TestAtomicDataZarrWriter:
 
         # Compute expected pointer values from original data_list
         atom_counts = [d.atomic_numbers.shape[0] for d in data_list]
-        edge_counts = [d.edge_index.shape[1] for d in data_list]
+        edge_counts = [d.edge_index.shape[0] for d in data_list]
 
         expected_atoms_ptr = [0]
         expected_edges_ptr = [0]
@@ -177,9 +179,9 @@ class TestAtomicDataZarrWriter:
 
         # Get atom/edge counts from the two items
         na1 = data_list[0].atomic_numbers.shape[0]
-        ne1 = data_list[0].edge_index.shape[1]
+        ne1 = data_list[0].edge_index.shape[0]
         na2 = data_list[1].atomic_numbers.shape[0]
-        ne2 = data_list[1].edge_index.shape[1]
+        ne2 = data_list[1].edge_index.shape[0]
 
         # Check pointer arrays
         total_atoms = na1 + na2
@@ -192,7 +194,7 @@ class TestAtomicDataZarrWriter:
 
         # Check total sizes
         assert root["core"]["atomic_numbers"].shape == (total_atoms,)
-        assert root["core"]["edge_index"].shape == (2, total_edges)
+        assert root["core"]["edge_index"].shape == (total_edges, 2)
 
         # Check masks
         assert root["meta"]["samples_mask"].shape == (2,)
@@ -211,7 +213,7 @@ class TestAtomicDataZarrWriter:
 
         # Compute total atoms/edges from data
         total_atoms = sum(d.atomic_numbers.shape[0] for d in data_list)
-        total_edges = sum(d.edge_index.shape[1] for d in data_list)
+        total_edges = sum(d.edge_index.shape[0] for d in data_list)
         actual_num_samples = len(data_list)
 
         # Add custom atom-level array
@@ -267,7 +269,7 @@ class TestAtomicDataZarrWriter:
 
         # Compute expected pointers from data_list
         atom_counts = [d.atomic_numbers.shape[0] for d in data_list]
-        edge_counts = [d.edge_index.shape[1] for d in data_list]
+        edge_counts = [d.edge_index.shape[0] for d in data_list]
         expected_atoms_ptr = [0]
         expected_edges_ptr = [0]
         for ac in atom_counts:
@@ -299,7 +301,7 @@ class TestAtomicDataZarrWriter:
 
         # Get atom/edge counts from first sample
         na1 = data_list[0].atomic_numbers.shape[0]
-        ne1 = data_list[0].edge_index.shape[1]
+        ne1 = data_list[0].edge_index.shape[0]
 
         # Check atoms_mask: first na1 atoms should be False
         atoms_mask = root["meta"]["atoms_mask"][:]
@@ -334,7 +336,7 @@ class TestAtomicDataZarrWriter:
         # Samples 0 and 2+ remain (all except index 1)
         remaining_data = [data_list[i] for i in range(len(data_list)) if i != 1]
         remaining_atoms = sum(d.atomic_numbers.shape[0] for d in remaining_data)
-        remaining_edges = sum(d.edge_index.shape[1] for d in remaining_data)
+        remaining_edges = sum(d.edge_index.shape[0] for d in remaining_data)
 
         # Build expected pointer arrays
         expected_atoms_ptr = [0]
@@ -343,7 +345,7 @@ class TestAtomicDataZarrWriter:
             expected_atoms_ptr.append(
                 expected_atoms_ptr[-1] + d.atomic_numbers.shape[0]
             )
-            expected_edges_ptr.append(expected_edges_ptr[-1] + d.edge_index.shape[1])
+            expected_edges_ptr.append(expected_edges_ptr[-1] + d.edge_index.shape[0])
 
         atoms_ptr = root["meta"]["atoms_ptr"][:]
         edges_ptr = root["meta"]["edges_ptr"][:]
@@ -357,7 +359,7 @@ class TestAtomicDataZarrWriter:
 
         # Check total sizes match remaining samples
         assert root["core"]["atomic_numbers"].shape == (remaining_atoms,)
-        assert root["core"]["edge_index"].shape == (2, remaining_edges)
+        assert root["core"]["edge_index"].shape == (remaining_edges, 2)
 
     @pytest.mark.parametrize("num_samples", [1, 3, 5])
     def test_zattrs_metadata(self, num_samples: int, tmp_path: Path) -> None:
@@ -389,7 +391,7 @@ class TestAtomicDataZarrWriter:
 
     @pytest.mark.parametrize("num_samples", [1, 3, 5])
     def test_edge_index_cat_dim(self, num_samples: int, tmp_path: Path) -> None:
-        """Verify edge_index is stored with shape [2, E_total]."""
+        """Verify edge_index is stored with shape [E_total, 2]."""
         data_list = list(_data_generator(max(2, num_samples)))
 
         writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
@@ -397,12 +399,10 @@ class TestAtomicDataZarrWriter:
 
         root = zarr.open(tmp_path / "test.zarr", mode="r")
 
-        # Compute expected total edges from data_list
-        total_edges = sum(d.edge_index.shape[1] for d in data_list)
+        total_edges = sum(d.edge_index.shape[0] for d in data_list)
 
-        # edge_index should be [2, E_total] not [E_total, 2]
         edge_index = root["core"]["edge_index"]
-        assert edge_index.shape == (2, total_edges)
+        assert edge_index.shape == (total_edges, 2)
 
     @pytest.mark.parametrize("num_samples", [1, 3, 5])
     def test_append_multiple_times(self, num_samples: int, tmp_path: Path) -> None:
@@ -426,7 +426,7 @@ class TestAtomicDataZarrWriter:
             expected_atoms_ptr.append(
                 expected_atoms_ptr[-1] + d.atomic_numbers.shape[0]
             )
-            expected_edges_ptr.append(expected_edges_ptr[-1] + d.edge_index.shape[1])
+            expected_edges_ptr.append(expected_edges_ptr[-1] + d.edge_index.shape[0])
 
         assert root["meta"]["atoms_ptr"][:].tolist() == expected_atoms_ptr
         assert root["meta"]["edges_ptr"][:].tolist() == expected_edges_ptr
@@ -512,7 +512,7 @@ def test_writer_write_single(tmp_path: Path) -> None:
 
     # Get expected sizes from the data object
     num_atoms = data.atomic_numbers.shape[0]
-    num_edges = data.edge_index.shape[1]
+    num_edges = data.edge_index.shape[0]
 
     # Check pointer arrays
     atoms_ptr = root["meta"]["atoms_ptr"][:]
@@ -537,7 +537,7 @@ def test_writer_write_single(tmp_path: Path) -> None:
     # Check shapes
     assert root["core"]["atomic_numbers"].shape == (num_atoms,)
     assert root["core"]["positions"].shape == (num_atoms, 3)
-    assert root["core"]["edge_index"].shape == (2, num_edges)
+    assert root["core"]["edge_index"].shape == (num_edges, 2)
 
 
 def test_writer_write_raises_if_exists(tmp_path: Path) -> None:
@@ -649,7 +649,7 @@ def test_writer_optional_fields_only(tmp_path: Path) -> None:
     # Check that edge_index is not in core (since no edges)
     # Actually, edge_index might be None or empty - check shape
     if "edge_index" in root["core"]:
-        assert root["core"]["edge_index"].shape[1] == 0
+        assert root["core"]["edge_index"].shape[0] == 0
 
 
 def test_get_field_level() -> None:
@@ -674,7 +674,7 @@ def test_get_cat_dim() -> None:
     """
     assert _get_cat_dim("atomic_numbers") == 0
     assert _get_cat_dim("positions") == 0
-    assert _get_cat_dim("edge_index") == -1
+    assert _get_cat_dim("edge_index") == 0
     assert _get_cat_dim("face") == -1
     assert _get_cat_dim("some_face_attr") == -1
 
@@ -713,12 +713,12 @@ class TestAtomicDataZarrReader:
             for idx, original in enumerate(data_list):
                 sample = reader._load_sample(idx)
                 na = original.atomic_numbers.shape[0]
-                ne = original.edge_index.shape[1]
+                ne = original.edge_index.shape[0]
 
                 assert sample["atomic_numbers"].shape == (na,)
                 assert sample["positions"].shape == (na, 3)
                 assert sample["forces"].shape == (na, 3)
-                assert sample["edge_index"].shape == (2, ne)
+                assert sample["edge_index"].shape == (ne, 2)
                 assert sample["shifts"].shape == (ne, 3)
                 assert sample["energies"].shape == (1, 1)
                 assert sample["cell"].shape == (1, 3, 3)
@@ -752,10 +752,10 @@ class TestAtomicDataZarrReader:
             for idx, original in enumerate(data_list):
                 sample = reader._load_sample(idx)
                 na = original.atomic_numbers.shape[0]
-                ne = original.edge_index.shape[1]
+                ne = original.edge_index.shape[0]
 
                 assert sample["atomic_numbers"].shape == (na,)
-                assert sample["edge_index"].shape == (2, ne)
+                assert sample["edge_index"].shape == (ne, 2)
 
 
 def test_reader_skips_deleted(tmp_path: Path) -> None:
@@ -777,7 +777,8 @@ def test_reader_skips_deleted(tmp_path: Path) -> None:
             [
                 torch.randint(0, num_atoms, (num_edges,)),
                 torch.randint(0, num_atoms, (num_edges,)),
-            ]
+            ],
+            dim=1,
         ),
         shifts=torch.randn(num_edges, 3),
     )
@@ -790,7 +791,8 @@ def test_reader_skips_deleted(tmp_path: Path) -> None:
             [
                 torch.randint(0, num_atoms, (num_edges,)),
                 torch.randint(0, num_atoms, (num_edges,)),
-            ]
+            ],
+            dim=1,
         ),
         shifts=torch.randn(num_edges, 3),
     )
@@ -803,7 +805,8 @@ def test_reader_skips_deleted(tmp_path: Path) -> None:
             [
                 torch.randint(0, num_atoms, (num_edges,)),
                 torch.randint(0, num_atoms, (num_edges,)),
-            ]
+            ],
+            dim=1,
         ),
         shifts=torch.randn(num_edges, 3),
     )
@@ -835,7 +838,7 @@ def test_reader_loads_custom(tmp_path: Path) -> None:
     """
     data = next(_data_generator(1))
     num_atoms = data.atomic_numbers.shape[0]
-    num_edges = data.edge_index.shape[1]
+    num_edges = data.edge_index.shape[0]
 
     writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
     writer.write(data)
@@ -1338,7 +1341,8 @@ class TestDatasetPrefetch:
                 [
                     torch.randint(0, num_atoms, (num_edges,)),
                     torch.randint(0, num_atoms, (num_edges,)),
-                ]
+                ],
+                dim=1,
             ),
             shifts=torch.randn(num_edges, 3),
         )
@@ -1351,7 +1355,8 @@ class TestDatasetPrefetch:
                 [
                     torch.randint(0, num_atoms, (num_edges,)),
                     torch.randint(0, num_atoms, (num_edges,)),
-                ]
+                ],
+                dim=1,
             ),
             shifts=torch.randn(num_edges, 3),
         )
@@ -1364,7 +1369,8 @@ class TestDatasetPrefetch:
                 [
                     torch.randint(0, num_atoms, (num_edges,)),
                     torch.randint(0, num_atoms, (num_edges,)),
-                ]
+                ],
+                dim=1,
             ),
             shifts=torch.randn(num_edges, 3),
         )
@@ -1399,7 +1405,8 @@ class TestDatasetPrefetch:
                     [
                         torch.randint(0, num_atoms, (num_edges,)),
                         torch.randint(0, num_atoms, (num_edges,)),
-                    ]
+                    ],
+                    dim=1,
                 ),
                 shifts=torch.randn(num_edges, 3),
             )
@@ -1458,7 +1465,8 @@ class TestDatasetPrefetch:
                 [
                     torch.randint(0, num_atoms, (num_edges,)),
                     torch.randint(0, num_atoms, (num_edges,)),
-                ]
+                ],
+                dim=1,
             ),
             shifts=torch.randn(num_edges, 3),
         )
@@ -1471,7 +1479,8 @@ class TestDatasetPrefetch:
                 [
                     torch.randint(0, num_atoms, (num_edges,)),
                     torch.randint(0, num_atoms, (num_edges,)),
-                ]
+                ],
+                dim=1,
             ),
             shifts=torch.randn(num_edges, 3),
         )
@@ -1675,6 +1684,43 @@ class TestDataLoaderPrefetch:
             # Count total samples across all batches
             total_samples = sum(batch.num_graphs for batch in batches)
             assert total_samples == num_samples
+
+    def test_prefetch_consumes_batches_lazily(
+        self, tmp_path: Path, gpu_device: str
+    ) -> None:
+        """Generator is not fully materialised; only the fill window is consumed."""
+        data_list = list(_data_generator(20))
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(data_list)
+
+        prefetch_factor = 2
+        batch_size = 2
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            dataset = Dataset(reader, device=gpu_device)
+            loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                prefetch_factor=prefetch_factor,
+                use_streams=True,
+            )
+
+            batches_pulled = 0
+            orig_generate = loader._generate_batches
+
+            def _counting_generate():
+                nonlocal batches_pulled
+                for batch_indices in orig_generate():
+                    batches_pulled += 1
+                    yield batch_indices
+
+            loader._generate_batches = _counting_generate
+
+            gen = loader._iter_prefetch()
+            next(gen)
+
+            assert batches_pulled <= prefetch_factor
+            gen.close()
 
 
 class TestZarrStoreBackends:
@@ -1986,6 +2032,200 @@ class TestZarrStoreBackends:
         assert len(keys_after_append) >= len(keys_after_write)
 
 
+# ---------------------------------------------------------------------------
+# TestDatasetCoverage — exercises paths not covered by TestDataset/Prefetch
+# ---------------------------------------------------------------------------
+
+
+class _SimpleReader:
+    """Minimal duck-typed reader for Dataset tests (no zarr required)."""
+
+    def __init__(self, n: int = 3) -> None:
+        self._n = n
+
+    def _load_sample(self, index: int) -> dict:
+        return {
+            "atomic_numbers": torch.tensor([6], dtype=torch.long),
+            "positions": torch.tensor([[float(index), 0.0, 0.0]]),
+        }
+
+    def _get_sample_metadata(self, index: int) -> dict:
+        return {"src_index": index}
+
+    def __len__(self) -> int:
+        return self._n
+
+    def close(self) -> None:
+        pass
+
+
+class TestDatasetCoverage:
+    """Coverage for Dataset paths not exercised by the zarr-backed test suite."""
+
+    # ------------------------------------------------------------------
+    # Construction edge-cases
+    # ------------------------------------------------------------------
+
+    def test_invalid_reader_raises_type_error(self):
+        """Passing an object that doesn't implement ReaderProtocol raises TypeError."""
+        with pytest.raises(TypeError, match="Reader interface"):
+            Dataset(object())  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_device_string_is_converted_to_torch_device(self, device: str):
+        reader = _SimpleReader()
+        ds = Dataset(reader, device=device)
+        assert isinstance(ds.target_device, torch.device)
+        assert ds.target_device == torch.device(device)
+
+    def test_default_device_is_set_when_none_given(self):
+        """With device=None, target_device defaults to cpu or cuda."""
+        reader = _SimpleReader()
+        ds = Dataset(reader)
+        assert isinstance(ds.target_device, torch.device)
+
+    # ------------------------------------------------------------------
+    # __getitem__ synchronous path
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_getitem_returns_atomic_data_and_metadata(self, device: str):
+        reader = _SimpleReader()
+        ds = Dataset(reader, device=device)
+        data, meta = ds[0]
+        assert isinstance(data, AtomicData)
+        assert "src_index" in meta
+
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_getitem_transfers_to_target_device(self, device: str):
+        reader = _SimpleReader()
+        ds = Dataset(reader, device=device)
+        data, _ = ds[0]
+        assert data.positions.device.type == torch.device(device).type
+
+    # ------------------------------------------------------------------
+    # prefetch / cancel_prefetch
+    # ------------------------------------------------------------------
+
+    def test_prefetch_noop_when_already_queued(self):
+        """Calling prefetch twice for the same index should not create a second future."""
+        reader = _SimpleReader()
+        ds = Dataset(reader, device="cpu")
+        ds.prefetch(0)
+        futures_after_first = dict(ds._prefetch_futures)
+        ds.prefetch(0)  # no-op: already queued
+        assert set(ds._prefetch_futures.keys()) == set(futures_after_first.keys())
+        ds.close()
+
+    def test_prefetch_batch_submits_multiple(self):
+        reader = _SimpleReader(n=3)
+        ds = Dataset(reader, device="cpu")
+        ds.prefetch_batch([0, 1, 2])
+        assert 0 in ds._prefetch_futures
+        assert 1 in ds._prefetch_futures
+        assert 2 in ds._prefetch_futures
+        ds.close()
+
+    def test_cancel_prefetch_specific_index(self):
+        reader = _SimpleReader(n=3)
+        ds = Dataset(reader, device="cpu")
+        ds.prefetch_batch([0, 1])
+        ds.cancel_prefetch(0)
+        assert 0 not in ds._prefetch_futures
+        assert 1 in ds._prefetch_futures
+        ds.close()
+
+    def test_cancel_prefetch_all(self):
+        reader = _SimpleReader(n=3)
+        ds = Dataset(reader, device="cpu")
+        ds.prefetch_batch([0, 1, 2])
+        ds.cancel_prefetch()
+        assert len(ds._prefetch_futures) == 0
+        ds.close()
+
+    # ------------------------------------------------------------------
+    # get_metadata
+    # ------------------------------------------------------------------
+
+    def test_get_metadata_without_edges(self):
+        """get_metadata returns (num_atoms, 0) when no edge_index present."""
+        reader = _SimpleReader()
+        ds = Dataset(reader, device="cpu")
+        num_atoms, num_edges = ds.get_metadata(0)
+        assert num_atoms == 1
+        assert num_edges == 0
+
+    def test_get_metadata_with_edges(self):
+        """get_metadata returns correct edge count when edge_index is present."""
+
+        class _ReaderWithEdges(_SimpleReader):
+            def _load_sample(self, index: int) -> dict:
+                return {
+                    "atomic_numbers": torch.tensor([6, 6], dtype=torch.long),
+                    "positions": torch.zeros(2, 3),
+                    "edge_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+                }
+
+        ds = Dataset(_ReaderWithEdges(n=1), device="cpu")
+        num_atoms, num_edges = ds.get_metadata(0)
+        assert num_atoms == 2
+        assert num_edges == 2
+
+    # ------------------------------------------------------------------
+    # __iter__
+    # ------------------------------------------------------------------
+
+    def test_iter_yields_all_samples(self):
+        reader = _SimpleReader(n=3)
+        ds = Dataset(reader, device="cpu")
+        items = list(ds)
+        assert len(items) == 3
+
+    # ------------------------------------------------------------------
+    # close() with pending futures
+    # ------------------------------------------------------------------
+
+    def test_close_drains_pending_futures(self):
+        """close() does not raise even when prefetch futures are pending."""
+        reader = _SimpleReader(n=3)
+        ds = Dataset(reader, device="cpu")
+        ds.prefetch_batch([0, 1, 2])
+        ds.close()  # must not raise
+        assert ds._executor is None
+
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
+
+    def test_enter_returns_self(self):
+        reader = _SimpleReader()
+        ds = Dataset(reader, device="cpu")
+        with ds as ctx:
+            assert ctx is ds
+
+    def test_exit_calls_close(self):
+        closed = []
+
+        class _TrackingReader(_SimpleReader):
+            def close(self):
+                closed.append(True)
+
+        with Dataset(_TrackingReader(), device="cpu"):
+            pass
+        assert closed == [True]
+
+    # ------------------------------------------------------------------
+    # __repr__
+    # ------------------------------------------------------------------
+
+    def test_repr_contains_class_name_and_length(self):
+        reader = _SimpleReader(n=5)
+        ds = Dataset(reader, device="cpu")
+        r = repr(ds)
+        assert "Dataset" in r
+        assert "5" in r
+
+
 class TestZarrCompression:
     """Tests for compression and chunking configuration."""
 
@@ -2034,12 +2274,10 @@ class TestZarrCompression:
         data_list = list(_data_generator(5))
         writer.write(data_list)
 
-        # Verify chunk shape was applied
         root = zarr.open(store, mode="r")
         positions = root["core/positions"]
         assert positions.chunks[0] == 2
 
-        # Verify roundtrip
         reader = AtomicDataZarrReader(store)
         assert len(reader) == 5
 
@@ -2049,7 +2287,7 @@ class TestZarrCompression:
 
         store = tmp_path / "test.zarr"
         config = ZarrWriteConfig(
-            meta=ZarrArrayConfig(),  # no compression for meta
+            meta=ZarrArrayConfig(),
             core=ZarrArrayConfig(compressors=(ZstdCodec(level=1),)),
         )
         writer = AtomicDataZarrWriter(store, config=config)
@@ -2108,7 +2346,6 @@ class TestZarrCompression:
         reader = AtomicDataZarrReader(store)
         assert len(reader) == 3
 
-        # Verify chunks preserved after defragment
         root = zarr.open(store, mode="r")
         positions = root["core/positions"]
         assert positions.chunks[0] == 4
@@ -2226,8 +2463,6 @@ class TestZarrCompression:
         root = zarr.open(store, mode="r")
         pos = root["core/positions"]
         assert pos.chunks[0] == 2
-        # Verify sharding is configured by checking the codec pipeline
-        # In Zarr v3, shards are stored via ShardingCodec in the codec pipeline
         assert pos.metadata.shards is not None
         assert pos.metadata.shards[0] == 4
 
@@ -2245,7 +2480,7 @@ class TestZarrCompression:
         writer = AtomicDataZarrWriter(store, config=config)
         data_list = list(_data_generator(5))
         writer.write(data_list)
-        # Verify roundtrip works
+
         reader = AtomicDataZarrReader(store)
         for i, original in enumerate(data_list):
             loaded = reader._load_sample(i)
@@ -2266,7 +2501,6 @@ class TestZarrCompression:
         data_list = list(_data_generator(5))
         writer.write(data_list)
         root = zarr.open(store, mode="r")
-        # positions should use override shard_size=6
         pos = root["core/positions"]
         assert pos.chunks[0] == 2
         assert pos.metadata.shards[0] == 6
@@ -2285,12 +2519,11 @@ class TestZarrCompression:
         root = zarr.open(store, mode="r")
         pos = root["core/positions"]
         assert pos.chunks[0] == 2
-        # Verify sharding survived defragment
         assert pos.metadata.shards is not None
         assert pos.metadata.shards[0] == 4
 
     def test_edge_index_chunk_dim(self, tmp_path: Path) -> None:
-        """chunk_size should apply to the edge (variable) axis of edge_index."""
+        """chunk_size should apply to the leading edge axis of edge_index."""
         store = tmp_path / "test.zarr"
         config = ZarrWriteConfig(core=ZarrArrayConfig(chunk_size=100))
         writer = AtomicDataZarrWriter(store, config=config)
@@ -2299,13 +2532,11 @@ class TestZarrCompression:
 
         root = zarr.open(store, mode="r")
         edge_arr = root["core/edge_index"]
-        # edge_index is stored as [2, E_total]
-        # chunk_size should apply to dim 1 (the edge axis), not dim 0
-        assert edge_arr.chunks[0] == 2  # dim 0 is always 2 (full extent)
-        assert edge_arr.chunks[1] == 100  # dim 1 gets the chunk_size
+        assert edge_arr.chunks[0] == 100
+        assert edge_arr.chunks[1] == 2
 
     def test_edge_index_shard_dim(self, tmp_path: Path) -> None:
-        """shard_size should apply to the edge (variable) axis of edge_index."""
+        """shard_size should apply to the leading edge axis of edge_index."""
         store = tmp_path / "test.zarr"
         config = ZarrWriteConfig(core=ZarrArrayConfig(chunk_size=50, shard_size=100))
         writer = AtomicDataZarrWriter(store, config=config)
@@ -2314,10 +2545,10 @@ class TestZarrCompression:
 
         root = zarr.open(store, mode="r")
         edge_arr = root["core/edge_index"]
-        assert edge_arr.chunks[0] == 2
-        assert edge_arr.chunks[1] == 50
-        assert edge_arr.metadata.shards[0] == 2
-        assert edge_arr.metadata.shards[1] == 100
+        assert edge_arr.chunks[0] == 50
+        assert edge_arr.chunks[1] == 2
+        assert edge_arr.metadata.shards[0] == 100
+        assert edge_arr.metadata.shards[1] == 2
 
 
 class TestZarrDataSinkConfig:
@@ -2504,3 +2735,50 @@ class TestZarrDataSinkConfig:
         sink.write(batch)
         reader = AtomicDataZarrReader(store)
         assert len(reader) == 3
+
+
+class TestSliceEdgeArrayGuard:
+    """Verify _slice_edge_array rejects cat_dim != 0 fields."""
+
+    def test_slice_edge_array_rejects_face_key(self) -> None:
+        """_slice_edge_array raises RuntimeError for keys matching *index*/*face*."""
+        import numpy as np
+
+        arr = np.zeros((10, 3))
+        with pytest.raises(RuntimeError, match="Unexpected cat_dim=-1"):
+            _slice_edge_array(arr, "face_index", 0, 5)
+
+    def test_slice_edge_array_accepts_normal_edge_key(self) -> None:
+        """_slice_edge_array passes through for normal edge keys."""
+        import numpy as np
+
+        arr = np.arange(30).reshape(10, 3)
+        result = _slice_edge_array(arr, "shifts", 2, 5)
+        assert result.shape == (3, 3)
+        np.testing.assert_array_equal(result, arr[2:5])
+
+    def test_load_sample_rejects_custom_face_index(self, tmp_path: Path) -> None:
+        """_load_sample raises RuntimeError for custom edge field named face_index."""
+        data_list = list(_data_generator(2))
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(data_list)
+
+        total_edges = sum(d.edge_index.shape[0] for d in data_list)
+        writer.add_custom("face_index", torch.randint(0, 10, (total_edges, 2)), "edge")
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            with pytest.raises(RuntimeError, match="Unexpected cat_dim=-1"):
+                reader._load_sample(0)
+
+    def test_defragment_rejects_custom_face_index(self, tmp_path: Path) -> None:
+        """defragment raises RuntimeError for custom edge field named face_index."""
+        data_list = list(_data_generator(3))
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(data_list)
+
+        total_edges = sum(d.edge_index.shape[0] for d in data_list)
+        writer.add_custom("face_index", torch.randint(0, 10, (total_edges, 2)), "edge")
+
+        writer.delete([0])
+        with pytest.raises(RuntimeError, match="Unexpected cat_dim=-1"):
+            writer.defragment()

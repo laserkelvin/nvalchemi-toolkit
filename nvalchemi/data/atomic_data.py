@@ -14,9 +14,11 @@
 # limitations under the License.
 from __future__ import annotations
 
+import numbers
+import warnings
 from collections.abc import Sequence
 from hashlib import blake2s
-from typing import Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import numpy as np
 import periodictable as pt
@@ -25,6 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_valida
 
 from nvalchemi import _typing as t
 from nvalchemi.data.data import DataMixin  # type: ignore
+
+if TYPE_CHECKING:
+    from ase import Atoms
+    from pymatgen.core import Molecule, Structure
 
 
 def _tensor_serialization(tensor: torch.Tensor) -> list[float | int | list]:
@@ -88,7 +94,7 @@ class AtomicData(BaseModel, DataMixin):
     atomic_masses : torch.Tensor
         Atomic masses [n_nodes]
     edge_index : torch.Tensor
-        Edge index [2, n_edges]
+        Edge index [n_edges, 2]
     node_attrs : torch.Tensor
         Node attributes [n_nodes, n_node_feats]
     shifts : torch.Tensor
@@ -145,7 +151,7 @@ class AtomicData(BaseModel, DataMixin):
 
     edge_index: Annotated[
         t.EdgeIndex | None,
-        Field(description="Edge index [2, n_edges]"),
+        Field(description="Edge index [n_edges, 2]"),
         PlainSerializer(_tensor_serialization, when_used="json"),
     ] = None
 
@@ -290,39 +296,71 @@ class AtomicData(BaseModel, DataMixin):
     ] = None
 
     info: dict[str, torch.Tensor] = Field(default_factory=dict)
-    __node_keys__: set[str] = {
-        "atomic_masses",
-        "positions",
-        "forces",
-        "positions",
-        "node_charges",
-        "node_embeddings",
-        "atomic_numbers",
-        "node_attrs",
-        "node_alpha_spins",
-        "node_beta_spins",
-        "atom_categories",
-        "velocities",
-        "momenta",
-        "kinetic_energies",
-    }
-    __edge_keys__: set[str] = {"shifts", "unit_shifts", "edge_index", "edge_embeddings"}
-    __system_keys__: set[str] = {
-        "energies",
-        "stresses",
-        "virials",
-        "dipoles",
-        "graph_charges",
-        "graph_embeddings",
-        "cell",
-        "pbc",
-        "graph_spins",
-    }
+    _default_node_keys: ClassVar[frozenset[str]] = frozenset(
+        {
+            "atomic_masses",
+            "positions",
+            "forces",
+            "node_charges",
+            "node_embeddings",
+            "atomic_numbers",
+            "node_attrs",
+            "node_alpha_spins",
+            "node_beta_spins",
+            "atom_categories",
+            "velocities",
+            "momenta",
+            "kinetic_energies",
+        }
+    )
+    _default_edge_keys: ClassVar[frozenset[str]] = frozenset(
+        {"shifts", "unit_shifts", "edge_index", "edge_embeddings"}
+    )
+    _default_system_keys: ClassVar[frozenset[str]] = frozenset(
+        {
+            "energies",
+            "stresses",
+            "virials",
+            "dipoles",
+            "graph_charges",
+            "graph_embeddings",
+            "cell",
+            "pbc",
+            "graph_spins",
+        }
+    )
 
     # Pydantic configuration
     model_config: ClassVar[ConfigDict] = ConfigDict(
         arbitrary_types_allowed=True, validate_assignment=True, extra="allow"
     )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Create per-instance mutable copies of the key sets.
+
+        The class-level defaults are frozen to prevent accidental mutation.
+        Each instance gets its own mutable set so that ``add_node_property``
+        and friends only affect the instance they are called on.
+
+        Uses ``model_post_init`` rather than ``model_validator`` because
+        ``validate_assignment=True`` causes model validators to re-run on
+        every ``setattr`` call, which would reset the key sets and lose
+        previously added custom keys.
+        """
+        # Merge defaults with any dynamically-added keys passed during
+        # construction (e.g. via model_validate or from_data_list round-trips).
+        existing_node = set(getattr(self, "__node_keys__", ()))
+        existing_edge = set(getattr(self, "__edge_keys__", ()))
+        existing_system = set(getattr(self, "__system_keys__", ()))
+        object.__setattr__(
+            self, "__node_keys__", set(self._default_node_keys) | existing_node
+        )
+        object.__setattr__(
+            self, "__edge_keys__", set(self._default_edge_keys) | existing_edge
+        )
+        object.__setattr__(
+            self, "__system_keys__", set(self._default_system_keys) | existing_system
+        )
 
     @model_validator(mode="after")
     def check_node_consistency(self) -> AtomicData:
@@ -342,8 +380,8 @@ class AtomicData(BaseModel, DataMixin):
             If any node-level property has an inconsistent number of nodes.
         """
         num_atoms = len(self.atomic_numbers)
-
-        for key in self.__node_keys__:
+        node_keys = self.__dict__.get("__node_keys__", self._default_node_keys)
+        for key in node_keys:
             tensor = getattr(self, key, None)
             if isinstance(tensor, torch.Tensor):
                 if tensor.size(0) != num_atoms:
@@ -370,20 +408,18 @@ class AtomicData(BaseModel, DataMixin):
         ValueError
             If any edge-level property has an inconsistent number of edges.
         """
-        # if we don't have a way to reliably determine edge count, skip validation
         if not isinstance(self.edge_index, torch.Tensor):
             return self
-        num_edges = self.edge_index.size(1)
+        num_edges = self.edge_index.size(0)
 
-        # Dictionary of field name to its first dimension (num atoms)
-        for key in self.__edge_keys__:
+        edge_keys = self.__dict__.get("__edge_keys__", self._default_edge_keys)
+        for key in edge_keys:
             tensor = getattr(self, key, None)
             if isinstance(tensor, torch.Tensor):
-                dim = 1 if key == "edge_index" else 0
-                if tensor.size(dim) != num_edges:
+                if tensor.size(0) != num_edges:
                     raise ValueError(
                         f"Inconsistent number of edges in {key}: "
-                        f"expected {num_edges}, got {tensor.shape[dim]}"
+                        f"expected {num_edges}, got {tensor.shape[0]}"
                     )
         return self
 
@@ -394,6 +430,7 @@ class AtomicData(BaseModel, DataMixin):
         as the positions tensor.
         """
         dtype = self.positions.dtype
+        casted: list[str] = []
         for key in self.model_dump().keys():
             value = getattr(self, key)
             if isinstance(value, torch.Tensor):
@@ -401,6 +438,19 @@ class AtomicData(BaseModel, DataMixin):
                 if tensor_dtype.is_floating_point and tensor_dtype != dtype:
                     # using __dict__ to avoid re-validation
                     self.__dict__[key] = value.to(dtype)
+                    casted.append(key)
+        if casted:
+            casted.sort()
+            # Keep the warning attributed to the user's AtomicData(...) call
+            # instead of Pydantic's internal validation frames. This may need
+            # adjustment if Pydantic's construction stack changes.
+            warnings.warn(
+                f"AtomicData fields {casted} were cast from their original "
+                f"dtypes to {dtype} to match positions. "
+                f"Pass tensors with matching dtypes to silence this warning.",
+                UserWarning,
+                stacklevel=3,
+            )
         return self
 
     @model_validator(mode="after")
@@ -615,7 +665,7 @@ class AtomicData(BaseModel, DataMixin):
     @classmethod
     def from_atoms(
         cls,
-        atoms,
+        atoms: Atoms,
         energy_key: str = "energy",
         forces_key: str = "forces",
         stress_key: str = "stress",
@@ -626,30 +676,41 @@ class AtomicData(BaseModel, DataMixin):
         dtype: torch.dtype = torch.float32,
         z_table: AtomicNumberTable | None = None,
     ) -> AtomicData:
-        """Creates AtomicData from a data structure.
+        """Create an AtomicData from an ASE-like Atoms object.
+
+        Only fields that are actually present in the input object are
+        populated; absent optional fields (energy, forces, stress, virials,
+        dipole, charges) remain ``None``.  The input ``atoms`` object is
+        **not** mutated.
+
+        The returned ``info`` dict contains only tensor-convertible entries
+        from ``atoms.info`` (``np.ndarray``, ``list``, ``int``, ``float``,
+        and their numpy equivalents).  ``bool``, ``np.bool_``, strings, and
+        other types are dropped.
 
         Parameters
         ----------
-        atoms : Any
-            The data structure to convert to AtomicData.
+        atoms : ase.Atoms
+            An ASE Atoms object.
         energy_key : str
-            The key to get the energy from the data structure.
+            Key in ``atoms.info`` for total energy.
         forces_key : str
-            The key to get the forces from the data structure.
+            Key in ``atoms.arrays`` for atomic forces.
         stress_key : str
-            The key to get the stress from the data structure.
+            Key in ``atoms.info`` for the stress tensor.
         virials_key : str
-            The key to get the virials from the data structure.
+            Key in ``atoms.info`` for the virial tensor.
         dipole_key : str
-            The key to get the dipole from the data structure.
+            Key in ``atoms.info`` for the dipole moment.
         charges_key : str
-            The key to get the charges from the data structure.
+            Key in ``atoms.arrays`` for per-atom partial charges.
         device : str | torch.device
-            The device to convert the data to.
+            Target device for all output tensors.
         dtype : torch.dtype
-            The dtype to convert the data to.
+            Target floating-point dtype for all output tensors.
         z_table : AtomicNumberTable | None
-            The atomic number table to use for the atomic numbers.
+            Atomic number table used to build one-hot node attributes.
+
         Returns
         -------
         AtomicData
@@ -665,89 +726,116 @@ class AtomicData(BaseModel, DataMixin):
         positions = torch.as_tensor(
             atoms.arrays["positions"], device=device, dtype=dtype
         )
-        pbc = torch.as_tensor(atoms.get_pbc().reshape(1, 3), device=device)
-        cell = torch.as_tensor(
-            np.array(atoms.get_cell(complete=True)).reshape(1, 3, 3),
-            device=device,
-            dtype=dtype,
-        )
-
-        # Get info from the data structure
-        energy = torch.as_tensor(
-            atoms.info.get(energy_key, [[0.0]]), device=device, dtype=dtype
-        )  # eV
-        forces = torch.as_tensor(
-            atoms.arrays.get(
-                forces_key,
-                torch.zeros((len(atomic_numbers), 3), device=device, dtype=dtype),
-            ),
-            device=device,
-            dtype=dtype,
-        )  # eV / Ang
-        stress = torch.as_tensor(
-            atoms.info.get(stress_key, torch.zeros((3, 3), device=device, dtype=dtype)),
-            device=device,
-            dtype=dtype,
-        )  # eV / Ang ^ 3
-        virials = torch.as_tensor(
-            atoms.info.get(
-                virials_key, torch.zeros((3, 3), device=device, dtype=dtype)
-            ),
-            device=device,
-            dtype=dtype,
-        )
-        dipole = torch.as_tensor(
-            atoms.info.get(dipole_key, torch.zeros((1, 3), device=device, dtype=dtype)),
-            device=device,
-            dtype=dtype,
-        )  # Debye
-
-        node_charges = torch.as_tensor(
-            atoms.arrays.get(
-                charges_key,
-                torch.zeros((len(atomic_numbers),), device=device, dtype=dtype),
-            ),
-            device=device,
-            dtype=dtype,
-        )
-        # map tags to AtomCategory enum based off adsorbate construction
-        tags = atoms.get_tags()
-        # per docs, 0 = adsorbate, and >= 1 are atom layers
-        atom_categories = torch.as_tensor(tags)
-        atom_categories[atom_categories == 0] = t.AtomCategory.GAS.value
-        atom_categories[atom_categories == 1] = t.AtomCategory.SURFACE.value
-        atom_categories[atom_categories >= 2] = t.AtomCategory.BULK.value
-
-        # Convert info arrays to tensors
-        keys_to_remove = []
-        for key, value in atoms.info.items():
-            if isinstance(value, (np.ndarray, list)):
-                atoms.info[key] = torch.as_tensor(value, device=device, dtype=dtype)
-            elif isinstance(value, float):
-                atoms.info[key] = torch.as_tensor([value], device=device, dtype=dtype)
-            else:
-                keys_to_remove.append(key)
-        for key in keys_to_remove:
-            atoms.info.pop(key)
-
-        # make sure charges meets the expected shape
-        if node_charges.ndim == 1:
-            node_charges.unsqueeze_(-1)
-        # try to get total system charge from atoms.info data
-        if "charge" in atoms.info:
-            _charge = atoms.info["charge"]
-            assert isinstance(  # noqa: S101
-                _charge, int
-            ), f"Non-integer total charge in atoms.info: {_charge}"
+        pbc_array = atoms.get_pbc()
+        if not pbc_array.any():
+            pbc = None
+            cell = None
         else:
+            cell = torch.as_tensor(
+                atoms.get_cell().array.reshape(1, 3, 3),
+                device=device,
+                dtype=dtype,
+            )
+            if torch.det(cell.squeeze(0)) <= 0.0:
+                raise ValueError(
+                    "Cell has undefined (zero) lattice vectors. "
+                    "Please set the cell for all directions, "
+                    "e.g. using atoms.center(vacuum=10.0)."
+                )
+            pbc = torch.as_tensor(pbc_array.reshape(1, 3), device=device)
+
+        # Extract optional fields — absent fields remain None instead of
+        # being fabricated as zero tensors.
+        raw_energy = atoms.info.get(energy_key)
+        energy = (
+            torch.as_tensor(raw_energy, device=device, dtype=dtype).reshape(1, 1)
+            if raw_energy is not None
+            else None
+        )
+
+        raw_forces = atoms.arrays.get(forces_key)
+        forces = (
+            torch.as_tensor(raw_forces, device=device, dtype=dtype)
+            if raw_forces is not None
+            else None
+        )
+
+        raw_stress = atoms.info.get(stress_key)
+        stress = (
+            voigt_to_matrix(
+                torch.as_tensor(raw_stress, device=device, dtype=dtype)
+            ).unsqueeze(0)
+            if raw_stress is not None
+            else None
+        )
+
+        raw_virials = atoms.info.get(virials_key)
+        virials = (
+            voigt_to_matrix(
+                torch.as_tensor(raw_virials, device=device, dtype=dtype)
+            ).unsqueeze(0)
+            if raw_virials is not None
+            else None
+        )
+
+        raw_dipole = atoms.info.get(dipole_key)
+        dipole = (
+            torch.as_tensor(raw_dipole, device=device, dtype=dtype).reshape(1, 3)
+            if raw_dipole is not None
+            else None
+        )
+
+        raw_charges = atoms.arrays.get(charges_key)
+        node_charges = (
+            torch.as_tensor(raw_charges, device=device, dtype=dtype)
+            if raw_charges is not None
+            else None
+        )
+
+        # Read raw charge from original atoms.info before building local_info,
+        # so it cannot be lost during normalization.
+        raw_charge = atoms.info.get("charge")
+
+        # Build local info dict with tensor-convertible entries only.
+        # Do not mutate the caller's atoms.info.
+        # Skip keys already consumed into dedicated AtomicData fields.
+        _consumed_info_keys = {
+            energy_key,
+            stress_key,
+            virials_key,
+            dipole_key,
+            "charge",
+        }
+        local_info: dict[str, torch.Tensor] = {}
+        for key, value in atoms.info.items():
+            if key in _consumed_info_keys:
+                continue
+            if isinstance(value, (np.ndarray, list)):
+                local_info[key] = torch.as_tensor(value, device=device, dtype=dtype)
+            elif isinstance(
+                value, (int, float, np.integer, np.floating)
+            ) and not isinstance(value, (bool, np.bool_)):
+                local_info[key] = torch.as_tensor([value], device=device, dtype=dtype)
+
+        if node_charges is not None and node_charges.ndim == 1:
+            node_charges.unsqueeze_(-1)
+
+        # Derive graph-level charge
+        if raw_charge is not None:
+            if not isinstance(raw_charge, numbers.Integral):
+                raise ValueError(
+                    f"atoms.info['charge'] must be an integer, "
+                    f"got {type(raw_charge).__name__}: {raw_charge}"
+                )
+            charge = torch.as_tensor([[int(raw_charge)]], device=device, dtype=dtype)
+        elif node_charges is not None:
             _charge_f = torch.sum(node_charges)
             _charge = int(_charge_f.round().item())
-            assert (  # noqa: S101
-                _charge_f - _charge
-            ).abs() < 1.0e-2, f"Non-integer sum of atomic charges: {_charge_f}"
-        charge = torch.as_tensor([[_charge]], device=device, dtype=dtype)
-        stress = voigt_to_matrix(stress).unsqueeze(0)
-        virials = voigt_to_matrix(virials).unsqueeze(0)
+            if (_charge_f - _charge).abs() >= 1.0e-2:
+                raise ValueError(f"Non-integer sum of atomic charges: {_charge_f}")
+            charge = torch.as_tensor([[_charge]], device=device, dtype=dtype)
+        else:
+            charge = None
 
         node_attrs = None
         if z_table is not None:
@@ -775,8 +863,217 @@ class AtomicData(BaseModel, DataMixin):
             dipoles=dipole,
             node_charges=node_charges,
             graph_charges=charge,
-            info=atoms.info,
-            atom_categories=atom_categories,
+            info=local_info,
+        )
+
+    @classmethod
+    def from_structure(
+        cls,
+        structure: Structure | Molecule,
+        energy_key: str = "energy",
+        forces_key: str = "forces",
+        stress_key: str = "stress",
+        virials_key: str = "virials",
+        dipole_key: str = "dipole",
+        charges_key: str = "charges",
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.float32,
+        z_table: AtomicNumberTable | None = None,
+    ) -> AtomicData:
+        """Create an AtomicData from a pymatgen Structure or Molecule.
+
+        Only fields that are actually present in the input are populated;
+        absent optional fields (energy, forces, stress, virials, dipole,
+        charges) remain ``None``.  The input object is **not** mutated.
+
+        The returned ``info`` dict contains tensor-convertible entries
+        from ``structure.properties`` (``np.ndarray``, ``list``, ``int``,
+        ``float``, and their numpy equivalents), excluding keys already
+        consumed into dedicated fields.  Unsupported types raise
+        ``TypeError``.
+
+        Stress and virials accept 3×3 matrices, 6-component Voigt vectors,
+        or 9-component flat vectors (see :func:`voigt_to_matrix`).
+
+        Parameters
+        ----------
+        structure : pymatgen.core.Structure | pymatgen.core.Molecule
+            A pymatgen Structure (periodic) or Molecule (non-periodic).
+            For Molecule, ``cell`` and ``pbc`` are set to ``None``.
+        energy_key : str
+            Key in ``structure.properties`` for total energy.
+        forces_key : str
+            Key in ``structure.site_properties`` for atomic forces.
+        stress_key : str
+            Key in ``structure.properties`` for the stress tensor.
+        virials_key : str
+            Key in ``structure.properties`` for the virial tensor.
+        dipole_key : str
+            Key in ``structure.properties`` for the dipole moment.
+        charges_key : str
+            Key in ``structure.site_properties`` for per-atom partial charges.
+        device : str | torch.device
+            Target device for all output tensors.
+        dtype : torch.dtype
+            Target floating-point dtype for all output tensors.
+        z_table : AtomicNumberTable | None
+            Atomic number table used to build one-hot node attributes.
+
+        Returns
+        -------
+        AtomicData
+        """
+        if isinstance(device, str):
+            device = torch.device(device)
+
+        atomic_numbers = torch.as_tensor(
+            structure.atomic_numbers, device=device, dtype=torch.long
+        )
+        positions = torch.as_tensor(structure.cart_coords, device=device, dtype=dtype)
+
+        # Cell and pbc handling
+        if hasattr(structure, "lattice"):
+            pbc_tuple = structure.pbc
+            if not any(pbc_tuple):
+                pbc = None
+                cell = None
+            else:
+                cell = torch.as_tensor(
+                    structure.lattice.matrix.copy().reshape(1, 3, 3),
+                    device=device,
+                    dtype=dtype,
+                )
+                pbc = torch.as_tensor(pbc_tuple, device=device).reshape(1, 3)
+        else:
+            pbc = None
+            cell = None
+
+        # Extract optional fields from properties (system-level)
+        # and site_properties (per-atom).
+        raw_energy = structure.properties.get(energy_key)
+        energy = (
+            torch.as_tensor([[raw_energy]], device=device, dtype=dtype)
+            if raw_energy is not None
+            else None
+        )
+
+        raw_forces = structure.site_properties.get(forces_key)
+        forces = (
+            torch.as_tensor(raw_forces, device=device, dtype=dtype)
+            if raw_forces is not None
+            else None
+        )
+
+        raw_stress = structure.properties.get(stress_key)
+        stress = (
+            voigt_to_matrix(
+                torch.as_tensor(raw_stress, device=device, dtype=dtype)
+            ).unsqueeze(0)
+            if raw_stress is not None
+            else None
+        )
+
+        raw_virials = structure.properties.get(virials_key)
+        virials = (
+            voigt_to_matrix(
+                torch.as_tensor(raw_virials, device=device, dtype=dtype)
+            ).unsqueeze(0)
+            if raw_virials is not None
+            else None
+        )
+
+        raw_dipole = structure.properties.get(dipole_key)
+        dipole = (
+            torch.as_tensor(raw_dipole, device=device, dtype=dtype).reshape(1, 3)
+            if raw_dipole is not None
+            else None
+        )
+
+        raw_charges = structure.site_properties.get(charges_key)
+        node_charges = (
+            torch.as_tensor(raw_charges, device=device, dtype=dtype)
+            if raw_charges is not None
+            else None
+        )
+
+        if node_charges is not None and node_charges.ndim == 1:
+            node_charges.unsqueeze_(-1)
+
+        # Build local info dict from remaining structure.properties.
+        _consumed_props_keys = {
+            energy_key,
+            stress_key,
+            virials_key,
+            dipole_key,
+        }
+        local_info: dict[str, torch.Tensor] = {}
+        for key, value in structure.properties.items():
+            if key in _consumed_props_keys:
+                continue
+            if isinstance(value, (np.ndarray, list)):
+                local_info[key] = torch.as_tensor(value, device=device, dtype=dtype)
+            elif isinstance(
+                value, (int, float, np.integer, np.floating)
+            ) and not isinstance(value, (bool, np.bool_)):
+                local_info[key] = torch.as_tensor([value], device=device, dtype=dtype)
+            else:
+                raise TypeError(
+                    f"Cannot convert structure.properties['{key}'] of type "
+                    f"{type(value).__name__} to a tensor."
+                )
+
+        # Derive graph-level charge.
+        # pymatgen stores charge as float (e.g. 2 → 2.0); round before int cast.
+        if structure._charge is not None:
+            _charge = structure.charge
+            if abs(_charge - round(_charge)) >= 1e-2:
+                raise ValueError(f"Structure charge must be an integer, got {_charge}")
+            charge = torch.as_tensor(
+                [[int(round(_charge))]], device=device, dtype=dtype
+            )
+        elif node_charges is not None:
+            _charge_f = torch.sum(node_charges)
+            _charge_i = int(_charge_f.round().item())
+            if (_charge_f - _charge_i).abs() >= 1.0e-2:
+                raise ValueError(f"Non-integer sum of atomic charges: {_charge_f}")
+            charge = torch.as_tensor([[_charge_i]], device=device, dtype=dtype)
+        else:
+            charge = None
+
+        node_attrs = None
+        if z_table is not None:
+            indices = torch.as_tensor(
+                atomic_numbers_to_indices(
+                    list(structure.atomic_numbers), z_table=z_table
+                ),
+                device=device,
+            )
+            node_attrs = to_one_hot(
+                indices.unsqueeze(-1),
+                num_classes=len(z_table),
+            ).to(dtype)
+
+        masses = torch.tensor(
+            [float(sp.atomic_mass) for sp in structure.species],
+            device=device,
+            dtype=dtype,
+        )
+
+        return cls(
+            atomic_masses=masses,
+            atomic_numbers=atomic_numbers,
+            positions=positions,
+            cell=cell,
+            pbc=pbc,
+            node_attrs=node_attrs,  # type: ignore
+            forces=forces,
+            energies=energy,
+            stresses=stress,
+            virials=virials,
+            dipoles=dipole,
+            node_charges=node_charges,
+            graph_charges=charge,
+            info=local_info,
         )
 
     @property
@@ -789,7 +1086,7 @@ class AtomicData(BaseModel, DataMixin):
         """Return the number of edges in the graph."""
         if self.edge_index is None:
             return 0
-        return self.edge_index.shape[1]
+        return self.edge_index.shape[0]
 
 
 def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -819,6 +1116,7 @@ def voigt_to_matrix(t: torch.Tensor) -> torch.Tensor:
                 [t[4], t[3], t[2]],
             ],
             dtype=t.dtype,
+            device=t.device,
         )
     if t.shape == (9,):
         return t.view(3, 3)

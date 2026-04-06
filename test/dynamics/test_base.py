@@ -15,18 +15,22 @@
 """
 Comprehensive tests for the dynamics base module.
 
-Tests cover HookStageEnum, Hook protocol, and BaseDynamics class including
+Tests cover DynamicsStage, Hook protocol, and BaseDynamics class including
 hook execution order, frequency gating, compute operations, and masked updates.
 """
 
 from __future__ import annotations
 
+from enum import Enum
+
 import pytest
 import torch
 
 from nvalchemi.data import AtomicData, Batch
-from nvalchemi.dynamics.base import BaseDynamics, ConvergenceHook, Hook, HookStageEnum
+from nvalchemi.dynamics.base import BaseDynamics, ConvergenceHook, DynamicsStage
 from nvalchemi.dynamics.demo import DemoDynamics
+from nvalchemi.hooks import Hook
+from nvalchemi.hooks._context import HookContext
 from nvalchemi.models.demo import DemoModelWrapper
 
 # -----------------------------------------------------------------------------
@@ -115,7 +119,7 @@ class RecordingHook:
     ----------
     frequency : int
         Execute every N steps.
-    stage : HookStageEnum
+    stage : DynamicsStage
         Stage at which to fire.
     name : str
         Identifier for this hook.
@@ -125,7 +129,7 @@ class RecordingHook:
 
     def __init__(
         self,
-        stage: HookStageEnum,
+        stage: DynamicsStage,
         record_list: list[str],
         name: str | None = None,
         frequency: int = 1,
@@ -135,7 +139,7 @@ class RecordingHook:
 
         Parameters
         ----------
-        stage : HookStageEnum
+        stage : DynamicsStage
             The stage at which this hook fires.
         record_list : list[str]
             List to append to when called.
@@ -149,7 +153,7 @@ class RecordingHook:
         self.name = name if name is not None else stage.name
         self.record_list = record_list
 
-    def __call__(self, batch: Batch, dynamics: BaseDynamics) -> None:
+    def __call__(self, ctx: object, stage: object) -> None:
         """Record that this hook was called."""
         self.record_list.append(self.name)
 
@@ -159,8 +163,8 @@ class RecordingHook:
 # -----------------------------------------------------------------------------
 
 
-class TestHookStageEnum:
-    """Test suite for HookStageEnum enumeration."""
+class TestDynamicsStage:
+    """Test suite for DynamicsStage enumeration."""
 
     def test_all_stages_exist(self) -> None:
         """Verify all 9 enum members exist."""
@@ -176,36 +180,36 @@ class TestHookStageEnum:
             "ON_CONVERGE",
         ]
 
-        actual_stages = [member.name for member in HookStageEnum]
+        actual_stages = [member.name for member in DynamicsStage]
         assert len(actual_stages) == 9
         assert set(actual_stages) == set(expected_stages)
 
     def test_enum_values_are_integers(self) -> None:
         """Verify enum values are integers (not strings)."""
-        for member in HookStageEnum:
+        for member in DynamicsStage:
             assert isinstance(member.value, int)
 
     def test_enum_values_unique(self) -> None:
         """Verify all enum values are unique."""
-        values = [member.value for member in HookStageEnum]
+        values = [member.value for member in DynamicsStage]
         assert len(values) == len(set(values))
 
     def test_enum_ordering(self) -> None:
         """Verify the logical ordering of stages."""
-        assert HookStageEnum.BEFORE_STEP.value < HookStageEnum.BEFORE_PRE_UPDATE.value
+        assert DynamicsStage.BEFORE_STEP.value < DynamicsStage.BEFORE_PRE_UPDATE.value
         assert (
-            HookStageEnum.BEFORE_PRE_UPDATE.value < HookStageEnum.AFTER_PRE_UPDATE.value
+            DynamicsStage.BEFORE_PRE_UPDATE.value < DynamicsStage.AFTER_PRE_UPDATE.value
         )
-        assert HookStageEnum.AFTER_PRE_UPDATE.value < HookStageEnum.BEFORE_COMPUTE.value
-        assert HookStageEnum.BEFORE_COMPUTE.value < HookStageEnum.AFTER_COMPUTE.value
+        assert DynamicsStage.AFTER_PRE_UPDATE.value < DynamicsStage.BEFORE_COMPUTE.value
+        assert DynamicsStage.BEFORE_COMPUTE.value < DynamicsStage.AFTER_COMPUTE.value
         assert (
-            HookStageEnum.AFTER_COMPUTE.value < HookStageEnum.BEFORE_POST_UPDATE.value
+            DynamicsStage.AFTER_COMPUTE.value < DynamicsStage.BEFORE_POST_UPDATE.value
         )
         assert (
-            HookStageEnum.BEFORE_POST_UPDATE.value
-            < HookStageEnum.AFTER_POST_UPDATE.value
+            DynamicsStage.BEFORE_POST_UPDATE.value
+            < DynamicsStage.AFTER_POST_UPDATE.value
         )
-        assert HookStageEnum.AFTER_POST_UPDATE.value < HookStageEnum.AFTER_STEP.value
+        assert DynamicsStage.AFTER_POST_UPDATE.value < DynamicsStage.AFTER_STEP.value
 
 
 class TestHookProtocol:
@@ -214,7 +218,7 @@ class TestHookProtocol:
     def test_concrete_hook_satisfies_protocol(self) -> None:
         """Verify a concrete implementation satisfies the Hook protocol."""
         record_list: list[str] = []
-        hook = RecordingHook(HookStageEnum.BEFORE_STEP, record_list)
+        hook = RecordingHook(DynamicsStage.BEFORE_STEP, record_list)
 
         # Check that it satisfies the Protocol
         assert isinstance(hook, Hook)
@@ -229,7 +233,7 @@ class TestHookProtocol:
 
         class MissingCallHook:
             frequency: int = 1
-            stage: HookStageEnum = HookStageEnum.BEFORE_STEP
+            stage: DynamicsStage = DynamicsStage.BEFORE_STEP
 
         incomplete_hook = MissingCallHook()
         assert not isinstance(incomplete_hook, Hook)
@@ -238,7 +242,7 @@ class TestHookProtocol:
         """Verify an object missing frequency fails the protocol check."""
 
         class MissingFrequencyHook:
-            stage: HookStageEnum = HookStageEnum.BEFORE_STEP
+            stage: DynamicsStage = DynamicsStage.BEFORE_STEP
 
             def __call__(self, batch: Batch, dynamics: BaseDynamics) -> None:
                 pass
@@ -280,7 +284,10 @@ class TestBaseDynamics:
             convergence_hook=ConvergenceHook.from_fmax(0.05),
         )
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([[0.01], [0.02]])
+        # Graph 0 (2 atoms): max norm 0.01, Graph 1 (3 atoms): max norm 0.02
+        batch.forces = torch.tensor(
+            [[0.01, 0, 0], [0, 0, 0], [0.02, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
         result = dynamics._check_convergence(batch)
         assert result is not None
         assert len(result) == 2
@@ -292,7 +299,10 @@ class TestBaseDynamics:
             convergence_hook=ConvergenceHook.from_fmax(0.05),
         )
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([[0.01], [0.10]])
+        # Graph 0: max norm 0.01, Graph 1: max norm 0.10
+        batch.forces = torch.tensor(
+            [[0.01, 0, 0], [0, 0, 0], [0.10, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
         result = dynamics._check_convergence(batch)
         assert result is not None
         assert result.tolist() == [0]
@@ -304,7 +314,10 @@ class TestBaseDynamics:
             convergence_hook=ConvergenceHook.from_fmax(0.05),
         )
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([[0.10], [0.20]])
+        # Graph 0: max norm 0.10, Graph 1: max norm 0.20
+        batch.forces = torch.tensor(
+            [[0.10, 0, 0], [0, 0, 0], [0.20, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
         assert dynamics._check_convergence(batch) is None
 
     def test_convergence_threshold_boundary(self) -> None:
@@ -314,8 +327,10 @@ class TestBaseDynamics:
             convergence_hook=ConvergenceHook.from_fmax(0.05),
         )
         batch = create_simple_batch()
-        # fmax exactly at threshold (0.05) should be converged with <= semantics
-        batch["fmax"] = torch.tensor([[0.05], [0.04]])
+        # Graph 0: max norm exactly 0.05, Graph 1: max norm 0.04
+        batch.forces = torch.tensor(
+            [[0.05, 0, 0], [0, 0, 0], [0.04, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
         result = dynamics._check_convergence(batch)
         assert result is not None
         # Both samples should converge: 0.05 <= 0.05 and 0.04 <= 0.05
@@ -328,7 +343,10 @@ class TestBaseDynamics:
             convergence_hook=ConvergenceHook.from_fmax(0.10),
         )
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([[0.05], [0.15]])
+        # Graph 0: max norm 0.05, Graph 1: max norm 0.15
+        batch.forces = torch.tensor(
+            [[0.05, 0, 0], [0, 0, 0], [0.15, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
         result = dynamics._check_convergence(batch)
         assert result is not None
         assert result.tolist() == [0]
@@ -342,15 +360,15 @@ class TestBaseDynamics:
         """Verify ON_CONVERGE hooks fire when convergence is detected."""
         record_list: list[str] = []
         hook = RecordingHook(
-            HookStageEnum.ON_CONVERGE, record_list, name="converge_hook"
+            DynamicsStage.ON_CONVERGE, record_list, name="converge_hook"
         )
+        # Use a very high threshold so DemoModel forces always converge
         dynamics = BaseDynamics(
             self.model,
             hooks=[hook],
-            convergence_hook=ConvergenceHook.from_fmax(0.05),
+            convergence_hook=ConvergenceHook.from_fmax(1e6),
         )
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([[0.01], [0.02]])
         dynamics.step(batch)
         assert "converge_hook" in record_list
 
@@ -358,15 +376,15 @@ class TestBaseDynamics:
         """Verify ON_CONVERGE hooks do NOT fire when nothing converged."""
         record_list: list[str] = []
         hook = RecordingHook(
-            HookStageEnum.ON_CONVERGE, record_list, name="converge_hook"
+            DynamicsStage.ON_CONVERGE, record_list, name="converge_hook"
         )
+        # Use threshold of 0 so DemoModel forces never converge
         dynamics = BaseDynamics(
             self.model,
             hooks=[hook],
-            convergence_hook=ConvergenceHook.from_fmax(0.05),
+            convergence_hook=ConvergenceHook.from_fmax(0.0),
         )
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([[0.10], [0.20]])
         dynamics.step(batch)
         assert "converge_hook" not in record_list
 
@@ -664,13 +682,14 @@ class TestConvergenceHook:
         assert "energy_change" in result
 
     def test_from_fmax_convenience(self) -> None:
-        """Verify from_fmax(0.05) creates single fmax criterion."""
+        """Verify from_fmax(0.05) creates forces-based criterion."""
         cc = self.ConvergenceHook.from_fmax(0.05)
 
         assert isinstance(cc.criteria, list)
         assert len(cc.criteria) == 1
-        assert cc.criteria[0].key == "fmax"
+        assert cc.criteria[0].key == "forces"
         assert cc.criteria[0].threshold == 0.05
+        assert cc.criteria[0].reduce_op == "norm"
 
     def test_from_fmax_num_criteria(self) -> None:
         """Verify num_criteria returns 1 for from_fmax."""
@@ -680,7 +699,10 @@ class TestConvergenceHook:
     def test_single_criterion_all_converged(self) -> None:
         """Verify single fmax criterion with all below returns all indices."""
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([0.01, 0.02])
+        # Graph 0 (2 atoms): max norm 0.01, Graph 1 (3 atoms): max norm 0.02
+        batch.forces = torch.tensor(
+            [[0.01, 0, 0], [0, 0, 0], [0.02, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
 
         cc = self.ConvergenceHook.from_fmax(0.05)
         result = cc.evaluate(batch)
@@ -691,7 +713,10 @@ class TestConvergenceHook:
     def test_single_criterion_none_converged(self) -> None:
         """Verify all above threshold returns None."""
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([0.10, 0.20])
+        # Graph 0: max norm 0.10, Graph 1: max norm 0.20
+        batch.forces = torch.tensor(
+            [[0.10, 0, 0], [0, 0, 0], [0.20, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
 
         cc = self.ConvergenceHook.from_fmax(0.05)
         result = cc.evaluate(batch)
@@ -701,7 +726,10 @@ class TestConvergenceHook:
     def test_single_criterion_partial(self) -> None:
         """Verify some converged returns correct indices."""
         batch = create_simple_batch()
-        batch["fmax"] = torch.tensor([0.01, 0.10])
+        # Graph 0: max norm 0.01, Graph 1: max norm 0.10
+        batch.forces = torch.tensor(
+            [[0.01, 0, 0], [0, 0, 0], [0.10, 0, 0], [0, 0, 0], [0, 0, 0]]
+        )
 
         cc = self.ConvergenceHook.from_fmax(0.05)
         result = cc.evaluate(batch)
@@ -834,17 +862,16 @@ class TestConvergenceHook:
         assert result is not None
         assert result.tolist() == [0]
 
-    def test_default_criteria_is_fmax(self) -> None:
-        """Verify ConvergenceHook() with no args defaults to fmax=0.05 criterion."""
+    def test_default_criteria_is_forces(self) -> None:
+        """Verify ConvergenceHook() defaults to forces-based fmax criterion."""
         hook = self.ConvergenceHook()
         assert len(hook.criteria) == 1
-        assert hook.criteria[0].key == "fmax"
+        assert hook.criteria[0].key == "forces"
         assert hook.criteria[0].threshold == 0.05
+        assert hook.criteria[0].reduce_op == "norm"
 
     def test_status_migration_on_call(self) -> None:
         """Verify status is migrated for converged samples matching source_status."""
-        from unittest.mock import MagicMock
-
         batch = create_simple_batch()
         batch["fmax"] = torch.tensor([0.01, 0.10])
         # Sample 0 has status 0, sample 1 has status 1
@@ -856,11 +883,8 @@ class TestConvergenceHook:
             target_status=1,
         )
 
-        # Create a mock dynamics object (unused by the hook)
-        dynamics = MagicMock()
-
-        # Call the hook
-        hook(batch, dynamics)
+        ctx = HookContext(batch=batch, step_count=0)
+        hook(ctx, DynamicsStage.AFTER_STEP)
 
         # Sample 0: converged (fmax 0.01 <= 0.05) AND status == source_status (0)
         #           -> status migrated to target_status (1)
@@ -870,8 +894,6 @@ class TestConvergenceHook:
 
     def test_no_status_migration_when_none(self) -> None:
         """Verify status is NOT modified when source/target status are None."""
-        from unittest.mock import MagicMock
-
         batch = create_simple_batch()
         batch["fmax"] = torch.tensor([0.01, 0.10])
         batch["status"] = torch.tensor([0, 0])
@@ -882,8 +904,8 @@ class TestConvergenceHook:
             target_status=None,
         )
 
-        dynamics = MagicMock()
-        hook(batch, dynamics)
+        ctx = HookContext(batch=batch, step_count=0)
+        hook(ctx, DynamicsStage.AFTER_STEP)
 
         # Status should remain unchanged
         assert batch["status"][0].item() == 0
@@ -1231,6 +1253,294 @@ class TestStepMasking:
         """Verify custom exit_status can be set."""
         dynamics = BaseDynamics(model=self.model, exit_status=3)
         assert dynamics.exit_status == 3
+
+
+# -----------------------------------------------------------------------------
+# Additional _ConvergenceCriterion reduce_op coverage
+# -----------------------------------------------------------------------------
+
+
+class TestConvergenceCriterionAdditionalReduceOps:
+    """Cover reduce_op branches not exercised by the main test class: min, mean, sum,
+    and the multi-dimensional node-level path (line 374)."""
+
+    def setup_method(self) -> None:
+        from nvalchemi.dynamics.base import _ConvergenceCriterion
+
+        self._CC = _ConvergenceCriterion
+
+    def test_reduce_op_min_graph_level(self) -> None:
+        """reduce_op='min' selects the minimum value along reduce_dims."""
+        batch = create_simple_batch()
+        # (B=2, 2) graph-level tensor; min per row: [0.01, 0.01]
+        batch["vals"] = torch.tensor([[0.01, 0.10], [0.01, 0.02]])
+        c = self._CC(key="vals", threshold=0.05, reduce_op="min", reduce_dims=-1)
+        result = c(batch)
+        assert result.shape == (2,)
+        assert result.all()  # both minima ≤ 0.05
+
+    def test_reduce_op_mean_graph_level(self) -> None:
+        """reduce_op='mean' averages along reduce_dims."""
+        batch = create_simple_batch()
+        batch["vals"] = torch.tensor([[0.01, 0.03], [0.10, 0.20]])
+        c = self._CC(key="vals", threshold=0.05, reduce_op="mean", reduce_dims=-1)
+        result = c(batch)
+        # means: [0.02, 0.15]; 0.02 ≤ 0.05 → True; 0.15 > 0.05 → False
+        assert result[0].item() is True
+        assert result[1].item() is False
+
+    def test_reduce_op_sum_graph_level(self) -> None:
+        """reduce_op='sum' sums along reduce_dims."""
+        batch = create_simple_batch()
+        batch["vals"] = torch.tensor([[0.01, 0.02], [0.10, 0.10]])
+        c = self._CC(key="vals", threshold=0.05, reduce_op="sum", reduce_dims=-1)
+        result = c(batch)
+        # sums: [0.03, 0.20]; 0.03 ≤ 0.05 → True; 0.20 > 0.05 → False
+        assert result[0].item() is True
+        assert result[1].item() is False
+
+    def test_node_level_multidim_without_reduce_op(self) -> None:
+        """Node-level (V, 3) tensor with reduce_op=None triggers the amax path (line 374).
+
+        Without reduce_op, the criterion receives forces with shape (V, 3) at the
+        node level; the amax over the last dimension is applied before scatter-reducing
+        to the graph level.
+        """
+        batch = create_simple_batch()
+        # 5 nodes, 2 graphs (2 atoms + 3 atoms)
+        forces = torch.zeros(5, 3)
+        forces[0] = torch.tensor([0.01, 0.0, 0.0])
+        forces[1] = torch.tensor([0.02, 0.0, 0.0])
+        forces[2] = torch.tensor([0.01, 0.0, 0.0])
+        forces[3] = torch.tensor([0.01, 0.0, 0.0])
+        forces[4] = torch.tensor([0.10, 0.0, 0.0])
+        batch.forces = forces
+
+        # No reduce_op: node-level multi-dim → amax(dim=-1) per node, then scatter-max
+        c = self._CC(key="forces", threshold=0.05)
+        result = c(batch)
+        # Per-node amax: [0.01, 0.02, 0.01, 0.01, 0.10]
+        # Graph-level max: graph0=0.02 ≤ 0.05 → True; graph1=0.10 > 0.05 → False
+        assert result.shape == (2,)
+        assert result[0].item() is True
+        assert result[1].item() is False
+
+
+# -----------------------------------------------------------------------------
+# masked_update
+# -----------------------------------------------------------------------------
+
+
+class TestMaskedUpdate:
+    """Tests for BaseDynamics.masked_update()."""
+
+    def setup_method(self) -> None:
+        self.model = DemoModelWrapper()
+
+    def _make_batch(self, n_graphs: int = 2, n_atoms_per_graph: int = 3) -> "Batch":
+        data_list = [
+            AtomicData(
+                atomic_numbers=torch.tensor([6] * n_atoms_per_graph, dtype=torch.long),
+                positions=torch.randn(n_atoms_per_graph, 3),
+            )
+            for _ in range(n_graphs)
+        ]
+        batch = Batch.from_data_list(data_list)
+        batch.forces = torch.randn(batch.num_nodes, 3)
+        batch.energies = torch.zeros(batch.num_graphs, 1)
+        batch.velocities = torch.randn(batch.num_nodes, 3)
+        return batch
+
+    def test_masked_update_preserves_unmasked_positions(self) -> None:
+        """Positions and velocities of unmasked samples must be restored after the update."""
+        dynamics = DemoDynamics(model=self.model, n_steps=1, dt=1.0)
+        batch = self._make_batch(n_graphs=2, n_atoms_per_graph=3)
+
+        pos_unmasked_before = batch.positions[3:6].clone()
+        vel_unmasked_before = batch.velocities[3:6].clone()
+        pos_masked_before = batch.positions[0:3].clone()
+
+        mask = torch.tensor([True, False])
+        dynamics.masked_update(batch, mask)
+
+        # Unmasked graph's positions/velocities must be unchanged
+        assert torch.allclose(batch.positions[3:6], pos_unmasked_before)
+        assert torch.allclose(batch.velocities[3:6], vel_unmasked_before)
+        # Masked graph's positions must have changed (DemoDynamics moves atoms)
+        assert not torch.allclose(batch.positions[0:3], pos_masked_before)
+
+    def test_masked_update_all_true_updates_all(self) -> None:
+        """When mask is all-True, all samples are updated."""
+        dynamics = DemoDynamics(model=self.model, n_steps=1, dt=1.0)
+        batch = self._make_batch(n_graphs=2, n_atoms_per_graph=3)
+
+        pos_before = batch.positions.clone()
+        mask = torch.tensor([True, True])
+        dynamics.masked_update(batch, mask)
+
+        assert not torch.allclose(batch.positions, pos_before)
+
+    def test_masked_update_system_level_mutable_field(self) -> None:
+        """System-level mutable fields (shape [B, ...]) are correctly saved and restored
+        for unmasked samples (covers the elif branch in masked_update)."""
+
+        class _ExtendedDynamics(DemoDynamics):
+            _mutable_fields = ("positions", "velocities", "energies")
+
+        dynamics = _ExtendedDynamics(model=self.model, n_steps=1, dt=1.0)
+        batch = self._make_batch(n_graphs=3, n_atoms_per_graph=2)
+        batch.energies = torch.tensor([[1.0], [2.0], [3.0]])
+
+        mask = torch.tensor([True, False, False])
+        dynamics.masked_update(batch, mask)
+
+        # Unmasked graphs' energies must be restored to original values
+        assert batch.energies[1].item() == pytest.approx(2.0)
+        assert batch.energies[2].item() == pytest.approx(3.0)
+
+
+# -----------------------------------------------------------------------------
+# Hook frequency gating
+# -----------------------------------------------------------------------------
+
+
+class TestHookFrequencyGating:
+    """Tests for step_count % frequency == 0 gating in _call_hooks."""
+
+    def setup_method(self) -> None:
+        self.model = DemoModelWrapper()
+
+    def _make_recording_hook(
+        self,
+        stage: DynamicsStage,
+        record: list[int],
+        frequency: int = 1,
+    ) -> "Hook":
+        class _RecHook:
+            def __init__(self, s: DynamicsStage, r: list, f: int) -> None:
+                self.stage = s
+                self.frequency = f
+                self._record = r
+
+            def __call__(self, ctx: HookContext, stage: Enum) -> None:
+                self._record.append(ctx.step_count)
+
+        return _RecHook(stage, record, frequency)
+
+    def test_frequency_1_fires_every_step(self) -> None:
+        """frequency=1 (default) should fire on every step."""
+        fired_at: list[int] = []
+        hook = self._make_recording_hook(DynamicsStage.AFTER_STEP, fired_at, 1)
+        batch = create_simple_batch()
+        batch.velocities = torch.zeros(batch.num_nodes, 3)
+        dynamics = DemoDynamics(model=self.model, n_steps=4, dt=1.0, hooks=[hook])
+        dynamics.run(batch)
+        assert fired_at == [0, 1, 2, 3]
+
+    def test_frequency_2_skips_odd_steps(self) -> None:
+        """frequency=2 should fire only when step_count % 2 == 0."""
+        fired_at: list[int] = []
+        hook = self._make_recording_hook(DynamicsStage.BEFORE_STEP, fired_at, 2)
+        batch = create_simple_batch()
+        batch.velocities = torch.zeros(batch.num_nodes, 3)
+        dynamics = DemoDynamics(model=self.model, n_steps=6, dt=1.0, hooks=[hook])
+        dynamics.run(batch)
+        assert fired_at == [0, 2, 4]
+
+    def test_frequency_3_fires_at_multiples_of_3(self) -> None:
+        """frequency=3 should fire at step_count 0, 3, 6, ..."""
+        fired_at: list[int] = []
+        hook = self._make_recording_hook(DynamicsStage.AFTER_STEP, fired_at, 3)
+        batch = create_simple_batch()
+        batch.velocities = torch.zeros(batch.num_nodes, 3)
+        dynamics = DemoDynamics(model=self.model, n_steps=9, dt=1.0, hooks=[hook])
+        dynamics.run(batch)
+        assert fired_at == [0, 3, 6]
+
+    def test_invalid_frequency_raises(self) -> None:
+        """register_hook should raise ValueError when frequency < 1."""
+        hook = self._make_recording_hook(DynamicsStage.BEFORE_STEP, [], 0)
+        dynamics = BaseDynamics(model=self.model)
+        with pytest.raises(ValueError, match="frequency"):
+            dynamics.register_hook(hook)
+
+
+# -----------------------------------------------------------------------------
+# validate_batch_keys
+# -----------------------------------------------------------------------------
+
+
+class TestValidateBatchKeys:
+    """Tests for BaseDynamics._validate_batch_keys."""
+
+    def test_missing_provides_key_raises(self) -> None:
+        """_validate_batch_keys raises RuntimeError when a declared key is absent."""
+
+        class _BrokenDynamics(BaseDynamics):
+            __provides_keys__: set = {"fmax"}  # declared but never set on batch
+
+        model = DemoModelWrapper()
+        dynamics = _BrokenDynamics(model=model)
+        batch = create_simple_batch()
+
+        with pytest.raises(RuntimeError, match="declares"):
+            dynamics._validate_batch_keys(batch)
+
+    def test_present_key_passes(self) -> None:
+        """_validate_batch_keys does not raise when all declared keys are present."""
+
+        class _OkDynamics(BaseDynamics):
+            __provides_keys__: set = {"forces"}
+
+        model = DemoModelWrapper()
+        dynamics = _OkDynamics(model=model)
+        batch = create_simple_batch()
+        batch.forces = torch.zeros(batch.num_nodes, 3)
+
+        dynamics._validate_batch_keys(batch)  # should not raise
+
+
+# -----------------------------------------------------------------------------
+# step() system-level mutable field masking
+# -----------------------------------------------------------------------------
+
+
+class TestStepSystemLevelFieldMasking:
+    """Tests for the system-level (shape [B, ...]) branch in BaseDynamics.step() masking.
+
+    Covers lines 1888–1889 (save) and the matching restore path.
+    """
+
+    def setup_method(self) -> None:
+        self.model = DemoModelWrapper()
+
+    def test_step_restores_system_level_mutable_field(self) -> None:
+        """System-level mutable fields are saved and restored for graduated samples."""
+
+        class _EnergyMutableDynamics(DemoDynamics):
+            _mutable_fields = ("positions", "velocities", "energies")
+
+        dynamics = _EnergyMutableDynamics(
+            model=self.model, n_steps=1, dt=1.0, exit_status=1
+        )
+        data_list = [
+            AtomicData(
+                atomic_numbers=torch.tensor([6, 6], dtype=torch.long),
+                positions=torch.randn(2, 3),
+            )
+            for _ in range(3)
+        ]
+        batch = Batch.from_data_list(data_list)
+        batch.forces = torch.zeros(batch.num_nodes, 3)
+        batch.velocities = torch.randn(batch.num_nodes, 3)
+        batch.energies = torch.tensor([[10.0], [20.0], [30.0]])
+        batch["status"] = torch.tensor([[0], [1], [1]])
+
+        dynamics.step(batch)
+
+        # Graduated samples' energies must be restored to their original values
+        assert batch.energies[1].item() == pytest.approx(20.0)
+        assert batch.energies[2].item() == pytest.approx(30.0)
 
 
 if __name__ == "__main__":
