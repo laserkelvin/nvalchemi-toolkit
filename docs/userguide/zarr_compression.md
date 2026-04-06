@@ -22,9 +22,9 @@ from nvalchemi.data.datapipes.backends.zarr import AtomicDataZarrWriter
 from zarr.codecs import ZstdCodec
 
 config = ZarrWriteConfig(
-     core=ZarrArrayConfig(compressors=(ZstdCodec(level=3),)),
- )
- writer = AtomicDataZarrWriter("/data/example.zarr", config=config)
+    core=ZarrArrayConfig(compressors=(ZstdCodec(level=3),)),
+)
+writer = AtomicDataZarrWriter("/data/example.zarr", config=config)
 ```
 
 For dynamics trajectories, pass the same config to
