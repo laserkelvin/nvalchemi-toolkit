@@ -163,6 +163,7 @@ class NeighborListHook:
 
         # Neighbor Matrix state: populated after the first build.
         self._neighbor_matrix: torch.Tensor | None = None
+        self._col_range: torch.Tensor | None = None
         self._num_neighbors: torch.Tensor | None = None
         self._neighbor_shifts: torch.Tensor | None = None
 
