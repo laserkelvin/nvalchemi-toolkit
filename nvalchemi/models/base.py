@@ -492,7 +492,7 @@ class BaseModelMixin(abc.ABC):
         set[str]
             Set of keys that are expected to be in the input data.
         """
-        expected_keys = {"positions", "numbers"}
+        expected_keys = {"positions", "atomic_numbers"}
         card = self.model_card
         if card.needs_pbc:
             expected_keys.add("pbc")

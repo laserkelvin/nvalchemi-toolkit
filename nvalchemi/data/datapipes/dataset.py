@@ -389,10 +389,10 @@ class Dataset:
         IndexError
             If index is out of range.
         KeyError
-            If the sample dict does not contain ``"numbers"``.
+            If the sample dict does not contain ``"atomic_numbers"``.
         """
         data_dict = self.reader._load_sample(index)
-        num_atoms = len(data_dict["numbers"])
+        num_atoms = len(data_dict["atomic_numbers"])
         num_edges = 0
         if "neighbor_list" in data_dict and data_dict["neighbor_list"] is not None:
             num_edges = data_dict["neighbor_list"].shape[0]

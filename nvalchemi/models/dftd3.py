@@ -551,7 +551,7 @@ class DFTD3ModelWrapper(nn.Module, BaseModelMixin):
         Overrides the base-class default to include ``atomic_numbers`` and
         the neighbor-matrix keys while omitting ``pbc`` (not needed for D3).
         """
-        return {"positions", "numbers", "neighbor_matrix", "num_neighbors"}
+        return {"positions", "atomic_numbers", "neighbor_matrix", "num_neighbors"}
 
     # ------------------------------------------------------------------
     # Input adaptation
@@ -662,7 +662,7 @@ class DFTD3ModelWrapper(nn.Module, BaseModelMixin):
         inp = self.adapt_input(data, **kwargs)
 
         positions = inp["positions"]  # (N, 3) Å
-        numbers = inp["numbers"].to(torch.int32)  # (N,)
+        numbers = inp["atomic_numbers"].to(torch.int32)  # (N,)
         neighbor_matrix = inp["neighbor_matrix"].contiguous()  # (N, K) int32
         neighbor_shifts = inp.get("neighbor_shifts")  # (N, K, 3) int32 or None
         batch_idx = inp["batch_idx"].contiguous()  # (N,) int32

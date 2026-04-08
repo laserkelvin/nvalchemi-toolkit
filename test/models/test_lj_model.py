@@ -51,7 +51,7 @@ def _make_lj_batch(n_atoms: int = 4, max_neighbors: int = 8) -> Batch:
 
     data = AtomicData(
         positions=positions,
-        numbers=numbers,
+        atomic_numbers=numbers,
         masses=masses,
     )
     # Attach neighbor matrix (padded with fill_value = n_atoms)
@@ -265,7 +265,7 @@ class TestAdaptInput:
         k = 8
         atomic_data = AtomicData(
             positions=torch.randn(n, 3),
-            numbers=torch.ones(n, dtype=torch.int64),
+            atomic_numbers=torch.ones(n, dtype=torch.int64),
         )
         # Attach the neighbor-matrix fields so the key-loop succeeds and the
         # isinstance(data, Batch) branch is reached.
@@ -295,7 +295,7 @@ class TestAdaptInput:
         model = _make_model()
         batch = _make_lj_batch()
         result = model.adapt_input(batch)
-        assert "numbers" in result
+        assert "atomic_numbers" in result
 
     def test_neighbor_matrix_in_result(self):
         model = _make_model()
@@ -360,8 +360,8 @@ class TestAdaptInput:
     def test_neighbor_shifts_returned_when_present(self):
         model = _make_model()
         batch = _make_lj_batch(n_atoms=4, max_neighbors=8)
-        neighbor_list_shifts = torch.zeros(4, 8, 3, dtype=torch.int32)
-        object.__setattr__(batch, "neighbor_shifts", neighbor_list_shifts)
+        shifts = torch.zeros(4, 8, 3, dtype=torch.int32)
+        object.__setattr__(batch, "neighbor_shifts", shifts)
         result = model.adapt_input(batch)
         assert result["neighbor_shifts"] is not None
 

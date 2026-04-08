@@ -32,7 +32,7 @@ def _minimal_atomic_data(
     """Build minimal AtomicData for tests."""
     positions = torch.randn(num_nodes, 3, device=device)
     numbers = torch.ones(num_nodes, dtype=torch.long, device=device)
-    kwargs: dict = {"positions": positions, "numbers": numbers}
+    kwargs: dict = {"positions": positions, "atomic_numbers": numbers}
     if num_edges > 0:
         neighbor_list = torch.zeros(num_edges, 2, dtype=torch.long, device=device)
         kwargs["neighbor_list"] = neighbor_list
@@ -46,7 +46,7 @@ def _atomic_data_with_system(
     """AtomicData with a system-level field so Batch has a 'system' group."""
     return AtomicData(
         positions=torch.randn(num_nodes, 3, device=device),
-        numbers=torch.ones(num_nodes, dtype=torch.long, device=device),
+        atomic_numbers=torch.ones(num_nodes, dtype=torch.long, device=device),
         energy=torch.tensor([[0.0]], device=device),
     )
 
@@ -59,7 +59,7 @@ def _atomic_data_with_edges_and_system(
     """AtomicData with node, edge, and system fields so Batch has all three groups."""
     return AtomicData(
         positions=torch.randn(num_nodes, 3, device=device),
-        numbers=torch.ones(num_nodes, dtype=torch.long, device=device),
+        atomic_numbers=torch.ones(num_nodes, dtype=torch.long, device=device),
         neighbor_list=torch.zeros(num_edges, 2, dtype=torch.long, device=device),
         energy=torch.tensor([[0.0]], device=device),
     )
@@ -262,7 +262,7 @@ class TestBatchReconstruction:
         assert isinstance(out, AtomicData)
         assert out.num_nodes == 4
         assert torch.allclose(out.positions, d.positions)
-        assert torch.equal(out.numbers, d.numbers)
+        assert torch.equal(out.atomic_numbers, d.atomic_numbers)
 
     def test_get_data_multiple(self):
         d1 = _minimal_atomic_data(3)
@@ -602,13 +602,13 @@ class TestBatchRoundTripAddedKeys:
         """
         d1 = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.tensor([6, 6, 6]),
+            atomic_numbers=torch.tensor([6, 6, 6]),
         )
         d1.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
 
         d2 = AtomicData(
             positions=torch.randn(5, 3),
-            numbers=torch.tensor([8, 8, 8, 8, 8]),
+            atomic_numbers=torch.tensor([8, 8, 8, 8, 8]),
         )
         d2.add_system_property("system_id", torch.tensor([[1]], dtype=torch.long))
 
@@ -634,7 +634,7 @@ class TestBatchRoundTripAddedKeys:
         """AtomicData.clone() must preserve dynamically-added key sets."""
         data = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.tensor([6, 6, 6]),
+            atomic_numbers=torch.tensor([6, 6, 6]),
         )
         data.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
 
@@ -652,7 +652,7 @@ class TestBatchRoundTripAddedKeys:
         """AtomicData.model_copy(deep=True) must preserve dynamically-added key sets."""
         data = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.tensor([6, 6, 6]),
+            atomic_numbers=torch.tensor([6, 6, 6]),
         )
         data.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
 
@@ -667,13 +667,13 @@ class TestBatchRoundTripAddedKeys:
         """Batch.clone() must preserve dynamically-added keys."""
         d1 = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.tensor([6, 6, 6]),
+            atomic_numbers=torch.tensor([6, 6, 6]),
         )
         d1.add_system_property("system_id", torch.tensor([[0]], dtype=torch.long))
 
         d2 = AtomicData(
             positions=torch.randn(5, 3),
-            numbers=torch.tensor([8, 8, 8, 8, 8]),
+            atomic_numbers=torch.tensor([8, 8, 8, 8, 8]),
         )
         d2.add_system_property("system_id", torch.tensor([[1]], dtype=torch.long))
 
@@ -726,7 +726,7 @@ class TestBatchSerialization:
         assert "batch_idx" in d
         assert "batch_ptr" in d
         assert "positions" in d
-        assert "numbers" in d
+        assert "atomic_numbers" in d
         assert d["num_graphs"] == 1
         assert d["positions"].shape == (2, 3)
 

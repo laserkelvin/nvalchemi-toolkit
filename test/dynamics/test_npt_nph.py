@@ -47,7 +47,7 @@ def _make_barostat_batch(
     atoms_per = n_atoms // n_graphs
     data_list = [
         AtomicData(
-            numbers=torch.tensor([18] * atoms_per, dtype=int_dtype),
+            atomic_numbers=torch.tensor([18] * atoms_per, dtype=int_dtype),
             positions=torch.randn(atoms_per, 3),
         )
         for _ in range(n_graphs)

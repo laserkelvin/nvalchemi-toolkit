@@ -178,7 +178,7 @@ TORCH_DTYPE_MAP_INVERSE: dict[torch.dtype, str] = {
 DEFAULT_ATTRIBUTE_MAP: dict[str, set[str]] = {
     "atoms": {
         "positions",
-        "numbers",
+        "atomic_numbers",
         "forces",
         "velocities",
         "charges",
@@ -187,7 +187,8 @@ DEFAULT_ATTRIBUTE_MAP: dict[str, set[str]] = {
     "edges": {
         "neighbor_list",
         "edge_embeddings",
-        "neighbor_list_shifts",
+        "shifts",
+        "unit_shifts",
     },
     "system": {
         "cell",
@@ -201,14 +202,15 @@ DEFAULT_ATTRIBUTE_MAP: dict[str, set[str]] = {
 
 DEFAULT_DTYPES: dict[str, str] = {
     "positions": "float32",
-    "numbers": "int64",
+    "atomic_numbers": "int64",
     "forces": "float32",
     "velocities": "float32",
     "charges": "float32",
     "masses": "float32",
     "neighbor_list": "int64",
     "edge_embeddings": "float32",
-    "neighbor_list_shifts": "float32",
+    "shifts": "float32",
+    "unit_shifts": "float32",
     "cell": "float32",
     "pbc": "bool",
     "energy": "float64",

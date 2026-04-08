@@ -64,7 +64,7 @@ def _mock_batch(
 
     data = AtomicData(
         positions=positions,
-        numbers=numbers,
+        atomic_numbers=numbers,
         masses=masses,
         forces=forces,
         energy=energy,
@@ -108,7 +108,7 @@ def _make_atomic_data(n: int = 4, device: str = "cpu"):
 
     data = AtomicData(
         positions=torch.randn(n, 3, device=device),
-        numbers=torch.ones(n, dtype=torch.int64, device=device),
+        atomic_numbers=torch.ones(n, dtype=torch.int64, device=device),
         masses=torch.ones(n, device=device),
         forces=torch.zeros(n, 3, device=device),
         energy=torch.zeros(1, 1, device=device),
@@ -237,7 +237,7 @@ class TestDFTD3ModelWrapper:
         wrapper = _make_d3_wrapper(a1=0.4, a2=4.4, s8=0.8)
         keys = wrapper.input_data()
         assert "positions" in keys
-        assert "numbers" in keys
+        assert "atomic_numbers" in keys
         assert "neighbor_matrix" in keys
         assert "num_neighbors" in keys
 
@@ -281,7 +281,7 @@ class TestDFTD3ModelWrapper:
         # Build a batch that has positions and numbers but NO neighbor_matrix.
         data = AtomicData(
             positions=torch.randn(n, 3),
-            numbers=torch.ones(n, dtype=torch.int64),
+            atomic_numbers=torch.ones(n, dtype=torch.int64),
             masses=torch.ones(n),
             forces=torch.zeros(n, 3),
             energy=torch.zeros(1, 1),
@@ -1236,7 +1236,7 @@ class TestDFTD3IntegrationForward:
 
         wrapper = DFTD3ModelWrapper(a1=0.4289, a2=4.4407, s8=0.7875)
         wrapper.model_config.compute_stresses = True
-        # D3 virial computation requires neighbor neighbor_list_shifts (PBC image vectors).
+        # D3 virial computation requires neighbor shifts (PBC image vectors).
         batch = _mock_batch(n=4, b=1, with_cell=True, with_shifts=True)
         out = wrapper(batch)
         assert "stress" in out

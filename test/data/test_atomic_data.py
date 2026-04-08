@@ -44,7 +44,7 @@ def _minimal_atomic_data(
     """Build minimal AtomicData for tests."""
     positions = torch.randn(num_nodes, 3, device=device)
     numbers = torch.ones(num_nodes, dtype=torch.long, device=device)
-    kwargs: dict = {"positions": positions, "numbers": numbers}
+    kwargs: dict = {"positions": positions, "atomic_numbers": numbers}
     if num_edges > 0:
         neighbor_list = torch.zeros(num_edges, 2, dtype=torch.long, device=device)
         kwargs["neighbor_list"] = neighbor_list
@@ -60,9 +60,9 @@ class TestAtomicDataConstruction:
     def test_minimal_construction(self):
         positions = torch.randn(4, 3)
         numbers = torch.ones(4, dtype=torch.long)
-        data = AtomicData(positions=positions, numbers=numbers)
+        data = AtomicData(positions=positions, atomic_numbers=numbers)
         assert data.positions.shape == (4, 3)
-        assert data.numbers.shape == (4,)
+        assert data.atomic_numbers.shape == (4,)
         assert data.neighbor_list is None
 
     def test_with_edge_index(self):
@@ -73,7 +73,7 @@ class TestAtomicDataConstruction:
     def test_optional_system_fields(self):
         data = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
             cell=torch.eye(3).unsqueeze(0),
             pbc=torch.tensor([[True, True, False]]),
             energy=torch.tensor([[1.0]]),
@@ -87,16 +87,16 @@ class TestAtomicDataConstruction:
         """AtomicData should accept both int32 and int64 for integer fields."""
         data = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.tensor([1, 6, 8], dtype=int_dtype),
+            atomic_numbers=torch.tensor([1, 6, 8], dtype=int_dtype),
             neighbor_list=torch.zeros(4, 2, dtype=int_dtype),
         )
-        assert data.numbers.dtype == int_dtype
+        assert data.atomic_numbers.dtype == int_dtype
         assert data.neighbor_list.dtype == int_dtype
 
     def test_optional_node_fields(self):
         data = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.ones(3, dtype=torch.long),
+            atomic_numbers=torch.ones(3, dtype=torch.long),
             forces=torch.randn(3, 3),
         )
         assert data.forces.shape == (3, 3)
@@ -125,14 +125,14 @@ class TestAtomicDataProperties:
         assert data.device == data.positions.device
         data_cuda = AtomicData(
             positions=torch.randn(2, 3, device="cpu"),
-            numbers=torch.ones(2, dtype=torch.long, device="cpu"),
+            atomic_numbers=torch.ones(2, dtype=torch.long, device="cpu"),
         )
         assert data_cuda.device.type == "cpu"
 
     def test_dtype(self):
         data = AtomicData(
             positions=torch.randn(2, 3, dtype=torch.float64),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
         )
         assert data.dtype == torch.float64
 
@@ -145,11 +145,11 @@ class TestAtomicDataKeys:
 
     def test_node_keys_contains_positions(self):
         assert "positions" in AtomicData._default_node_keys
-        assert "numbers" in AtomicData._default_node_keys
+        assert "atomic_numbers" in AtomicData._default_node_keys
 
     def test_edge_keys_contains_edge_index(self):
         assert "neighbor_list" in AtomicData._default_edge_keys
-        assert "neighbor_list_shifts" in AtomicData._default_edge_keys
+        assert "shifts" in AtomicData._default_edge_keys
 
     def test_system_keys_contains_cell_energies(self):
         assert "cell" in AtomicData._default_system_keys
@@ -166,7 +166,7 @@ class TestAtomicDataPropertiesDict:
         data = _minimal_atomic_data(3)
         node_props = data.node_properties
         assert "positions" in node_props
-        assert "numbers" in node_props
+        assert "atomic_numbers" in node_props
         assert node_props["positions"].shape == (3, 3)
 
     def test_edge_properties_empty_without_edges(self):
@@ -177,7 +177,7 @@ class TestAtomicDataPropertiesDict:
     def test_system_properties(self):
         data = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
             energy=torch.tensor([[1.0]]),
         )
         sys_props = data.system_properties
@@ -263,22 +263,22 @@ class TestAtomicDataValidation:
         with pytest.raises(ValueError, match="Inconsistent number of atoms"):
             AtomicData(
                 positions=torch.randn(4, 3),
-                numbers=torch.ones(3, dtype=torch.long),
+                atomic_numbers=torch.ones(3, dtype=torch.long),
             )
 
     def test_edge_inconsistency_raises(self):
         with pytest.raises(ValueError, match="Inconsistent number of edges"):
             AtomicData(
                 positions=torch.randn(4, 3),
-                numbers=torch.ones(4, dtype=torch.long),
+                atomic_numbers=torch.ones(4, dtype=torch.long),
                 neighbor_list=torch.zeros(5, 2, dtype=torch.long),
-                neighbor_list_shifts=torch.randn(3, 3),
+                shifts=torch.randn(3, 3),
             )
 
     def test_default_masses_filled(self):
         data = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.tensor([1, 6], dtype=torch.long),
+            atomic_numbers=torch.tensor([1, 6], dtype=torch.long),
         )
         assert data.masses is not None
         assert data.masses.shape == (2,)
@@ -287,7 +287,7 @@ class TestAtomicDataValidation:
         """atom_categories as list of AtomCategory is converted to tensor."""
         data = AtomicData(
             positions=torch.randn(3, 3),
-            numbers=torch.ones(3, dtype=torch.long),
+            atomic_numbers=torch.ones(3, dtype=torch.long),
             atom_categories=[
                 t.AtomCategory.GAS,
                 t.AtomCategory.SURFACE,
@@ -302,7 +302,7 @@ class TestAtomicDataValidation:
         """When velocities is None, validator sets zeros like positions."""
         data = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
         )
         assert data.velocities is not None
         assert data.velocities.shape == data.positions.shape
@@ -326,11 +326,11 @@ class TestAtomicDataHashAndEq:
     def test_eq_same_structure(self):
         d1 = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
         )
         d2 = AtomicData(
             positions=d1.positions.clone(),
-            numbers=d1.numbers.clone(),
+            atomic_numbers=d1.atomic_numbers.clone(),
         )
         assert d1 == d2
 
@@ -343,7 +343,7 @@ class TestAtomicDataHashAndEq:
         """chemical_hash when pbc/cell are None uses empty pbc/cell string."""
         data = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
         )
         assert data.pbc is None
         assert data.cell is None
@@ -355,7 +355,7 @@ class TestAtomicDataHashAndEq:
         """chemical_hash when pbc and cell are set includes them in the hash."""
         data = AtomicData(
             positions=torch.randn(2, 3),
-            numbers=torch.ones(2, dtype=torch.long),
+            atomic_numbers=torch.ones(2, dtype=torch.long),
             pbc=torch.tensor([[True, True, False]]),
             cell=torch.eye(3).unsqueeze(0),
         )
@@ -365,7 +365,7 @@ class TestAtomicDataHashAndEq:
         # Same structure should give same hash
         data2 = AtomicData(
             positions=data.positions.clone(),
-            numbers=data.numbers.clone(),
+            atomic_numbers=data.atomic_numbers.clone(),
             pbc=data.pbc.clone(),
             cell=data.cell.clone(),
         )
@@ -381,7 +381,7 @@ class TestAtomicDataAccess:
     def test_getitem(self):
         data = _minimal_atomic_data(2)
         assert data["positions"] is data.positions
-        assert data["numbers"] is data.numbers
+        assert data["atomic_numbers"] is data.atomic_numbers
 
     def test_setitem(self):
         data = _minimal_atomic_data(2)
@@ -620,7 +620,7 @@ class TestDtypeCastWarning:
             warnings.simplefilter("always")
             AtomicData(
                 positions=torch.randn(2, 3, dtype=torch.float32),
-                numbers=torch.ones(2, dtype=torch.long),
+                atomic_numbers=torch.ones(2, dtype=torch.long),
                 forces=torch.randn(2, 3, dtype=torch.float64),
             )
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
@@ -644,7 +644,7 @@ class TestDtypeCastWarning:
                 warnings.simplefilter("always")
                 AtomicData(
                     positions=torch.randn(2, 3, dtype=torch.float32),
-                    numbers=torch.ones(2, dtype=torch.long),
+                    atomic_numbers=torch.ones(2, dtype=torch.long),
                     forces=torch.randn(2, 3, dtype=torch.float64),
                 )
 
@@ -671,7 +671,7 @@ class TestDtypeCastWarning:
             warnings.simplefilter("always")
             AtomicData(
                 positions=torch.randn(2, 3, dtype=torch.float32),
-                numbers=torch.ones(2, dtype=torch.long),
+                atomic_numbers=torch.ones(2, dtype=torch.long),
                 forces=torch.randn(2, 3, dtype=torch.float32),
             )
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
@@ -748,7 +748,7 @@ class TestFromStructure:
         assert data.pbc is not None
         assert data.cell.shape == (1, 3, 3)
         assert data.pbc.shape == (1, 3)
-        assert data.numbers.tolist() == [29, 29, 29, 29]
+        assert data.atomic_numbers.tolist() == [29, 29, 29, 29]
         assert data.positions.shape == (4, 3)
         assert data.masses is not None
 
@@ -760,7 +760,7 @@ class TestFromStructure:
         data = AtomicData.from_structure(mol)
         assert data.cell is None
         assert data.pbc is None
-        assert data.numbers.tolist() == [8, 1, 1]
+        assert data.atomic_numbers.tolist() == [8, 1, 1]
         assert data.positions.shape == (3, 3)
 
     def test_mixed_pbc_with_cell(self):

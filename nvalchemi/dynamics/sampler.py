@@ -234,7 +234,7 @@ class SizeAwareSampler(Sampler[int]):
         usable_mem = int(total_mem * self._max_gpu_memory_fraction)
 
         # Estimate per-atom memory: each atom needs storage for
-        # positions (3 * 4 bytes float32), numbers (8 bytes long),
+        # positions (3 * 4 bytes float32), atomic_numbers (8 bytes long),
         # forces (3 * 4 bytes), velocities (3 * 4 bytes),
         # masses (4 bytes), batch index (8 bytes),
         # plus model hidden states (estimate ~256 bytes per atom for embeddings)

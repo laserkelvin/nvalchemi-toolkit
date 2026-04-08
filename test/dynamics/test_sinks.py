@@ -52,7 +52,7 @@ def create_test_batch(num_graphs: int = 2, device: str = "cpu") -> Batch:
     """
     data_list = [
         AtomicData(
-            numbers=torch.tensor([6, 8], dtype=torch.long),
+            atomic_numbers=torch.tensor([6, 8], dtype=torch.long),
             positions=torch.randn(2, 3),
         )
         for _ in range(num_graphs)
@@ -78,7 +78,7 @@ def create_single_atom_batch(num_graphs: int = 1, device: str = "cpu") -> Batch:
     """
     data_list = [
         AtomicData(
-            numbers=torch.tensor([1], dtype=torch.long),
+            atomic_numbers=torch.tensor([1], dtype=torch.long),
             positions=torch.randn(1, 3),
         )
         for _ in range(num_graphs)
@@ -494,7 +494,7 @@ class TestHostMemory:
 
         # Verify all tensors are on CPU
         assert retrieved.positions.device == torch.device("cpu")
-        assert retrieved.numbers.device == torch.device("cpu")
+        assert retrieved.atomic_numbers.device == torch.device("cpu")
 
     def test_zero_clears_buffer(self) -> None:
         """Verify zero() clears all stored data."""
@@ -595,14 +595,14 @@ class TestZarrData:
 
         batch = create_test_batch(num_graphs=num_graphs)
         original_positions = batch.positions.clone()
-        original_atomic_numbers = batch.numbers.clone()
+        original_atomic_numbers = batch.atomic_numbers.clone()
 
         sink.write(batch)
         retrieved = sink.read()
 
         # Verify data matches
         assert torch.allclose(retrieved.positions, original_positions)
-        assert torch.equal(retrieved.numbers, original_atomic_numbers)
+        assert torch.equal(retrieved.atomic_numbers, original_atomic_numbers)
         assert retrieved.num_graphs == num_graphs
 
     @pytest.mark.parametrize("num_graphs", [1, 4, 8])

@@ -82,7 +82,7 @@ def _line_batch(
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [5.0, 0.0, 0.0]])
         kwargs: dict = dict(
             positions=pos,
-            numbers=torch.tensor([1, 1, 1], dtype=int_dtype),
+            atomic_numbers=torch.tensor([1, 1, 1], dtype=int_dtype),
         )
         if pbc:
             kwargs["cell"] = torch.eye(3).unsqueeze(0) * cell_size
@@ -100,7 +100,7 @@ def _pbc_wrap_batch(device: str) -> Batch:
     pos = torch.tensor([[0.1, 0.0, 0.0], [2.9, 0.0, 0.0]])
     data = AtomicData(
         positions=pos,
-        numbers=torch.tensor([1, 1], dtype=torch.long),
+        atomic_numbers=torch.tensor([1, 1], dtype=torch.long),
         cell=torch.eye(3).unsqueeze(0) * 3.0,
         pbc=torch.tensor([[True, True, True]]),
     )
@@ -461,7 +461,7 @@ class TestAllocNlKwargs:
         positions = torch.rand(N_per, 3) * 10.0
         data = AtomicData(
             positions=positions,
-            numbers=torch.ones(N_per, dtype=torch.long),
+            atomic_numbers=torch.ones(N_per, dtype=torch.long),
         )
         batch = Batch.from_data_list([data]).to(device)
 
@@ -529,7 +529,7 @@ class TestShapeInvalidation:
         # Build a batch with more atoms
         data = AtomicData(
             positions=torch.rand(5, 3),
-            numbers=torch.ones(5, dtype=torch.long),
+            atomic_numbers=torch.ones(5, dtype=torch.long),
         )
         batch_large = Batch.from_data_list([data]).to(device)
         hook(_ctx(batch_large), _STAGE)
@@ -558,7 +558,7 @@ class TestShapeInvalidation:
         # New batch with different N forces reallocation
         data = AtomicData(
             positions=torch.rand(5, 3),
-            numbers=torch.ones(5, dtype=torch.long),
+            atomic_numbers=torch.ones(5, dtype=torch.long),
         )
         batch_new = Batch.from_data_list([data]).to(device)
         hook(_ctx(batch_new), _STAGE)
@@ -685,7 +685,7 @@ class TestNeighborListHookMatrix:
         pos = torch.tensor([[0.1, 0.0, 0.0], [2.9, 0.0, 0.0]])
         data = AtomicData(
             positions=pos,
-            numbers=torch.tensor([1, 1], dtype=torch.long),
+            atomic_numbers=torch.tensor([1, 1], dtype=torch.long),
         )
         batch = Batch.from_data_list([data]).to(device)
 
@@ -750,8 +750,8 @@ class TestNeighborListHookCOO:
         batch = _pbc_wrap_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        assert hasattr(batch, "neighbor_list_shifts")
-        assert batch.neighbor_list_shifts.shape[1] == 3
+        assert hasattr(batch, "unit_shifts")
+        assert batch.unit_shifts.shape[1] == 3
 
     def test_no_edges_for_isolated_atom(self, device: str):
         """Atom 2 (isolated, dist > cutoff to all others) should appear in no edges."""

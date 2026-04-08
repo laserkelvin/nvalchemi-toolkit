@@ -205,7 +205,7 @@ class GPUBuffer(DataSink):
     sizes for atoms and edges on the first :meth:`write` call.  The
     incoming batch serves as a template for attribute keys and dtypes,
     ensuring all fields are preserved (not just positions and
-    numbers).
+    atomic_numbers).
 
     Parameters
     ----------

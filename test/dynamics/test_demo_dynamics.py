@@ -62,7 +62,7 @@ def _make_batch(n_atoms: int = 1) -> Batch:
         Batch with pre-allocated ``forces`` and ``energy``.
     """
     data = AtomicData(
-        numbers=torch.tensor([6] * n_atoms, dtype=torch.long),
+        atomic_numbers=torch.tensor([6] * n_atoms, dtype=torch.long),
         positions=torch.zeros(n_atoms, 3),
     )
     batch = Batch.from_data_list([data])
@@ -92,7 +92,7 @@ def _make_multi_batch(
     """
     data_list = [
         AtomicData(
-            numbers=torch.tensor(
+            atomic_numbers=torch.tensor(
                 [6] * n_atoms_per_graph,
                 dtype=torch.long,
             ),
@@ -136,7 +136,7 @@ class TestFirstStep:
         dynamics = DemoDynamics(model=model, n_steps=1, dt=1.0)
 
         data = AtomicData(
-            numbers=torch.tensor([6, 6, 6], dtype=int_dtype),
+            atomic_numbers=torch.tensor([6, 6, 6], dtype=int_dtype),
             positions=torch.zeros(3, 3),
         )
         batch = Batch.from_data_list([data]).to(device)
@@ -192,11 +192,11 @@ class TestMultiGraph:
         dynamics = DemoDynamics(model=model, n_steps=5, dt=1.0)
 
         data1 = AtomicData(
-            numbers=torch.tensor([6], dtype=torch.long),
+            atomic_numbers=torch.tensor([6], dtype=torch.long),
             positions=torch.tensor([[0.0, 0.0, 0.0]]),
         )
         data2 = AtomicData(
-            numbers=torch.tensor([6], dtype=torch.long),
+            atomic_numbers=torch.tensor([6], dtype=torch.long),
             positions=torch.tensor([[10.0, 0.0, 0.0]]),
         )
         batch = Batch.from_data_list([data1, data2])
@@ -386,7 +386,7 @@ class TestFusedStageIntegration:
 
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6], dtype=torch.long),
+                atomic_numbers=torch.tensor([6], dtype=torch.long),
                 positions=torch.tensor([[float(i), 0.0, 0.0]]),
             )
             for i in range(4)
@@ -439,7 +439,7 @@ class TestFusedStageIntegration:
 
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6], dtype=torch.long),
+                atomic_numbers=torch.tensor([6], dtype=torch.long),
                 positions=torch.tensor([[float(i), 0.0, 0.0]]),
             )
             for i in range(4)

@@ -283,7 +283,7 @@ class AtomicDataZarrWriter:
         │   └── edges_mask              # bool [E_total] — False = deleted edge
         │
         ├── core/                       # AtomicData fields (auto-populated)
-        │   ├── numbers                 # int64 [V_total]
+        │   ├── atomic_numbers          # int64 [V_total]
         │   ├── positions               # float32 [V_total, 3]
         │   └── ...
         │
@@ -1196,7 +1196,7 @@ class AtomicDataZarrReader(Reader):
         │   └── samples_mask            # bool [N] — False = deleted sample
         │
         ├── core/                       # AtomicData fields
-        │   ├── numbers                 # int64 [V_total]
+        │   ├── atomic_numbers          # int64 [V_total]
         │   ├── positions               # float32 [V_total, 3]
         │   └── ...
         │

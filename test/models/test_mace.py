@@ -154,7 +154,9 @@ def _make_water(device: str = "cpu") -> AtomicData:
         dtype=torch.long,
         device=device,
     )
-    return AtomicData(positions=positions, numbers=numbers, neighbor_list=neighbor_list)
+    return AtomicData(
+        positions=positions, atomic_numbers=numbers, neighbor_list=neighbor_list
+    )
 
 
 def _make_single_atom(device: str = "cpu") -> AtomicData:
@@ -162,11 +164,13 @@ def _make_single_atom(device: str = "cpu") -> AtomicData:
     positions = torch.tensor([[0.5, 0.0, 0.0]], dtype=torch.float32, device=device)
     numbers = torch.tensor([1], dtype=torch.long, device=device)
     neighbor_list = torch.zeros(0, 2, dtype=torch.long, device=device)
-    return AtomicData(positions=positions, numbers=numbers, neighbor_list=neighbor_list)
+    return AtomicData(
+        positions=positions, atomic_numbers=numbers, neighbor_list=neighbor_list
+    )
 
 
 def _make_pbc_water(device: str = "cpu") -> AtomicData:
-    """H2O in a periodic cubic box with integer neighbor_list_shifts on edges."""
+    """H2O in a periodic cubic box with integer unit_shifts on edges."""
     positions = torch.tensor(
         [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [0.0, 0.96, 0.0]],
         dtype=torch.float32,
@@ -178,19 +182,19 @@ def _make_pbc_water(device: str = "cpu") -> AtomicData:
         dtype=torch.long,
         device=device,
     )
-    # Cubic 10 Å cell; edges are all within the same image, so neighbor_list_shifts are zero.
+    # Cubic 10 Å cell; edges are all within the same image, so unit_shifts are zero.
     # AtomicData expects cell as [B, 3, 3] and pbc as [B, 3].
     cell = (torch.eye(3, dtype=torch.float32, device=device) * 10.0).unsqueeze(
         0
     )  # [1, 3, 3]
-    neighbor_list_shifts = torch.zeros(6, 3, dtype=torch.float32, device=device)
+    unit_shifts = torch.zeros(6, 3, dtype=torch.float32, device=device)
     pbc = torch.tensor([[True, True, True]], device=device)  # [1, 3]
     return AtomicData(
         positions=positions,
-        numbers=numbers,
+        atomic_numbers=numbers,
         neighbor_list=neighbor_list,
         cell=cell,
-        neighbor_list_shifts=neighbor_list_shifts,
+        unit_shifts=unit_shifts,
         pbc=pbc,
     )
 
@@ -251,7 +255,7 @@ class TestInstantiation:
         assert wrapper.model_config.compute_stresses is False
 
     def test_node_emb_buffer_shape(self, wrapper):
-        # [max_z + 1, num_elements] = [9, 3] for numbers=[1, 6, 8]
+        # [max_z + 1, num_elements] = [9, 3] for atomic_numbers=[1, 6, 8]
         assert wrapper._node_emb.shape == (9, 3)
 
     def test_node_emb_not_in_state_dict(self, wrapper):
@@ -402,7 +406,7 @@ class TestAdaptInput:
         assert inp["batch"].max().item() == 0
 
     def test_no_pbc_zero_unit_shifts(self, wrapper, single_batch):
-        # single_batch has no neighbor_list_shifts → adapt_input fills zeros
+        # single_batch has no unit_shifts → adapt_input fills zeros
         inp = wrapper.adapt_input(single_batch)
         # nvalchemi neighbor_list is [E, 2]; adapt_input transposes to [2, E].
         E = single_batch.neighbor_list.shape[0]
@@ -419,7 +423,7 @@ class TestAdaptInput:
 
     def test_pbc_unit_shifts_passed_through(self, wrapper, pbc_batch):
         inp = wrapper.adapt_input(pbc_batch)
-        # neighbor_list_shifts were all zeros in _make_pbc_water; should be preserved
+        # unit_shifts were all zeros in _make_pbc_water; should be preserved
         assert inp["unit_shifts"].shape[1] == 3
         assert inp["unit_shifts"].abs().max().item() == pytest.approx(0.0)
 
@@ -678,7 +682,7 @@ _WATER_EDGE_INDEX = torch.tensor(
 def _water_batch(dtype: torch.dtype = torch.float64, device: str = "cpu") -> Batch:
     data = AtomicData(
         positions=_WATER_POSITIONS.to(dtype=dtype, device=device),
-        numbers=_WATER_ATOMIC_NUMBERS.to(device=device),
+        atomic_numbers=_WATER_ATOMIC_NUMBERS.to(device=device),
         neighbor_list=_WATER_EDGE_INDEX.to(device=device),
     )
     return Batch.from_data_list([data])
@@ -856,7 +860,7 @@ class TestRealCheckpoint:
 
         # ASE reference: single H2O, no PBC.
         atoms = Atoms(
-            numbers=[8, 1, 1],
+            atomic_numbers=[8, 1, 1],
             positions=_WATER_POSITIONS.numpy(),
         )
         ase_calc = MACECalculator(
@@ -957,7 +961,9 @@ def test_forward_dtype_consistency(dtype):
     neighbor_list = torch.tensor(
         [[0, 1], [1, 0], [0, 2], [2, 0], [1, 2], [2, 1]], dtype=torch.long
     )
-    data = AtomicData(positions=positions, numbers=numbers, neighbor_list=neighbor_list)
+    data = AtomicData(
+        positions=positions, atomic_numbers=numbers, neighbor_list=neighbor_list
+    )
     batch = Batch.from_data_list([data])
 
     out = wrapper.forward(batch)

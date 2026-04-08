@@ -207,8 +207,6 @@ class DemoModelWrapper(DemoModel, BaseModelMixin):
         """
         model_inputs = super().adapt_input(data, **kwargs)
         # type cast parameters to match the model's expected types
-        model_inputs.pop("numbers", None)
-        model_inputs["atomic_numbers"] = data.numbers
         model_inputs["positions"] = data.positions.to(self.dtype)
         if isinstance(data, Batch):
             model_inputs["batch_indices"] = data.batch_idx

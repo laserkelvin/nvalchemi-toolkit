@@ -50,7 +50,7 @@ def _make_batch(
         categories = torch.zeros(n_atoms, dtype=torch.long)
         categories[-n_frozen:] = AtomCategory.SPECIAL.value
         data = AtomicData(
-            numbers=torch.tensor([6] * n_atoms, dtype=torch.long),
+            atomic_numbers=torch.tensor([6] * n_atoms, dtype=torch.long),
             positions=torch.randn(n_atoms, 3),
             cell=torch.eye(3).unsqueeze(0) * 10.0,
             pbc=torch.tensor([[True, True, True]]),

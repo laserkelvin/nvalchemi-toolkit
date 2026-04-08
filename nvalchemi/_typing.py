@@ -224,8 +224,8 @@ class AtomsLike(Protocol):
 
     Attributes
     ----------
-    numbers : AtomicNumbers
-        1D tensor containing atom numbers.
+    atomic_numbers : AtomicNumbers
+        1D tensor containing atomic numbers.
     positions : NodePositions
         2D tensor containing atomic positions.
     cell : LatticeVectors
@@ -233,7 +233,7 @@ class AtomsLike(Protocol):
         structure within a batch.
     """
 
-    numbers: AtomicNumbers
+    atomic_numbers: AtomicNumbers
     positions: NodePositions
     cell: LatticeVectors | None
     energy: Energy | None

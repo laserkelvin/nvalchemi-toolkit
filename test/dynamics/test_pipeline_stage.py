@@ -59,7 +59,7 @@ def _make_atomic_data(num_atoms: int = 3) -> AtomicData:
         A minimal AtomicData instance.
     """
     return AtomicData(
-        numbers=torch.randint(1, 20, (num_atoms,)),
+        atomic_numbers=torch.randint(1, 20, (num_atoms,)),
         positions=torch.randn(num_atoms, 3),
     )
 
@@ -97,7 +97,7 @@ def _make_atomic_data_with_system(num_atoms: int = 3) -> AtomicData:
         An AtomicData instance with system-level energy.
     """
     return AtomicData(
-        numbers=torch.randint(1, 20, (num_atoms,)),
+        atomic_numbers=torch.randint(1, 20, (num_atoms,)),
         positions=torch.randn(num_atoms, 3),
         energy=torch.tensor([[0.0]]),
     )

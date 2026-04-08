@@ -100,7 +100,7 @@ class MockDataset:
         """
         num_atoms, num_edges = self.samples[index]
         data = AtomicData(
-            numbers=torch.arange(1, num_atoms + 1, dtype=torch.long),
+            atomic_numbers=torch.arange(1, num_atoms + 1, dtype=torch.long),
             positions=torch.randn(num_atoms, 3),
         )
         return data, {}
@@ -128,7 +128,7 @@ def create_batch_with_status(n_graphs: int = 3, device: str = "cpu") -> Batch:
     """
     data_list = [
         AtomicData(
-            numbers=torch.tensor([6], dtype=torch.long),
+            atomic_numbers=torch.tensor([6], dtype=torch.long),
             positions=torch.randn(1, 3),
         )
         for _ in range(n_graphs)

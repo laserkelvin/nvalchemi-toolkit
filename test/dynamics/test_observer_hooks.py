@@ -50,7 +50,7 @@ def _make_batch(
 ) -> Batch:
     data_list = [
         AtomicData(
-            numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
+            atomic_numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
             positions=torch.randn(atoms_per_graph, 3),
         )
         for _ in range(n_graphs)

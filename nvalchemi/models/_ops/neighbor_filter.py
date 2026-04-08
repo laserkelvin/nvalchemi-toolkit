@@ -315,7 +315,7 @@ def prepare_neighbors_for_model(
         For ``MATRIX`` format: keys ``"neighbor_matrix"``, ``"num_neighbors"``,
         ``"neighbor_shifts"`` (only present when shifts exist).
         For ``COO`` format: keys ``"neighbor_list"`` (shape ``(E, 2)``),
-        ``"edge_ptr"``, ``"neighbor_list_shifts"`` (only present when shifts exist).
+        ``"edge_ptr"``, ``"unit_shifts"`` (only present when shifts exist).
 
     Raises
     ------
@@ -398,14 +398,14 @@ def prepare_neighbors_for_model(
         )
         out = {"neighbor_list": nl, "edge_ptr": ptr}
         if shifts is not None:
-            out["neighbor_list_shifts"] = shifts
+            out["unit_shifts"] = shifts
         return out
 
     # Sub-case B: have list — filter if needed.
     if has_list:
         nl = data.neighbor_list  # (E, 2)
         ptr = data.edge_ptr
-        us: Tensor | None = getattr(data, "neighbor_list_shifts", None)
+        us: Tensor | None = getattr(data, "unit_shifts", None)
 
         if needs_filter:
             nl, ptr, us = filter_neighbor_list(
@@ -420,7 +420,7 @@ def prepare_neighbors_for_model(
 
         out = {"neighbor_list": nl, "edge_ptr": ptr}
         if us is not None:
-            out["neighbor_list_shifts"] = us
+            out["unit_shifts"] = us
         return out
 
     raise RuntimeError(

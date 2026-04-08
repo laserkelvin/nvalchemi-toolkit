@@ -942,7 +942,7 @@ class TestMultiLevelStorage:
     def test_from_data_factory(self):
         data = {
             "positions": torch.randn(10, 3),
-            "numbers": torch.ones(10, dtype=torch.long),
+            "atomic_numbers": torch.ones(10, dtype=torch.long),
             "cell": torch.eye(3).unsqueeze(0).expand(2, 3, 3),
             "energy": torch.randn(2),
         }
@@ -1300,7 +1300,7 @@ class TestMultiLevelStorageFromBatches:
         b1 = MultiLevelStorage.from_data(
             data={
                 "positions": torch.randn(3, 3),
-                "numbers": torch.ones(3, dtype=torch.long),
+                "atomic_numbers": torch.ones(3, dtype=torch.long),
             },
             attr_map=schema,
             segment_lengths={"atoms": [3]},
@@ -1309,7 +1309,7 @@ class TestMultiLevelStorageFromBatches:
         b2 = MultiLevelStorage.from_data(
             data={
                 "positions": torch.randn(4, 3),
-                "numbers": torch.ones(4, dtype=torch.long),
+                "atomic_numbers": torch.ones(4, dtype=torch.long),
             },
             attr_map=schema,
             segment_lengths={"atoms": [4]},
@@ -1351,7 +1351,7 @@ class TestMultiLevelStorageToSegmented:
         # positions shape (2, 3, 3): 2 graphs, 3 atoms each, 3 coords
         data = {
             "positions": torch.randn(2, 3, 3),
-            "numbers": torch.ones(2, 3, dtype=torch.long),
+            "atomic_numbers": torch.ones(2, 3, dtype=torch.long),
         }
         m = MultiLevelStorage.from_data(
             data, attr_map=schema, segment_lengths=None, device="cpu", validate=False

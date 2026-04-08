@@ -234,7 +234,7 @@ def _make_atomic_data(n_atoms: int = 4, seed: int = 0) -> AtomicData:
     g.manual_seed(seed)
     data = AtomicData(
         positions=torch.randn(n_atoms, 3, generator=g),
-        numbers=torch.randint(1, 10, (n_atoms,), dtype=torch.long, generator=g),
+        atomic_numbers=torch.randint(1, 10, (n_atoms,), dtype=torch.long, generator=g),
         masses=torch.ones(n_atoms),
         forces=torch.zeros(n_atoms, 3),
         energy=torch.zeros(1, 1),

@@ -444,7 +444,7 @@ class Batch(DataMixin):
         if template is None:
             template = AtomicData(
                 positions=torch.zeros(1, 3),
-                numbers=torch.zeros(1, dtype=torch.long),
+                atomic_numbers=torch.zeros(1, dtype=torch.long),
                 energy=torch.tensor([[0.0]]),
             )
         if isinstance(template, AtomicData):

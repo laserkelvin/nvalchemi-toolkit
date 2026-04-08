@@ -91,7 +91,7 @@ class MockDataset:
         """
         num_atoms, num_edges = self.samples[index]
         data = AtomicData(
-            numbers=torch.arange(1, num_atoms + 1, dtype=torch.long),
+            atomic_numbers=torch.arange(1, num_atoms + 1, dtype=torch.long),
             positions=torch.randn(num_atoms, 3),
         )
         # Add neighbor_list if there are edges
@@ -220,7 +220,7 @@ class TestSizeAwareSamplerConstruction:
         class NoLenDataset:
             def __getitem__(self, idx: int) -> tuple[AtomicData, dict]:
                 return AtomicData(
-                    numbers=torch.tensor([1]), positions=torch.zeros(1, 3)
+                    atomic_numbers=torch.tensor([1]), positions=torch.zeros(1, 3)
                 ), {}
 
             def get_metadata(self, idx: int) -> tuple[int, int]:
@@ -261,7 +261,7 @@ class TestSizeAwareSamplerConstruction:
 
             def __getitem__(self, idx: int) -> tuple[AtomicData, dict]:
                 return AtomicData(
-                    numbers=torch.tensor([1]), positions=torch.zeros(1, 3)
+                    atomic_numbers=torch.tensor([1]), positions=torch.zeros(1, 3)
                 ), {}
 
         with pytest.raises(TypeError, match="must implement get_metadata"):

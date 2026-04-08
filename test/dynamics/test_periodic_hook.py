@@ -43,7 +43,7 @@ def _make_periodic_batch(
     data_list = []
     for _ in range(n_graphs):
         data = AtomicData(
-            numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
+            atomic_numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
             positions=torch.randn(atoms_per_graph, 3) * cell_size,
             cell=torch.eye(3).unsqueeze(0) * cell_size,
             pbc=torch.tensor([pbc]),

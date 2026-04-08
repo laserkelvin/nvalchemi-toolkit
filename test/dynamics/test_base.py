@@ -57,11 +57,11 @@ def create_simple_batch(device: str = "cpu") -> Batch:
         A batched data structure.
     """
     data1 = AtomicData(
-        numbers=torch.tensor([6, 8], dtype=torch.long),
+        atomic_numbers=torch.tensor([6, 8], dtype=torch.long),
         positions=torch.randn(2, 3),
     )
     data2 = AtomicData(
-        numbers=torch.tensor([1, 1, 8], dtype=torch.long),
+        atomic_numbers=torch.tensor([1, 1, 8], dtype=torch.long),
         positions=torch.randn(3, 3),
     )
     batch = Batch.from_data_list([data1, data2], device=device)
@@ -91,7 +91,7 @@ def create_single_molecule_batch(n_atoms: int = 5, device: str = "cpu") -> Batch
         A batched data structure with one molecule.
     """
     data = AtomicData(
-        numbers=torch.randint(1, 10, (n_atoms,), dtype=torch.long),
+        atomic_numbers=torch.randint(1, 10, (n_atoms,), dtype=torch.long),
         positions=torch.randn(n_atoms, 3),
     )
     batch = Batch.from_data_list([data], device=device)
@@ -811,7 +811,7 @@ class TestConvergenceHook:
         # Create a batch with 4 graphs
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6, 8], dtype=torch.long),
+                atomic_numbers=torch.tensor([6, 8], dtype=torch.long),
                 positions=torch.randn(2, 3),
             )
             for _ in range(4)
@@ -997,7 +997,7 @@ class TestStepMasking:
         """
         data_list = [
             AtomicData(
-                numbers=torch.tensor(
+                atomic_numbers=torch.tensor(
                     [6] * n_atoms_per_graph,
                     dtype=torch.long,
                 ),
@@ -1068,7 +1068,7 @@ class TestStepMasking:
         # This exercises the repeat_interleave code path more thoroughly
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6] * n, dtype=torch.long),
+                atomic_numbers=torch.tensor([6] * n, dtype=torch.long),
                 positions=torch.randn(n, 3),
             )
             for n in [2, 5, 3, 4, 6]  # Different atoms per graph: 2+5+3+4+6=20 total
@@ -1129,7 +1129,7 @@ class TestStepMasking:
         # Create a base batch with 3 graphs (2+3+4=9 atoms)
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6] * n, dtype=torch.long),
+                atomic_numbers=torch.tensor([6] * n, dtype=torch.long),
                 positions=torch.randn(n, 3),
             )
             for n in [2, 3, 4]
@@ -1340,7 +1340,7 @@ class TestMaskedUpdate:
     def _make_batch(self, n_graphs: int = 2, n_atoms_per_graph: int = 3) -> "Batch":
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6] * n_atoms_per_graph, dtype=torch.long),
+                atomic_numbers=torch.tensor([6] * n_atoms_per_graph, dtype=torch.long),
                 positions=torch.randn(n_atoms_per_graph, 3),
             )
             for _ in range(n_graphs)
@@ -1525,7 +1525,7 @@ class TestStepSystemLevelFieldMasking:
         )
         data_list = [
             AtomicData(
-                numbers=torch.tensor([6, 6], dtype=torch.long),
+                atomic_numbers=torch.tensor([6, 6], dtype=torch.long),
                 positions=torch.randn(2, 3),
             )
             for _ in range(3)

@@ -35,7 +35,7 @@ Or wrap an already-instantiated model::
 
 For dynamics, register :class:`~nvalchemi.dynamics.hooks.NeighborListHook`
 with ``format=NeighborListFormat.COO`` so that ``neighbor_list`` and
-``neighbor_list_shifts`` are populated before each model call::
+``unit_shifts`` are populated before each model call::
 
     from nvalchemi.models.base import NeighborConfig, NeighborListFormat
     from nvalchemi.dynamics.hooks import NeighborListHook
@@ -50,7 +50,7 @@ Notes
   :attr:`~ModelCard.forces_via_autograd` is ``True``.
 * ``node_attrs`` (one-hot atomic-number encodings) are computed via a
   pre-built GPU lookup table — no CPU round-trips per step.
-* For PBC systems, both ``neighbor_list_shifts`` (integer image indices ``[E, 3]``)
+* For PBC systems, both ``unit_shifts`` (integer image indices ``[E, 3]``)
   and pre-computed ``shifts`` (physical Å vectors ``[E, 3]``) are passed to
   MACE.  ``shifts`` is always required by ``prepare_graph``; ``unit_shifts``
   is additionally used when ``compute_displacement=True`` (stress path).
@@ -103,8 +103,8 @@ class MACEWrapper(nn.Module, BaseModelMixin):
       (no CPU round-trip per step).
     * Gradient enabling on ``positions`` for conservative force / stress
       computation.
-    * PBC via both ``neighbor_list_shifts`` (integer image indices) and pre-computed
-      ``shifts`` (physical Å vectors from ``neighbor_list_shifts @ cell``) passed to
+    * PBC via both ``unit_shifts`` (integer image indices) and pre-computed
+      ``shifts`` (physical Å vectors from ``unit_shifts @ cell``) passed to
       MACE.  ``shifts`` is always required; ``unit_shifts`` is additionally
       consumed when ``compute_displacement=True`` (stress path).
 
@@ -228,7 +228,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
         construction and kept in sync by ``nn.Module``'s ``.to()``
         machinery), so no per-step device/dtype conversion is needed.
         """
-        return self._node_emb.index_select(0, data.numbers.long())
+        return self._node_emb.index_select(0, data.atomic_numbers.long())
 
     def adapt_input(self, data: AtomicData | Batch, **kwargs: Any) -> dict[str, Any]:
         """Build the input dict expected by ``MACE.forward``.
@@ -236,9 +236,9 @@ class MACEWrapper(nn.Module, BaseModelMixin):
         Handles ``AtomicData → Batch`` promotion, ``node_attrs`` encoding,
         gradient enabling on ``positions``, transposing ``neighbor_list`` from
         nvalchemi's ``[E, 2]`` to MACE's ``[2, E]`` convention, zero-filling
-        of ``neighbor_list_shifts`` / ``cell`` for non-PBC systems, and
+        of ``unit_shifts`` / ``cell`` for non-PBC systems, and
         pre-computation of physical ``shifts`` vectors from
-        ``neighbor_list_shifts @ cell``.
+        ``unit_shifts @ cell``.
 
         .. note::
             This method does **not** call ``super().adapt_input()`` because
@@ -267,7 +267,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
 
         # unit_shifts: integer PBC image indices [E, 3], cast to float for
         # MACE's cell @ unit_shifts contraction.  Zero for non-PBC systems.
-        unit_shifts_raw = getattr(data, "neighbor_list_shifts", None)
+        unit_shifts_raw = getattr(data, "unit_shifts", None)
         if unit_shifts_raw is None:
             unit_shifts = torch.zeros(E, 3, dtype=dtype, device=device)
         else:

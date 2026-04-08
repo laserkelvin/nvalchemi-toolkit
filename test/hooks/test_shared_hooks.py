@@ -39,7 +39,7 @@ def _make_batch(n_graphs: int = 2, atoms_per_graph: int = 3) -> Batch:
     """Create a test batch with forces and energy."""
     data_list = [
         AtomicData(
-            numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
+            atomic_numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
             positions=torch.randn(atoms_per_graph, 3),
         )
         for _ in range(n_graphs)
@@ -150,7 +150,7 @@ class TestWrapPeriodicHook:
     def _make_periodic_batch() -> Batch:
         """Create a batch with PBC and positions outside the cell."""
         data = AtomicData(
-            numbers=torch.tensor([6, 6], dtype=torch.long),
+            atomic_numbers=torch.tensor([6, 6], dtype=torch.long),
             positions=torch.tensor([[12.0, 0.5, 0.5], [-1.0, 0.5, 0.5]]),
             cell=torch.eye(3).unsqueeze(0) * 10.0,
             pbc=torch.tensor([[True, True, True]]),
@@ -180,7 +180,7 @@ class TestNeighborListHook:
     def _make_periodic_batch() -> Batch:
         """Create a batch with PBC for neighbor list computation."""
         data = AtomicData(
-            numbers=torch.tensor([6, 6, 6], dtype=torch.long),
+            atomic_numbers=torch.tensor([6, 6, 6], dtype=torch.long),
             positions=torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 1.5, 0.0]]),
             cell=torch.eye(3).unsqueeze(0) * 10.0,
             pbc=torch.tensor([[True, True, True]]),
