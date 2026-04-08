@@ -47,7 +47,7 @@ def _make_barostat_batch(
     atoms_per = n_atoms // n_graphs
     data_list = [
         AtomicData(
-            atomic_numbers=torch.tensor([18] * atoms_per, dtype=int_dtype),
+            numbers=torch.tensor([18] * atoms_per, dtype=int_dtype),
             positions=torch.randn(atoms_per, 3),
         )
         for _ in range(n_graphs)
@@ -57,9 +57,7 @@ def _make_barostat_batch(
     B = batch.num_graphs
     batch["velocities"] = torch.randn(N, 3, dtype=dtype, device=device) * 0.1
     batch["forces"] = torch.zeros(N, 3, dtype=dtype, device=device)
-    batch["atomic_masses"] = torch.full(
-        (N,), 39.948, dtype=dtype, device=device
-    )  # Argon
+    batch["masses"] = torch.full((N,), 39.948, dtype=dtype, device=device)  # Argon
     batch["cell"] = (
         torch.eye(3, dtype=dtype, device=device)
         .unsqueeze(0)
@@ -67,7 +65,7 @@ def _make_barostat_batch(
         .contiguous()
         * 10.0
     )
-    batch["stresses"] = torch.zeros(B, 3, 3, dtype=dtype, device=device)
+    batch["stress"] = torch.zeros(B, 3, 3, dtype=dtype, device=device)
     return batch
 
 
@@ -115,7 +113,7 @@ class TestNPHIntegrator:
 
     def test_needs_keys(self):
         """NPH declares the correct set of required input keys."""
-        assert NPH.__needs_keys__ == {"forces", "stresses"}
+        assert NPH.__needs_keys__ == {"forces", "stress"}
 
     def test_provides_keys(self):
         """NPH declares the correct set of provided output keys."""
@@ -256,7 +254,7 @@ class TestNPTIntegrator:
 
     def test_needs_keys(self):
         """NPT declares the correct set of required input keys."""
-        assert NPT.__needs_keys__ == {"forces", "stresses"}
+        assert NPT.__needs_keys__ == {"forces", "stress"}
 
     def test_provides_keys(self):
         """NPT declares the correct set of provided output keys."""

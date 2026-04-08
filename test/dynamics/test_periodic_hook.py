@@ -43,7 +43,7 @@ def _make_periodic_batch(
     data_list = []
     for _ in range(n_graphs):
         data = AtomicData(
-            atomic_numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
+            numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
             positions=torch.randn(atoms_per_graph, 3) * cell_size,
             cell=torch.eye(3).unsqueeze(0) * cell_size,
             pbc=torch.tensor([pbc]),
@@ -52,7 +52,7 @@ def _make_periodic_batch(
     batch = Batch.from_data_list(data_list).to(device)
     total_atoms = n_graphs * atoms_per_graph
     batch["forces"] = torch.zeros(total_atoms, 3, device=device)
-    batch["energies"] = torch.zeros(n_graphs, 1, device=device)
+    batch["energy"] = torch.zeros(n_graphs, 1, device=device)
     # Normalize cell/pbc to (B, 3, 3) and (B, 3) via storage API
     batch["cell"] = (
         torch.eye(3, device=device).unsqueeze(0).expand(n_graphs, -1, -1) * cell_size

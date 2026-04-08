@@ -942,9 +942,9 @@ class TestMultiLevelStorage:
     def test_from_data_factory(self):
         data = {
             "positions": torch.randn(10, 3),
-            "atomic_numbers": torch.ones(10, dtype=torch.long),
+            "numbers": torch.ones(10, dtype=torch.long),
             "cell": torch.eye(3).unsqueeze(0).expand(2, 3, 3),
-            "energies": torch.randn(2),
+            "energy": torch.randn(2),
         }
         # system-level: 2 graphs; atoms segmented as [4, 6]
         schema = LevelSchema()
@@ -1076,7 +1076,7 @@ class TestLevelStorageConstants:
         assert "edges" in DEFAULT_ATTRIBUTE_MAP
         assert "system" in DEFAULT_ATTRIBUTE_MAP
         assert "positions" in DEFAULT_ATTRIBUTE_MAP["atoms"]
-        assert "edge_index" in DEFAULT_ATTRIBUTE_MAP["edges"]
+        assert "neighbor_list" in DEFAULT_ATTRIBUTE_MAP["edges"]
 
     def test_default_segmented_groups(self):
         assert DEFAULT_SEGMENTED_GROUPS == {"atoms", "edges"}
@@ -1300,7 +1300,7 @@ class TestMultiLevelStorageFromBatches:
         b1 = MultiLevelStorage.from_data(
             data={
                 "positions": torch.randn(3, 3),
-                "atomic_numbers": torch.ones(3, dtype=torch.long),
+                "numbers": torch.ones(3, dtype=torch.long),
             },
             attr_map=schema,
             segment_lengths={"atoms": [3]},
@@ -1309,7 +1309,7 @@ class TestMultiLevelStorageFromBatches:
         b2 = MultiLevelStorage.from_data(
             data={
                 "positions": torch.randn(4, 3),
-                "atomic_numbers": torch.ones(4, dtype=torch.long),
+                "numbers": torch.ones(4, dtype=torch.long),
             },
             attr_map=schema,
             segment_lengths={"atoms": [4]},
@@ -1351,7 +1351,7 @@ class TestMultiLevelStorageToSegmented:
         # positions shape (2, 3, 3): 2 graphs, 3 atoms each, 3 coords
         data = {
             "positions": torch.randn(2, 3, 3),
-            "atomic_numbers": torch.ones(2, 3, dtype=torch.long),
+            "numbers": torch.ones(2, 3, dtype=torch.long),
         }
         m = MultiLevelStorage.from_data(
             data, attr_map=schema, segment_lengths=None, device="cpu", validate=False

@@ -875,12 +875,10 @@ class TestIntegrators:
         g.manual_seed(seed)
         data = AtomicData(
             positions=torch.randn(n_atoms, 3, generator=g),
-            atomic_numbers=torch.randint(
-                1, 10, (n_atoms,), dtype=torch.long, generator=g
-            ),
-            atomic_masses=torch.ones(n_atoms),
+            numbers=torch.randint(1, 10, (n_atoms,), dtype=torch.long, generator=g),
+            masses=torch.ones(n_atoms),
             forces=torch.zeros(n_atoms, 3),
-            energies=torch.zeros(1, 1),
+            energy=torch.zeros(1, 1),
         )
         data.add_node_property("velocities", torch.zeros(n_atoms, 3))
         return data
@@ -1001,12 +999,10 @@ class TestFireOptimizerState:
         g.manual_seed(99)
         data = AtomicData(
             positions=torch.randn(n_atoms, 3, generator=g),
-            atomic_numbers=torch.randint(
-                1, 10, (n_atoms,), dtype=torch.long, generator=g
-            ),
-            atomic_masses=torch.ones(n_atoms),
+            numbers=torch.randint(1, 10, (n_atoms,), dtype=torch.long, generator=g),
+            masses=torch.ones(n_atoms),
             forces=torch.zeros(n_atoms, 3),
-            energies=torch.zeros(1, 1),
+            energy=torch.zeros(1, 1),
         )
         data.add_node_property("velocities", torch.zeros(n_atoms, 3))
         return data

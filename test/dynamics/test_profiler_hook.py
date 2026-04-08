@@ -34,18 +34,16 @@ def _make_batch(
 ) -> Batch:
     data_list = [
         AtomicData(
-            atomic_numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
+            numbers=torch.tensor([6] * atoms_per_graph, dtype=torch.long),
             positions=torch.randn(atoms_per_graph, 3),
         )
         for _ in range(n_graphs)
     ]
     batch = Batch.from_data_list(data_list).to(device)
     batch.__dict__["forces"] = torch.randn(batch.num_nodes, 3, device=device)
-    batch.__dict__["energies"] = torch.randn(batch.num_graphs, 1, device=device)
+    batch.__dict__["energy"] = torch.randn(batch.num_graphs, 1, device=device)
     batch.__dict__["velocities"] = torch.randn(batch.num_nodes, 3, device=device) * 0.01
-    batch.__dict__["atomic_masses"] = torch.full(
-        (batch.num_nodes,), 12.0, device=device
-    )
+    batch.__dict__["masses"] = torch.full((batch.num_nodes,), 12.0, device=device)
     return batch
 
 

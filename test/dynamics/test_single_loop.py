@@ -103,14 +103,14 @@ def create_batch_with_status(n_graphs: int = 3, device: str = "cpu") -> Batch:
     """Create a batch with N single-atom molecules for testing."""
     data_list = [
         AtomicData(
-            atomic_numbers=torch.tensor([6], dtype=torch.long),
+            numbers=torch.tensor([6], dtype=torch.long),
             positions=torch.randn(1, 3),
         )
         for _ in range(n_graphs)
     ]
     batch = Batch.from_data_list(data_list, device=device)
     batch.forces = torch.zeros(batch.num_nodes, 3)
-    batch.energies = torch.zeros(batch.num_graphs, 1)
+    batch.energy = torch.zeros(batch.num_graphs, 1)
     return batch
 
 

@@ -82,7 +82,7 @@ def _line_batch(
         pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [5.0, 0.0, 0.0]])
         kwargs: dict = dict(
             positions=pos,
-            atomic_numbers=torch.tensor([1, 1, 1], dtype=int_dtype),
+            numbers=torch.tensor([1, 1, 1], dtype=int_dtype),
         )
         if pbc:
             kwargs["cell"] = torch.eye(3).unsqueeze(0) * cell_size
@@ -100,7 +100,7 @@ def _pbc_wrap_batch(device: str) -> Batch:
     pos = torch.tensor([[0.1, 0.0, 0.0], [2.9, 0.0, 0.0]])
     data = AtomicData(
         positions=pos,
-        atomic_numbers=torch.tensor([1, 1], dtype=torch.long),
+        numbers=torch.tensor([1, 1], dtype=torch.long),
         cell=torch.eye(3).unsqueeze(0) * 3.0,
         pbc=torch.tensor([[True, True, True]]),
     )
@@ -397,7 +397,7 @@ class TestCopyToStagingBuffers:
         batch = _line_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        expected_ptr = batch.ptr.to(torch.int32)
+        expected_ptr = batch.batch_ptr.to(torch.int32)
         assert torch.equal(hook._buf_batch_ptr, expected_ptr)
 
     def test_cell_copied_when_pbc(self, device: str):
@@ -461,7 +461,7 @@ class TestAllocNlKwargs:
         positions = torch.rand(N_per, 3) * 10.0
         data = AtomicData(
             positions=positions,
-            atomic_numbers=torch.ones(N_per, dtype=torch.long),
+            numbers=torch.ones(N_per, dtype=torch.long),
         )
         batch = Batch.from_data_list([data]).to(device)
 
@@ -529,7 +529,7 @@ class TestShapeInvalidation:
         # Build a batch with more atoms
         data = AtomicData(
             positions=torch.rand(5, 3),
-            atomic_numbers=torch.ones(5, dtype=torch.long),
+            numbers=torch.ones(5, dtype=torch.long),
         )
         batch_large = Batch.from_data_list([data]).to(device)
         hook(_ctx(batch_large), _STAGE)
@@ -558,7 +558,7 @@ class TestShapeInvalidation:
         # New batch with different N forces reallocation
         data = AtomicData(
             positions=torch.rand(5, 3),
-            atomic_numbers=torch.ones(5, dtype=torch.long),
+            numbers=torch.ones(5, dtype=torch.long),
         )
         batch_new = Batch.from_data_list([data]).to(device)
         hook(_ctx(batch_new), _STAGE)
@@ -685,7 +685,7 @@ class TestNeighborListHookMatrix:
         pos = torch.tensor([[0.1, 0.0, 0.0], [2.9, 0.0, 0.0]])
         data = AtomicData(
             positions=pos,
-            atomic_numbers=torch.tensor([1, 1], dtype=torch.long),
+            numbers=torch.tensor([1, 1], dtype=torch.long),
         )
         batch = Batch.from_data_list([data]).to(device)
 
@@ -722,16 +722,18 @@ class TestNeighborListHookCOO:
         batch = _line_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        assert hasattr(batch, "edge_index")
+        assert hasattr(batch, "neighbor_list")
 
     def test_edge_index_shape(self, device: str):
         hook = NeighborListHook(_cfg(fmt=NeighborListFormat.COO, max_neighbors=None))
         batch = _line_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        ei = batch.edge_index
+        ei = batch.neighbor_list
         assert ei.ndim == 2
-        assert ei.shape[1] == 2, "edge_index should be (E, 2) in nvalchemi convention"
+        assert ei.shape[1] == 2, (
+            "neighbor_list should be (E, 2) in nvalchemi convention"
+        )
 
     def test_nearby_atoms_have_edges(self, device: str):
         """Atoms 0 and 1 (dist=1.5 < cutoff) must appear as an edge pair."""
@@ -739,7 +741,7 @@ class TestNeighborListHookCOO:
         batch = _line_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        ei = batch.edge_index.cpu().tolist()
+        ei = batch.neighbor_list.cpu().tolist()
         pairs = {tuple(row) for row in ei}
         assert (0, 1) in pairs or (1, 0) in pairs, "edge between atoms 0 and 1 expected"
 
@@ -748,8 +750,8 @@ class TestNeighborListHookCOO:
         batch = _pbc_wrap_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        assert hasattr(batch, "unit_shifts")
-        assert batch.unit_shifts.shape[1] == 3
+        assert hasattr(batch, "neighbor_list_shifts")
+        assert batch.neighbor_list_shifts.shape[1] == 3
 
     def test_no_edges_for_isolated_atom(self, device: str):
         """Atom 2 (isolated, dist > cutoff to all others) should appear in no edges."""
@@ -757,7 +759,7 @@ class TestNeighborListHookCOO:
         batch = _line_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        ei = batch.edge_index.cpu().tolist()
+        ei = batch.neighbor_list.cpu().tolist()
         atom_indices = {idx for row in ei for idx in row}
         assert 2 not in atom_indices, "isolated atom 2 should have no edges"
 
@@ -768,7 +770,7 @@ class TestNeighborListHookCOO:
         batch = _line_batch(device, int_dtype=int_dtype)
         hook(_ctx(batch), _STAGE)
 
-        ei = batch.edge_index.cpu().tolist()
+        ei = batch.neighbor_list.cpu().tolist()
         pairs = {tuple(row) for row in ei}
         assert (0, 1) in pairs or (1, 0) in pairs
 

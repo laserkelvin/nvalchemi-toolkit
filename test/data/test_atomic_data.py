@@ -43,11 +43,11 @@ def _minimal_atomic_data(
 ) -> AtomicData:
     """Build minimal AtomicData for tests."""
     positions = torch.randn(num_nodes, 3, device=device)
-    atomic_numbers = torch.ones(num_nodes, dtype=torch.long, device=device)
-    kwargs: dict = {"positions": positions, "atomic_numbers": atomic_numbers}
+    numbers = torch.ones(num_nodes, dtype=torch.long, device=device)
+    kwargs: dict = {"positions": positions, "numbers": numbers}
     if num_edges > 0:
-        edge_index = torch.zeros(num_edges, 2, dtype=torch.long, device=device)
-        kwargs["edge_index"] = edge_index
+        neighbor_list = torch.zeros(num_edges, 2, dtype=torch.long, device=device)
+        kwargs["neighbor_list"] = neighbor_list
     return AtomicData(**kwargs)
 
 
@@ -59,44 +59,44 @@ class TestAtomicDataConstruction:
 
     def test_minimal_construction(self):
         positions = torch.randn(4, 3)
-        atomic_numbers = torch.ones(4, dtype=torch.long)
-        data = AtomicData(positions=positions, atomic_numbers=atomic_numbers)
+        numbers = torch.ones(4, dtype=torch.long)
+        data = AtomicData(positions=positions, numbers=numbers)
         assert data.positions.shape == (4, 3)
-        assert data.atomic_numbers.shape == (4,)
-        assert data.edge_index is None
+        assert data.numbers.shape == (4,)
+        assert data.neighbor_list is None
 
     def test_with_edge_index(self):
         data = _minimal_atomic_data(4, num_edges=6)
-        assert data.edge_index is not None
-        assert data.edge_index.shape == (6, 2)
+        assert data.neighbor_list is not None
+        assert data.neighbor_list.shape == (6, 2)
 
     def test_optional_system_fields(self):
         data = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
+            numbers=torch.ones(2, dtype=torch.long),
             cell=torch.eye(3).unsqueeze(0),
             pbc=torch.tensor([[True, True, False]]),
-            energies=torch.tensor([[1.0]]),
+            energy=torch.tensor([[1.0]]),
         )
         assert data.cell.shape == (1, 3, 3)
         assert data.pbc.shape == (1, 3)
-        assert data.energies.shape == (1, 1)
+        assert data.energy.shape == (1, 1)
 
     @pytest.mark.parametrize("int_dtype", [torch.int32, torch.int64])
     def test_integer_dtypes_accepted(self, int_dtype: torch.dtype):
         """AtomicData should accept both int32 and int64 for integer fields."""
         data = AtomicData(
             positions=torch.randn(3, 3),
-            atomic_numbers=torch.tensor([1, 6, 8], dtype=int_dtype),
-            edge_index=torch.zeros(4, 2, dtype=int_dtype),
+            numbers=torch.tensor([1, 6, 8], dtype=int_dtype),
+            neighbor_list=torch.zeros(4, 2, dtype=int_dtype),
         )
-        assert data.atomic_numbers.dtype == int_dtype
-        assert data.edge_index.dtype == int_dtype
+        assert data.numbers.dtype == int_dtype
+        assert data.neighbor_list.dtype == int_dtype
 
     def test_optional_node_fields(self):
         data = AtomicData(
             positions=torch.randn(3, 3),
-            atomic_numbers=torch.ones(3, dtype=torch.long),
+            numbers=torch.ones(3, dtype=torch.long),
             forces=torch.randn(3, 3),
         )
         assert data.forces.shape == (3, 3)
@@ -125,14 +125,14 @@ class TestAtomicDataProperties:
         assert data.device == data.positions.device
         data_cuda = AtomicData(
             positions=torch.randn(2, 3, device="cpu"),
-            atomic_numbers=torch.ones(2, dtype=torch.long, device="cpu"),
+            numbers=torch.ones(2, dtype=torch.long, device="cpu"),
         )
         assert data_cuda.device.type == "cpu"
 
     def test_dtype(self):
         data = AtomicData(
             positions=torch.randn(2, 3, dtype=torch.float64),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
+            numbers=torch.ones(2, dtype=torch.long),
         )
         assert data.dtype == torch.float64
 
@@ -145,15 +145,15 @@ class TestAtomicDataKeys:
 
     def test_node_keys_contains_positions(self):
         assert "positions" in AtomicData._default_node_keys
-        assert "atomic_numbers" in AtomicData._default_node_keys
+        assert "numbers" in AtomicData._default_node_keys
 
     def test_edge_keys_contains_edge_index(self):
-        assert "edge_index" in AtomicData._default_edge_keys
-        assert "shifts" in AtomicData._default_edge_keys
+        assert "neighbor_list" in AtomicData._default_edge_keys
+        assert "neighbor_list_shifts" in AtomicData._default_edge_keys
 
     def test_system_keys_contains_cell_energies(self):
         assert "cell" in AtomicData._default_system_keys
-        assert "energies" in AtomicData._default_system_keys
+        assert "energy" in AtomicData._default_system_keys
 
 
 # -----------------------------------------------------------------------------
@@ -166,7 +166,7 @@ class TestAtomicDataPropertiesDict:
         data = _minimal_atomic_data(3)
         node_props = data.node_properties
         assert "positions" in node_props
-        assert "atomic_numbers" in node_props
+        assert "numbers" in node_props
         assert node_props["positions"].shape == (3, 3)
 
     def test_edge_properties_empty_without_edges(self):
@@ -177,11 +177,11 @@ class TestAtomicDataPropertiesDict:
     def test_system_properties(self):
         data = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
-            energies=torch.tensor([[1.0]]),
+            numbers=torch.ones(2, dtype=torch.long),
+            energy=torch.tensor([[1.0]]),
         )
         sys_props = data.system_properties
-        assert "energies" in sys_props
+        assert "energy" in sys_props
 
     def test_add_node_property(self):
         data = _minimal_atomic_data(3)
@@ -263,31 +263,31 @@ class TestAtomicDataValidation:
         with pytest.raises(ValueError, match="Inconsistent number of atoms"):
             AtomicData(
                 positions=torch.randn(4, 3),
-                atomic_numbers=torch.ones(3, dtype=torch.long),
+                numbers=torch.ones(3, dtype=torch.long),
             )
 
     def test_edge_inconsistency_raises(self):
         with pytest.raises(ValueError, match="Inconsistent number of edges"):
             AtomicData(
                 positions=torch.randn(4, 3),
-                atomic_numbers=torch.ones(4, dtype=torch.long),
-                edge_index=torch.zeros(5, 2, dtype=torch.long),
-                shifts=torch.randn(3, 3),
+                numbers=torch.ones(4, dtype=torch.long),
+                neighbor_list=torch.zeros(5, 2, dtype=torch.long),
+                neighbor_list_shifts=torch.randn(3, 3),
             )
 
     def test_default_masses_filled(self):
         data = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.tensor([1, 6], dtype=torch.long),
+            numbers=torch.tensor([1, 6], dtype=torch.long),
         )
-        assert data.atomic_masses is not None
-        assert data.atomic_masses.shape == (2,)
+        assert data.masses is not None
+        assert data.masses.shape == (2,)
 
     def test_atom_categories_list_of_enum(self):
         """atom_categories as list of AtomCategory is converted to tensor."""
         data = AtomicData(
             positions=torch.randn(3, 3),
-            atomic_numbers=torch.ones(3, dtype=torch.long),
+            numbers=torch.ones(3, dtype=torch.long),
             atom_categories=[
                 t.AtomCategory.GAS,
                 t.AtomCategory.SURFACE,
@@ -302,7 +302,7 @@ class TestAtomicDataValidation:
         """When velocities is None, validator sets zeros like positions."""
         data = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
+            numbers=torch.ones(2, dtype=torch.long),
         )
         assert data.velocities is not None
         assert data.velocities.shape == data.positions.shape
@@ -326,11 +326,11 @@ class TestAtomicDataHashAndEq:
     def test_eq_same_structure(self):
         d1 = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
+            numbers=torch.ones(2, dtype=torch.long),
         )
         d2 = AtomicData(
             positions=d1.positions.clone(),
-            atomic_numbers=d1.atomic_numbers.clone(),
+            numbers=d1.numbers.clone(),
         )
         assert d1 == d2
 
@@ -343,7 +343,7 @@ class TestAtomicDataHashAndEq:
         """chemical_hash when pbc/cell are None uses empty pbc/cell string."""
         data = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
+            numbers=torch.ones(2, dtype=torch.long),
         )
         assert data.pbc is None
         assert data.cell is None
@@ -355,7 +355,7 @@ class TestAtomicDataHashAndEq:
         """chemical_hash when pbc and cell are set includes them in the hash."""
         data = AtomicData(
             positions=torch.randn(2, 3),
-            atomic_numbers=torch.ones(2, dtype=torch.long),
+            numbers=torch.ones(2, dtype=torch.long),
             pbc=torch.tensor([[True, True, False]]),
             cell=torch.eye(3).unsqueeze(0),
         )
@@ -365,7 +365,7 @@ class TestAtomicDataHashAndEq:
         # Same structure should give same hash
         data2 = AtomicData(
             positions=data.positions.clone(),
-            atomic_numbers=data.atomic_numbers.clone(),
+            numbers=data.numbers.clone(),
             pbc=data.pbc.clone(),
             cell=data.cell.clone(),
         )
@@ -381,7 +381,7 @@ class TestAtomicDataAccess:
     def test_getitem(self):
         data = _minimal_atomic_data(2)
         assert data["positions"] is data.positions
-        assert data["atomic_numbers"] is data.atomic_numbers
+        assert data["numbers"] is data.numbers
 
     def test_setitem(self):
         data = _minimal_atomic_data(2)
@@ -486,31 +486,31 @@ class TestFromAtoms:
         """Bare Atoms with no DFT data produces None for all optional label fields."""
         atoms = Atoms(numbers=[1, 1], positions=[[0, 0, 0], [0, 0, 1]])
         data = AtomicData.from_atoms(atoms)
-        assert data.energies is None
+        assert data.energy is None
         assert data.forces is None
-        assert data.stresses is None
-        assert data.virials is None
-        assert data.dipoles is None
-        assert data.node_charges is None
-        assert data.graph_charges is None
+        assert data.stress is None
+        assert data.virial is None
+        assert data.dipole is None
+        assert data.charges is None
+        assert data.charge is None
 
     def test_explicit_charge_no_per_atom_charges(self):
-        """atoms.info['charge'] populates graph_charges even without per-atom charges."""
+        """atoms.info['charge'] populates charge even without per-atom charges."""
         atoms = Atoms(numbers=[8, 1, 1], positions=[[0, 0, 0], [1, 0, 0], [0, 1, 0]])
         atoms.info["charge"] = 0
         data = AtomicData.from_atoms(atoms)
-        assert data.graph_charges is not None
-        assert data.graph_charges.shape == (1, 1)
-        assert data.graph_charges.item() == 0.0
-        assert data.node_charges is None
+        assert data.charge is not None
+        assert data.charge.shape == (1, 1)
+        assert data.charge.item() == 0.0
+        assert data.charges is None
 
     def test_explicit_charge_numpy_int(self):
         """np.int64 charge is accepted via numbers.Integral."""
         atoms = Atoms(numbers=[1, 1], positions=[[0, 0, 0], [0, 0, 1]])
         atoms.info["charge"] = np.int64(1)
         data = AtomicData.from_atoms(atoms)
-        assert data.graph_charges is not None
-        assert data.graph_charges.item() == 1.0
+        assert data.charge is not None
+        assert data.charge.item() == 1.0
 
     def test_non_integer_charge_raises(self):
         """atoms.info['charge'] with a float value must raise ValueError."""
@@ -583,8 +583,8 @@ class TestFromAtoms:
         assert isinstance(data.info["my_int"], torch.Tensor)
         assert isinstance(data.info["my_array"], torch.Tensor)
 
-        assert data.energies is not None
-        assert data.graph_charges is not None
+        assert data.energy is not None
+        assert data.charge is not None
 
     def test_present_fields_have_canonical_shapes(self, device):
         """When ASE data is present, from_atoms normalizes to canonical shapes."""
@@ -598,14 +598,14 @@ class TestFromAtoms:
 
         data = AtomicData.from_atoms(atoms, device=device)
 
-        assert data.energies.shape == (1, 1)
+        assert data.energy.shape == (1, 1)
         assert data.forces.shape == (3, 3)
-        assert data.stresses.shape == (1, 3, 3)
-        assert data.stresses.device.type == device
-        assert data.virials.shape == (1, 3, 3)
-        assert data.virials.device.type == device
-        assert data.dipoles.shape == (1, 3)
-        assert data.node_charges.shape == (3, 1)
+        assert data.stress.shape == (1, 3, 3)
+        assert data.stress.device.type == device
+        assert data.virial.shape == (1, 3, 3)
+        assert data.virial.device.type == device
+        assert data.dipole.shape == (1, 3)
+        assert data.charges.shape == (3, 1)
 
 
 # -----------------------------------------------------------------------------
@@ -620,7 +620,7 @@ class TestDtypeCastWarning:
             warnings.simplefilter("always")
             AtomicData(
                 positions=torch.randn(2, 3, dtype=torch.float32),
-                atomic_numbers=torch.ones(2, dtype=torch.long),
+                numbers=torch.ones(2, dtype=torch.long),
                 forces=torch.randn(2, 3, dtype=torch.float64),
             )
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
@@ -644,7 +644,7 @@ class TestDtypeCastWarning:
                 warnings.simplefilter("always")
                 AtomicData(
                     positions=torch.randn(2, 3, dtype=torch.float32),
-                    atomic_numbers=torch.ones(2, dtype=torch.long),
+                    numbers=torch.ones(2, dtype=torch.long),
                     forces=torch.randn(2, 3, dtype=torch.float64),
                 )
 
@@ -671,7 +671,7 @@ class TestDtypeCastWarning:
             warnings.simplefilter("always")
             AtomicData(
                 positions=torch.randn(2, 3, dtype=torch.float32),
-                atomic_numbers=torch.ones(2, dtype=torch.long),
+                numbers=torch.ones(2, dtype=torch.long),
                 forces=torch.randn(2, 3, dtype=torch.float32),
             )
         user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
@@ -748,9 +748,9 @@ class TestFromStructure:
         assert data.pbc is not None
         assert data.cell.shape == (1, 3, 3)
         assert data.pbc.shape == (1, 3)
-        assert data.atomic_numbers.tolist() == [29, 29, 29, 29]
+        assert data.numbers.tolist() == [29, 29, 29, 29]
         assert data.positions.shape == (4, 3)
-        assert data.atomic_masses is not None
+        assert data.masses is not None
 
     def test_molecule_no_lattice(self):
         """Pymatgen Molecule should have cell=None, pbc=None."""
@@ -760,7 +760,7 @@ class TestFromStructure:
         data = AtomicData.from_structure(mol)
         assert data.cell is None
         assert data.pbc is None
-        assert data.atomic_numbers.tolist() == [8, 1, 1]
+        assert data.numbers.tolist() == [8, 1, 1]
         assert data.positions.shape == (3, 3)
 
     def test_mixed_pbc_with_cell(self):
@@ -781,13 +781,13 @@ class TestFromStructure:
 
         struct = Structure(Lattice.cubic(3.6), 4 * ["Cu"], self._cu_fcc_coords)
         data = AtomicData.from_structure(struct)
-        assert data.energies is None
+        assert data.energy is None
         assert data.forces is None
-        assert data.stresses is None
-        assert data.virials is None
-        assert data.dipoles is None
-        assert data.node_charges is None
-        assert data.graph_charges is None
+        assert data.stress is None
+        assert data.virial is None
+        assert data.dipole is None
+        assert data.charges is None
+        assert data.charge is None
 
     def test_optional_fields_present(self):
         """Structure with properties/site_properties populates label fields."""
@@ -809,56 +809,56 @@ class TestFromStructure:
             },
         )
         data = AtomicData.from_structure(struct)
-        assert data.energies is not None
-        assert data.energies.shape == (1, 1)
-        assert data.energies.item() == pytest.approx(-3.5)
+        assert data.energy is not None
+        assert data.energy.shape == (1, 1)
+        assert data.energy.item() == pytest.approx(-3.5)
         assert data.forces is not None
         assert data.forces.shape == (4, 3)
         assert torch.allclose(
             data.forces, torch.tensor([[0.1, 0.2, 0.3]] * 4, dtype=torch.float32)
         )
-        assert data.stresses is not None
-        assert data.stresses.shape == (1, 3, 3)
+        assert data.stress is not None
+        assert data.stress.shape == (1, 3, 3)
         assert torch.allclose(
-            data.stresses,
+            data.stress,
             torch.eye(3, dtype=torch.float32).unsqueeze(0) * -0.1,
         )
-        assert data.virials is not None
-        assert data.virials.shape == (1, 3, 3)
+        assert data.virial is not None
+        assert data.virial.shape == (1, 3, 3)
         assert torch.allclose(
-            data.virials,
+            data.virial,
             torch.eye(3, dtype=torch.float32).unsqueeze(0) * 0.2,
         )
-        assert data.dipoles is not None
-        assert data.dipoles.shape == (1, 3)
+        assert data.dipole is not None
+        assert data.dipole.shape == (1, 3)
         assert torch.allclose(
-            data.dipoles, torch.tensor([[0.1, 0.2, 0.3]], dtype=torch.float32)
+            data.dipole, torch.tensor([[0.1, 0.2, 0.3]], dtype=torch.float32)
         )
-        assert data.node_charges is not None
-        assert data.node_charges.shape == (4, 1)
+        assert data.charges is not None
+        assert data.charges.shape == (4, 1)
         assert torch.allclose(
-            data.node_charges,
+            data.charges,
             torch.tensor([[0.5], [-0.5], [0.5], [-0.5]], dtype=torch.float32),
         )
 
     def test_charge_explicit(self):
-        """Explicitly set charge should populate graph_charges."""
+        """Explicitly set charge should populate charge."""
         from pymatgen.core import Lattice, Structure
 
         struct = Structure(
             Lattice.cubic(3.6), 4 * ["Cu"], self._cu_fcc_coords, charge=2
         )
         data = AtomicData.from_structure(struct)
-        assert data.graph_charges is not None
-        assert data.graph_charges.item() == 2.0
+        assert data.charge is not None
+        assert data.charge.item() == 2.0
 
     def test_charge_not_set(self):
-        """No explicit charge should leave graph_charges as None."""
+        """No explicit charge should leave charge as None."""
         from pymatgen.core import Lattice, Structure
 
         struct = Structure(Lattice.cubic(3.6), 4 * ["Cu"], self._cu_fcc_coords)
         data = AtomicData.from_structure(struct)
-        assert data.graph_charges is None
+        assert data.charge is None
 
     def test_non_integer_charge_raises(self):
         """Non-integer charge should raise ValueError."""
@@ -897,6 +897,4 @@ class TestFromStructure:
         data_atoms = AtomicData.from_atoms(atoms)
 
         assert data_struct == data_atoms
-        assert torch.allclose(
-            data_struct.atomic_masses, data_atoms.atomic_masses, atol=1e-2
-        )
+        assert torch.allclose(data_struct.masses, data_atoms.masses, atol=1e-2)
