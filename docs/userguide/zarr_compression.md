@@ -169,7 +169,7 @@ The following table gives concrete values for common arrays:
 | atomic_numbers `[V]` | 1 | int64 | 8 | 125,000 | 500,000 |
 | energy `[B]` | 1 | float64 | 8 | 125,000 | 500,000 |
 | cell `[B, 3, 3]` | 9 | float32 | 36 | 27,778 | 111,111 |
-| neighbor_list `[2, E]` | 2 | int64 | 16 | 62,500 | 250,000 |
+| neighbor_list `[E, 2]` | 2 | int64 | 16 | 62,500 | 250,000 |
 | shifts `[E, 3]` | 3 | float32 | 12 | 83,333 | 333,333 |
 
 **Example: positions (float32, shape [V, 3]), 1 MB target**
@@ -235,7 +235,7 @@ the store.
 | stress | [100k, 3, 3] | float32 | 3.6 MB |
 | virial | [100k, 3, 3] | float32 | 3.6 MB |
 | dipole | [100k, 3] | float32 | 1.2 MB |
-| neighbor_list | [2, 20M] | int64 | 320 MB |
+| neighbor_list | [20M, 2] | int64 | 320 MB |
 | shifts | [20M, 3] | float32 | 240 MB |
 | metadata (ptrs, masks) | — | mixed | 27 MB |
 | **Total (with edges)** | | | **760 MB** |

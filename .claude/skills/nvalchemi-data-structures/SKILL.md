@@ -39,7 +39,7 @@ data = AtomicData(
 data = AtomicData(
     positions=torch.randn(4, 3),
     atomic_numbers=torch.tensor([1, 6, 6, 1], dtype=torch.long),
-    neighbor_list=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long),
+    neighbor_list=torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]], dtype=torch.long),
 )
 
 # With system-level fields (energy, cell, pbc)
