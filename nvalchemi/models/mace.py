@@ -290,6 +290,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
             "ptr": data.batch_ptr.long(),
             "edge_index": edge_index,  # [2, E] — MACE convention
             "neighbor_list_shifts": neighbor_list_shifts,
+            "unit_shifts": neighbor_list_shifts,  # mace-torch compat: prepare_graph reads data["unit_shifts"]
             "shifts": shifts,
             "cell": cell,
         }
