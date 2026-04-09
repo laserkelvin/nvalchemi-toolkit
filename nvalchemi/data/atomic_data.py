@@ -102,6 +102,12 @@ class AtomicData(BaseModel, DataMixin):
         Shifts for each edge [n_edges, 3]
     unit_shifts : torch.Tensor
         Additional shifts for each edge [n_edges, 3]
+    neighbor_matrix : torch.Tensor
+        Dense neighbor matrix [n_nodes, max_neighbors]
+    neighbor_matrix_shifts : torch.Tensor
+        Periodic shifts for the dense neighbor matrix [n_nodes, max_neighbors, 3]
+    num_neighbors : torch.Tensor
+        Number of valid neighbors per atom [n_nodes]
     cell : torch.Tensor
         Unit cell vectors [3, 3]
     pbc : torch.Tensor
@@ -151,7 +157,7 @@ class AtomicData(BaseModel, DataMixin):
     ] = None
 
     neighbor_list: Annotated[
-        t.EdgeIndex | None,
+        t.NeighborList | None,
         Field(description="Neighbor list [n_edges, 2]"),
         PlainSerializer(_tensor_serialization, when_used="json"),
     ] = None
@@ -163,8 +169,28 @@ class AtomicData(BaseModel, DataMixin):
     ] = None
 
     unit_shifts: Annotated[
-        t.PeriodicUnitShifts | None,
+        t.NeighborListShifts | None,
         Field(description="Additional shifts for each edge [n_edges, 3]"),
+        PlainSerializer(_tensor_serialization, when_used="json"),
+    ] = None
+
+    neighbor_matrix: Annotated[
+        t.NeighborMatrix | None,
+        Field(description="Dense neighbor matrix [n_nodes, max_neighbors]"),
+        PlainSerializer(_tensor_serialization, when_used="json"),
+    ] = None
+
+    neighbor_matrix_shifts: Annotated[
+        t.NeighborMatrixShifts | None,
+        Field(
+            description="Periodic shifts for the dense neighbor matrix [n_nodes, max_neighbors, 3]"
+        ),
+        PlainSerializer(_tensor_serialization, when_used="json"),
+    ] = None
+
+    num_neighbors: Annotated[
+        t.NumNeighbors | None,
+        Field(description="Number of valid neighbors per atom [n_nodes]"),
         PlainSerializer(_tensor_serialization, when_used="json"),
     ] = None
 
@@ -297,6 +323,7 @@ class AtomicData(BaseModel, DataMixin):
     ] = None
 
     info: dict[str, torch.Tensor] = Field(default_factory=dict)
+    # "Node key" means dim(0) == num_nodes; tensors may have any rank.
     _default_node_keys: ClassVar[frozenset[str]] = frozenset(
         {
             "atomic_masses",
@@ -312,6 +339,9 @@ class AtomicData(BaseModel, DataMixin):
             "velocities",
             "momenta",
             "kinetic_energies",
+            "neighbor_matrix",
+            "neighbor_matrix_shifts",
+            "num_neighbors",
         }
     )
     _default_edge_keys: ClassVar[frozenset[str]] = frozenset(
