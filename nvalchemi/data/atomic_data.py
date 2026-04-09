@@ -99,9 +99,10 @@ class AtomicData(BaseModel, DataMixin):
     node_attrs : torch.Tensor
         Node attributes [n_nodes, n_node_feats]
     shifts : torch.Tensor
-        Shifts for each edge [n_edges, 3]
-    unit_shifts : torch.Tensor
-        Additional shifts for each edge [n_edges, 3]
+        Cartesian displacement vectors for each edge [n_edges, 3],
+        computed as ``neighbor_list_shifts @ cell``.
+    neighbor_list_shifts : torch.Tensor
+        Integer lattice image indices for periodic edges [n_edges, 3].
     neighbor_matrix : torch.Tensor
         Dense neighbor matrix [n_nodes, max_neighbors]
     neighbor_matrix_shifts : torch.Tensor
@@ -164,13 +165,17 @@ class AtomicData(BaseModel, DataMixin):
 
     shifts: Annotated[
         t.PeriodicShifts | None,
-        Field(description="Shifts for each edge [n_edges, 3]"),
+        Field(
+            description="Cartesian displacement vectors for each edge (neighbor_list_shifts @ cell) [n_edges, 3]"
+        ),
         PlainSerializer(_tensor_serialization, when_used="json"),
     ] = None
 
-    unit_shifts: Annotated[
+    neighbor_list_shifts: Annotated[
         t.NeighborListShifts | None,
-        Field(description="Additional shifts for each edge [n_edges, 3]"),
+        Field(
+            description="Integer lattice image indices for periodic edges [n_edges, 3]"
+        ),
         PlainSerializer(_tensor_serialization, when_used="json"),
     ] = None
 
@@ -345,7 +350,7 @@ class AtomicData(BaseModel, DataMixin):
         }
     )
     _default_edge_keys: ClassVar[frozenset[str]] = frozenset(
-        {"shifts", "unit_shifts", "neighbor_list", "edge_embeddings"}
+        {"shifts", "neighbor_list_shifts", "neighbor_list", "edge_embeddings"}
     )
     _default_system_keys: ClassVar[frozenset[str]] = frozenset(
         {

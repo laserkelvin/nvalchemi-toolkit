@@ -22,7 +22,7 @@ skin buffer to avoid recomputing neighbors every step.
 Both ``MATRIX`` and ``COO`` neighbor formats are supported for dynamic
 updates (i.e. updates each dynamics step).  For ``COO`` format the hook
 creates or replaces the edges group on the batch each step so that
-``batch.neighbor_list`` (shape ``(E, 2)``) and ``batch.unit_shifts``
+``batch.neighbor_list`` (shape ``(E, 2)``) and ``batch.neighbor_list_shifts``
 (shape ``(E, 3)``, PBC only) are always up to date.  The companion
 ``Batch.edge_ptr`` property derives the per-atom CSR pointer on demand.
 
@@ -118,7 +118,7 @@ class NeighborListHook:
     on every rebuild, making the following accessible:
 
     * ``batch.neighbor_list`` — shape ``(E, 2)``, int32 (nvalchemi convention)
-    * ``batch.unit_shifts`` — shape ``(E, 3)``, int32 (only when PBC active)
+    * ``batch.neighbor_list_shifts`` — shape ``(E, 3)``, int32 (only when PBC active)
     * ``batch.edge_ptr`` — shape ``(N+1,)``, int32, derived on demand via
       the :attr:`~nvalchemi.data.Batch.edge_ptr` property
 
@@ -458,7 +458,7 @@ class NeighborListHook:
         # directly with a .T transpose.
         data_dict: dict[str, torch.Tensor] = {"neighbor_list": neighbor_list_edges}
         if nl_shifts is not None:
-            data_dict["unit_shifts"] = nl_shifts  # (E, 3)
+            data_dict["neighbor_list_shifts"] = nl_shifts  # (E, 3)
 
         # Replace (or create) the edges group.  validate=False is required
         # because the edge count changes between neighbor-list rebuilds.

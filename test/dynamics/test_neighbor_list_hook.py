@@ -745,13 +745,13 @@ class TestNeighborListHookCOO:
         pairs = {tuple(row) for row in ei}
         assert (0, 1) in pairs or (1, 0) in pairs, "edge between atoms 0 and 1 expected"
 
-    def test_unit_shifts_present_with_pbc(self, device: str):
+    def test_neighbor_list_shifts_present_with_pbc(self, device: str):
         hook = NeighborListHook(_cfg(fmt=NeighborListFormat.COO, max_neighbors=None))
         batch = _pbc_wrap_batch(device)
         hook(_ctx(batch), _STAGE)
 
-        assert hasattr(batch, "unit_shifts")
-        assert batch.unit_shifts.shape[1] == 3
+        assert hasattr(batch, "neighbor_list_shifts")
+        assert batch.neighbor_list_shifts.shape[1] == 3
 
     def test_no_edges_for_isolated_atom(self, device: str):
         """Atom 2 (isolated, dist > cutoff to all others) should appear in no edges."""
