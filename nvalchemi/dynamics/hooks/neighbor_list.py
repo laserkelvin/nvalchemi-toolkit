@@ -111,7 +111,7 @@ class NeighborListHook:
 
     * ``neighbor_matrix`` — shape ``(N, max_neighbors)``, int32
     * ``num_neighbors``   — shape ``(N,)``, int32
-    * ``neighbor_shifts`` — shape ``(N, max_neighbors, 3)``, int32
+    * ``neighbor_matrix_shifts`` — shape ``(N, max_neighbors, 3)``, int32
       (only written when PBC is active)
 
     For ``COO`` format the edges group of the batch is created or replaced
@@ -164,7 +164,7 @@ class NeighborListHook:
         # Neighbor Matrix state: populated after the first build.
         self._neighbor_matrix: torch.Tensor | None = None
         self._num_neighbors: torch.Tensor | None = None
-        self._neighbor_shifts: torch.Tensor | None = None
+        self._neighbor_matrix_shifts: torch.Tensor | None = None
 
         # Shape the staging buffers were allocated for; used to detect when
         # re-allocation is needed (e.g. inflight batching with variable load).
@@ -300,7 +300,7 @@ class NeighborListHook:
             batch_idx=self._buf_batch_idx,
             neighbor_matrix=self._neighbor_matrix,
             num_neighbors=self._num_neighbors,
-            neighbor_matrix_shifts=self._neighbor_shifts,
+            neighbor_matrix_shifts=self._neighbor_matrix_shifts,
             rebuild_flags=self._rebuild_flags,
             **self._buf_nl_kwargs,
         )
@@ -315,8 +315,8 @@ class NeighborListHook:
         else:
             neighbor_matrix = self._neighbor_matrix  # (N, max_neighbors) int32
             num_neighbors = self._num_neighbors  # (N,) int32
-            neighbor_shifts = (
-                self._neighbor_shifts
+            neighbor_matrix_shifts = (
+                self._neighbor_matrix_shifts
             )  # (N, max_neighbors, 3) int32 or None
             # Write into the atoms group so that `batch.neighbor_matrix` etc. work.
             atoms_group = batch._atoms_group
@@ -327,8 +327,8 @@ class NeighborListHook:
                 )
             atoms_group["neighbor_matrix"] = neighbor_matrix
             atoms_group["num_neighbors"] = num_neighbors
-            if neighbor_shifts is not None:
-                atoms_group["neighbor_shifts"] = neighbor_shifts
+            if neighbor_matrix_shifts is not None:
+                atoms_group["neighbor_matrix_shifts"] = neighbor_matrix_shifts
 
         # Stamp the cutoff so that prepare_neighbors_for_model can detect when
         # filtering is needed for sub-models with a tighter cutoff.
@@ -361,7 +361,7 @@ class NeighborListHook:
         )
         self._num_neighbors = torch.zeros(N, dtype=torch.int32, device=device)
         if pbc is not None:
-            self._neighbor_shifts = torch.zeros(
+            self._neighbor_matrix_shifts = torch.zeros(
                 N, self.config.max_neighbors, 3, dtype=torch.int32, device=device
             )
         # Reset skin-buffer state so __call__ re-initialises _ref_positions.
@@ -436,8 +436,8 @@ class NeighborListHook:
         neighbor_list_coo = get_neighbor_list_from_neighbor_matrix(
             neighbor_matrix=self._neighbor_matrix,
             num_neighbors=self._num_neighbors,
-            neighbor_shift_matrix=self._neighbor_shifts
-            if self._neighbor_shifts is not None
+            neighbor_shift_matrix=self._neighbor_matrix_shifts
+            if self._neighbor_matrix_shifts is not None
             else None,
             fill_value=batch.num_nodes,
         )

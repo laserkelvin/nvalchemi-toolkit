@@ -47,7 +47,7 @@ def filter_neighbor_matrix(
     num_neighbors: Tensor,
     fill_value: int,
     cell: Tensor | None = None,
-    neighbor_shifts: Tensor | None = None,
+    neighbor_matrix_shifts: Tensor | None = None,
     batch_idx: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor | None]:
     """Filter a dense neighbor matrix to a tighter cutoff.
@@ -68,7 +68,7 @@ def filter_neighbor_matrix(
     cell : Tensor | None
         Unit cell matrices.  Either ``(3, 3)`` (single cell) or ``(B, 3, 3)``
         (per-system cells).  Required for PBC distance computation.
-    neighbor_shifts : Tensor | None
+    neighbor_matrix_shifts : Tensor | None
         Integer unit-cell shift vectors, shape ``(N, K, 3)``, int32.
         Required for PBC; ignored when ``cell`` is ``None``.
     batch_idx : Tensor | None
@@ -81,7 +81,7 @@ def filter_neighbor_matrix(
         Filtered dense neighbor matrix, same shape ``(N, K)``.
     num_neighbors : Tensor
         Updated neighbor counts, shape ``(N,)``.
-    neighbor_shifts : Tensor | None
+    neighbor_matrix_shifts : Tensor | None
         Filtered shift vectors ``(N, K, 3)`` if shifts were provided, else
         ``None``.
     """
@@ -100,8 +100,8 @@ def filter_neighbor_matrix(
     delta = pos_j - pos_i  # (N, K, 3)
 
     # Add PBC Cartesian shift: shift_vec = shifts @ cell
-    if cell is not None and neighbor_shifts is not None:
-        shifts_f = neighbor_shifts.to(dtype)  # (N, K, 3)
+    if cell is not None and neighbor_matrix_shifts is not None:
+        shifts_f = neighbor_matrix_shifts.to(dtype)  # (N, K, 3)
         if cell.dim() == 2:
             # Single cell (3, 3) — broadcast over all atoms and neighbours.
             atom_cell = cell.unsqueeze(0).unsqueeze(0).expand(N, K, 3, 3)  # (N,K,3,3)
@@ -136,9 +136,9 @@ def filter_neighbor_matrix(
 
     # Reorder shift vectors if present.
     out_shifts: Tensor | None = None
-    if neighbor_shifts is not None:
-        order_3d = order.unsqueeze(-1).expand_as(neighbor_shifts)  # (N, K, 3)
-        shifts_sorted = neighbor_shifts.gather(1, order_3d)
+    if neighbor_matrix_shifts is not None:
+        order_3d = order.unsqueeze(-1).expand_as(neighbor_matrix_shifts)  # (N, K, 3)
+        shifts_sorted = neighbor_matrix_shifts.gather(1, order_3d)
         out_shifts = shifts_sorted.masked_fill(~keep_sorted.unsqueeze(-1), 0)
 
     return nm_filtered, new_num_neighbors, out_shifts
@@ -228,7 +228,7 @@ def neighbor_matrix_to_list(
     neighbor_matrix: Tensor,
     num_neighbors: Tensor,
     fill_value: int,
-    neighbor_shifts: Tensor | None = None,
+    neighbor_matrix_shifts: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor | None]:
     """Convert a dense neighbor matrix (MATRIX format) to sparse COO+CSR.
 
@@ -240,7 +240,7 @@ def neighbor_matrix_to_list(
         Number of valid neighbors per atom, shape ``(N,)``, int32.
     fill_value : int
         Sentinel value marking empty slots.
-    neighbor_shifts : Tensor | None
+    neighbor_matrix_shifts : Tensor | None
         Integer unit-cell shift vectors, shape ``(N, K, 3)``, int32.
 
     Returns
@@ -276,8 +276,8 @@ def neighbor_matrix_to_list(
     ptr[1:] = num_neighbors.cumsum(0).to(torch.int32)
 
     out_shifts: Tensor | None = None
-    if neighbor_shifts is not None:
-        ns_flat = neighbor_shifts.reshape(-1, 3)  # (N*K, 3)
+    if neighbor_matrix_shifts is not None:
+        ns_flat = neighbor_matrix_shifts.reshape(-1, 3)  # (N*K, 3)
         out_shifts = ns_flat[flat_idx]  # (M, 3)
 
     return nl, ptr, out_shifts
@@ -313,7 +313,7 @@ def prepare_neighbors_for_model(
     -------
     dict[str, Tensor]
         For ``MATRIX`` format: keys ``"neighbor_matrix"``, ``"num_neighbors"``,
-        ``"neighbor_shifts"`` (only present when shifts exist).
+        ``"neighbor_matrix_shifts"`` (only present when shifts exist).
         For ``COO`` format: keys ``"neighbor_list"`` (shape ``(E, 2)``),
         ``"edge_ptr"``, ``"neighbor_list_shifts"`` (only present when shifts exist).
 
@@ -347,7 +347,7 @@ def prepare_neighbors_for_model(
             )
         nm: Tensor = data.neighbor_matrix
         nn_: Tensor = data.num_neighbors
-        ns: Tensor | None = getattr(data, "neighbor_shifts", None)
+        ns: Tensor | None = getattr(data, "neighbor_matrix_shifts", None)
 
         if needs_filter:
             nm, nn_, ns = filter_neighbor_matrix(
@@ -357,7 +357,7 @@ def prepare_neighbors_for_model(
                 num_neighbors=nn_,
                 fill_value=fill_value,
                 cell=cell,
-                neighbor_shifts=ns,
+                neighbor_matrix_shifts=ns,
                 batch_idx=batch_idx,
             )
 
@@ -366,7 +366,7 @@ def prepare_neighbors_for_model(
             "num_neighbors": nn_,
         }
         if ns is not None:
-            out["neighbor_shifts"] = ns
+            out["neighbor_matrix_shifts"] = ns
         return out
 
     # ------------------------------------------------------------------ #
@@ -376,7 +376,7 @@ def prepare_neighbors_for_model(
     if has_matrix:
         nm = data.neighbor_matrix
         nn_ = data.num_neighbors
-        ns = getattr(data, "neighbor_shifts", None)
+        ns = getattr(data, "neighbor_matrix_shifts", None)
 
         if needs_filter:
             nm, nn_, ns = filter_neighbor_matrix(
@@ -386,7 +386,7 @@ def prepare_neighbors_for_model(
                 num_neighbors=nn_,
                 fill_value=fill_value,
                 cell=cell,
-                neighbor_shifts=ns,
+                neighbor_matrix_shifts=ns,
                 batch_idx=batch_idx,
             )
 
@@ -394,7 +394,7 @@ def prepare_neighbors_for_model(
             neighbor_matrix=nm,
             num_neighbors=nn_,
             fill_value=fill_value,
-            neighbor_shifts=ns,
+            neighbor_matrix_shifts=ns,
         )
         out = {"neighbor_list": nl, "edge_ptr": ptr}
         if shifts is not None:

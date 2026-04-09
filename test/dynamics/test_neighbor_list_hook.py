@@ -358,21 +358,21 @@ class TestStagingBufferAllocation:
         assert hook._neighbor_matrix.dtype == torch.int32
         assert hook._num_neighbors.dtype == torch.int32
 
-    def test_neighbor_shifts_allocated_with_pbc(self, device: str):
+    def test_neighbor_matrix_shifts_allocated_with_pbc(self, device: str):
         hook = NeighborListHook(_cfg())
         batch = _line_batch(device, pbc=True)
         N = batch.num_nodes
         hook(_ctx(batch), _STAGE)
 
-        assert hook._neighbor_shifts is not None
-        assert hook._neighbor_shifts.shape == (N, hook.config.max_neighbors, 3)
+        assert hook._neighbor_matrix_shifts is not None
+        assert hook._neighbor_matrix_shifts.shape == (N, hook.config.max_neighbors, 3)
 
-    def test_neighbor_shifts_none_without_pbc(self, device: str):
+    def test_neighbor_matrix_shifts_none_without_pbc(self, device: str):
         hook = NeighborListHook(_cfg())
         batch = _line_batch(device, pbc=False)
         hook(_ctx(batch), _STAGE)
 
-        assert hook._neighbor_shifts is None
+        assert hook._neighbor_matrix_shifts is None
 
 
 # ===========================================================================

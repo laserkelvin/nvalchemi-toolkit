@@ -45,7 +45,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeVar
 
 import torch
-from jaxtyping import Bool, Float, Integer
+from jaxtyping import Bool, Float, Integer, Num
 
 if TYPE_CHECKING:
     from nvalchemi.data import AtomicData, Batch
@@ -78,8 +78,8 @@ NodeSpins: TypeAlias = Float[torch.Tensor, "V 1"]  # noqa: F722
 GraphSpins: TypeAlias = Float[torch.Tensor, "B 1"]  # noqa: F722
 # Cartesian displacement vectors: shifts = neighbor_list_shifts @ cell
 PeriodicShifts: TypeAlias = Float[torch.Tensor, "E 3"]  # noqa: F722
-# Integer lattice image indices (stored as float for cell matmul)
-NeighborListShifts: TypeAlias = Float[torch.Tensor, "E 3"]  # noqa: F722
+# Integer lattice image indices; stored as int or float depending on source
+NeighborListShifts: TypeAlias = Num[torch.Tensor, "E 3"]  # noqa: F722
 LatticeVectors: TypeAlias = Float[torch.Tensor, "B 3 3"]  # noqa: F722
 Periodicity: TypeAlias = Bool[torch.Tensor, "B 3"]  # noqa: F722
 Forces: TypeAlias = Float[torch.Tensor, "V 3"]  # noqa: F722
@@ -102,7 +102,8 @@ NodeKineticEnergies: TypeAlias = Float[torch.Tensor, "V 1"]  # noqa: F722
 NodeTemperatures: TypeAlias = Float[torch.Tensor, "V 1"]  # noqa: F722
 GraphTemperatures: TypeAlias = Float[torch.Tensor, "B 1"]  # noqa: F722
 NeighborMatrix: TypeAlias = Integer[torch.Tensor, "V K"]  # noqa: F722
-NeighborMatrixShifts: TypeAlias = Integer[torch.Tensor, "V K 3"]  # noqa: F722
+# Integer lattice image indices; stored as int or float depending on source
+NeighborMatrixShifts: TypeAlias = Num[torch.Tensor, "V K 3"]  # noqa: F722
 NumNeighbors: TypeAlias = Integer[torch.Tensor, "V"]  # noqa: F722
 
 # ensemble variations of above properties
