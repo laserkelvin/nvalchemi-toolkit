@@ -932,3 +932,68 @@ class TestCompilerDisable:
             N, B, batch.positions.dtype, batch.device, None, None
         )
         assert hook._buf_positions is not None
+
+
+# ===========================================================================
+# TestStaleCOOEntries — regression test for stale neighbor matrix entries
+# ===========================================================================
+
+
+class TestStaleCOOEntries:
+    """Regression tests: shrinking neighbor counts must not leave stale COO edges.
+
+    When a Verlet skin rebuild finds fewer neighbors for an atom than the
+    previous build, slots beyond ``num_neighbors[i]`` in the neighbor matrix
+    retain stale indices.  The fix in ``_update_edges_group`` masks these
+    before the COO conversion.
+    """
+
+    @staticmethod
+    def _edges_as_set(batch: Batch) -> set[tuple[int, int]]:
+        """Return the COO neighbor_list as a set of (src, dst) pairs."""
+        return {tuple(row) for row in batch.neighbor_list.cpu().tolist()}
+
+    @staticmethod
+    def _edge_counts(batch: Batch) -> torch.Tensor:
+        """Per-atom edge count derived from the COO neighbor_list."""
+        ei = batch.neighbor_list.cpu()
+        src = ei[:, 0]
+        return torch.bincount(src, minlength=batch.num_nodes)
+
+    def _run_shrink_scenario(self, device: str) -> None:
+        """Build hook+batch, run initial rebuild, move atom out of range, rebuild."""
+        self.hook = NeighborListHook(
+            _cfg(fmt=NeighborListFormat.COO, max_neighbors=None), skin=1.0
+        )
+        self.batch = _line_batch(device)
+        # Step 1: full rebuild — atoms 0 and 1 are neighbors (dist 1.5)
+        self.hook(_ctx(self.batch), _STAGE)
+        self.pairs_before = self._edges_as_set(self.batch)
+
+        # Move atom 1 far away from atom 0 (dist 4.0 > cutoff+skin=3.5),
+        # close to atom 2 (dist 1.0 < cutoff).
+        # Displacement of 2.5 A > skin/2 = 0.5 triggers a rebuild.
+        self.batch.positions[1, 0] = 4.0
+        self.hook(_ctx(self.batch), _STAGE)
+        self.pairs_after = self._edges_as_set(self.batch)
+
+    def test_shrinking_neighbors_no_stale_edges(self, device: str):
+        """Moving an atom out of cutoff+skin must remove its stale edges."""
+        self._run_shrink_scenario(device)
+        assert (0, 1) in self.pairs_before or (1, 0) in self.pairs_before
+        # Atom 0 should have NO neighbors now (nearest is 4.0 A away)
+        assert (0, 1) not in self.pairs_after, "stale edge 0->1 not removed"
+        assert (1, 0) not in self.pairs_after, "stale edge 1->0 not removed"
+        # Atoms 1 and 2 should be neighbors (dist 1.0)
+        assert (1, 2) in self.pairs_after or (2, 1) in self.pairs_after
+
+    def test_shrinking_neighbors_edge_count_matches_num_neighbors(self, device: str):
+        """After rebuild, per-atom COO edge counts must equal num_neighbors."""
+        self._run_shrink_scenario(device)
+        coo_counts = self._edge_counts(self.batch)
+        # In COO mode num_neighbors lives on the hook's internal buffer,
+        # not on the batch object.
+        nn = self.hook._num_neighbors.cpu()
+        assert torch.equal(coo_counts, nn.to(coo_counts.dtype)), (
+            f"COO edge counts {coo_counts.tolist()} != num_neighbors {nn.tolist()}"
+        )

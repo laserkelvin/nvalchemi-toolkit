@@ -162,6 +162,7 @@ class NeighborListHook:
 
         # Neighbor Matrix state: populated after the first build.
         self._neighbor_matrix: torch.Tensor | None = None
+        self._col_range: torch.Tensor | None = None
         self._num_neighbors: torch.Tensor | None = None
         self._neighbor_matrix_shifts: torch.Tensor | None = None
 
@@ -358,6 +359,9 @@ class NeighborListHook:
         self._neighbor_matrix = torch.full(
             (N, self.config.max_neighbors), N, dtype=torch.int32, device=device
         )
+        self._col_range = torch.arange(
+            self.config.max_neighbors, device=device, dtype=torch.int32
+        )
         self._num_neighbors = torch.zeros(N, dtype=torch.int32, device=device)
         if pbc is not None:
             self._neighbor_matrix_shifts = torch.zeros(
@@ -432,13 +436,25 @@ class NeighborListHook:
         break.  Called only when ``format=COO``.
         """
 
+        # Mask stale entries in the neighbor matrix before COO conversion.
+        # The upstream kernel only writes slots 0..num_neighbors[i]-1 on
+        # rebuild; when neighbor counts shrink, slots num_neighbors[i]..old
+        # retain stale indices from the previous build.  Overwriting them
+        # with fill_value in-place is safe because the next rebuild will
+        # rewrite valid slots.
+        fill_value = batch.num_nodes
+        stale = self._col_range.unsqueeze(0) >= self._num_neighbors.unsqueeze(1)
+        self._neighbor_matrix[stale] = fill_value
+        if self._neighbor_matrix_shifts is not None:
+            self._neighbor_matrix_shifts[stale] = 0
+
         neighbor_list_coo = get_neighbor_list_from_neighbor_matrix(
             neighbor_matrix=self._neighbor_matrix,
             num_neighbors=self._num_neighbors,
             neighbor_shift_matrix=self._neighbor_matrix_shifts
             if self._neighbor_matrix_shifts is not None
             else None,
-            fill_value=batch.num_nodes,
+            fill_value=fill_value,
         )
         neighbor_list_edges = neighbor_list_coo[0].T.contiguous()  # (E, 2) int32
         if len(neighbor_list_coo) > 2:
