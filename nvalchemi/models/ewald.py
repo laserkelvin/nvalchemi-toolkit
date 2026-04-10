@@ -29,14 +29,14 @@ Usage
 
     model = EwaldModelWrapper(cutoff=10.0)
 
-    nl_hook = NeighborListHook(model.model_card.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
+    nl_hook = NeighborListHook(model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
     dynamics.register_hook(nl_hook)
     dynamics.model = model
 
 Notes
 -----
 * Forces are computed **analytically** inside the Warp kernel (not via
-  autograd), so :attr:`~ModelCard.forces_via_autograd` is ``False``.
+  autograd), so ``"forces"`` is NOT in ``autograd_outputs``.
 * Periodic boundary conditions are **required** (``needs_pbc=True``).
 * Input charges are read from ``data.charges`` (shape ``[N]``).
 * The Coulomb constant defaults to ``14.3996`` eV·Å/e², which gives energies
@@ -59,7 +59,6 @@ from nvalchemi.data import AtomicData, Batch
 from nvalchemi.models._ops.neighbor_filter import prepare_neighbors_for_model
 from nvalchemi.models.base import (
     BaseModelMixin,
-    ModelCard,
     ModelConfig,
     NeighborConfig,
     NeighborListFormat,
@@ -94,7 +93,7 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
     ----------
     model_config : ModelConfig
         Mutable configuration controlling which outputs are computed.
-        Set ``model.model_config.compute_stresses = True`` to enable
+        Include ``"stress"`` in ``model_config.active_outputs`` to enable
         virial computation for NPT/NPH simulations.
     """
 
@@ -103,15 +102,28 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         cutoff: float,
         accuracy: float = 1e-6,
         coulomb_constant: float = 14.3996,
-        max_neighbors: int = 256,
+        max_neighbors: int | None = None,
     ) -> None:
         super().__init__()
         self.cutoff = cutoff
         self.accuracy = accuracy
         self.coulomb_constant = coulomb_constant
         self.max_neighbors = max_neighbors
-        self.model_config = ModelConfig()
-        self._model_card: ModelCard = self._build_model_card()
+        self.model_config = ModelConfig(
+            outputs=frozenset({"energy", "forces", "stress"}),
+            autograd_outputs=frozenset(),
+            autograd_inputs=frozenset({"positions"}),
+            required_inputs=frozenset({"charges"}),
+            optional_inputs=frozenset(),
+            supports_pbc=True,
+            needs_pbc=True,
+            neighbor_config=NeighborConfig(
+                cutoff=self.cutoff,
+                format=NeighborListFormat.MATRIX,
+                half_list=False,
+                max_neighbors=self.max_neighbors,
+            ),
+        )
 
         # k-vector / parameter cache.
         # Invalidated automatically when cell changes, or manually via invalidate_cache().
@@ -129,28 +141,6 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
     # ------------------------------------------------------------------
     # BaseModelMixin required properties
     # ------------------------------------------------------------------
-
-    def _build_model_card(self) -> ModelCard:
-        return ModelCard(
-            forces_via_autograd=False,
-            supports_energies=True,
-            supports_forces=True,
-            supports_stresses=True,
-            supports_pbc=True,
-            needs_pbc=True,
-            supports_non_batch=False,
-            needs_node_charges=True,
-            neighbor_config=NeighborConfig(
-                cutoff=self.cutoff,
-                format=NeighborListFormat.MATRIX,
-                half_list=False,
-                max_neighbors=self.max_neighbors,
-            ),
-        )
-
-    @property
-    def model_card(self) -> ModelCard:
-        return self._model_card
 
     @property
     def embedding_shapes(self) -> dict[str, tuple[int, ...]]:
@@ -278,9 +268,9 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         """Adapt the model output to the framework output format."""
         output: ModelOutputs = OrderedDict()
         output["energy"] = model_output["energy"]
-        if self.model_config.compute_forces:
+        if "forces" in self.model_config.active_outputs:
             output["forces"] = model_output["forces"]
-        if self.model_config.compute_stresses:
+        if "stress" in self.model_config.active_outputs:
             if "stress" in model_output:
                 output["stress"] = model_output["stress"]
         return output
@@ -288,9 +278,9 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
     def output_data(self) -> set[str]:
         """Return the set of keys that the model produces."""
         keys: set[str] = {"energy"}
-        if self.model_config.compute_forces:
+        if "forces" in self.model_config.active_outputs:
             keys.add("forces")
-        if self.model_config.compute_stresses:
+        if "stress" in self.model_config.active_outputs:
             keys.add("stress")
         return keys
 
@@ -334,8 +324,8 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         neighbor_matrix = inp["neighbor_matrix"].contiguous()
         neighbor_matrix_shifts = inp.get("neighbor_matrix_shifts")
 
-        compute_forces = self.model_config.compute_forces
-        compute_stresses = self.model_config.compute_stresses
+        compute_forces = "forces" in self.model_config.active_outputs
+        compute_stresses = "stress" in self.model_config.active_outputs
 
         # Automatically invalidate cache when cell changes (e.g. NPT simulation).
         if self._cached_cell is None or not torch.allclose(
@@ -416,7 +406,9 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         )
 
         # Sum real + reciprocal contributions.
-        per_atom_energies = (e_real + e_recip).to(positions.dtype)  # (N,) float64→dtype
+        per_atom_energies = (e_real + e_recip).to(
+            positions.dtype
+        )  # (N,) float64->dtype
 
         forces: torch.Tensor | None = None
         if compute_forces and f_real is not None and f_recip is not None:
@@ -433,7 +425,7 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         if virial is not None:
             virial = virial * self.coulomb_constant
 
-        # Scatter per-atom energies → per-system totals using pre-allocated buffer.
+        # Scatter per-atom energies -> per-system totals using pre-allocated buffer.
         if (
             self._energies_buf is None
             or self._energies_buf.shape[0] != B
@@ -455,7 +447,7 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
             model_output["forces"] = forces
         if virial is not None:
             # The ewald kernels accumulate W = Σ r_ij ⊗ F_ij (positive convention).
-            # Store directly as stress (W_phys) — the barostat divides by V.
+            # Store directly as stresses (W_phys) — the barostat divides by V.
             model_output["stress"] = virial
 
         return self.adapt_output(model_output, data)

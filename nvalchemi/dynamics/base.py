@@ -36,6 +36,7 @@ execution without needing explicit multiple inheritance.
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from enum import Enum
 from typing import (
@@ -1248,7 +1249,7 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
     ``compute(batch)`` performs the model forward pass: it calls
     ``model(batch)`` which must return a fully adapted ``ModelOutputs`` dict,
     validates outputs against ``__needs_keys__``, and writes results (forces,
-    energy, stress) back to the batch in-place.
+    energies, stresses) back to the batch in-place.
     Subclasses should generally NOT override ``compute``.
 
     Attributes
@@ -1391,7 +1392,7 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
         self.convergence_hook = convergence_hook
         self.n_steps = n_steps
         self.exit_status = exit_status
-        self.model_card = model.model_card
+        self.model_config = model.model_config
         self.current_hook_stage: DynamicsStage | None = None
         self._init_hooks(hooks)
 
@@ -1399,8 +1400,8 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
 
     @property
     def model_is_conservative(self) -> bool:
-        """Returns whether or not the model uses conservative forces"""
-        return self.model_card.forces_via_autograd
+        """Returns whether or not the model uses conservative forces."""
+        return "forces" in self.model_config.autograd_outputs
 
     def __repr__(self) -> str:
         """Return a human-readable summary of the dynamics engine."""
@@ -1519,7 +1520,7 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
                     f"{type(self).__name__} requires '{key}' "
                     f"(declared in __needs_keys__), but the model did not "
                     f"produce it. Check your model's ModelConfig and "
-                    f"ModelCard to ensure '{key}' is supported and enabled,"
+                    f"ModelConfig to ensure '{key}' is supported and enabled,"
                     " or that no hooks are missing."
                 )
 
@@ -1689,27 +1690,49 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
         """
         pass
 
+    # Class-level mapping from model output keys to batch attribute names.
+    # Override in subclasses to handle non-standard batch attribute names.
+    _OUTPUT_KEY_TO_BATCH_ATTR: dict[str, str] = {
+        "energy": "energy",
+        "forces": "forces",
+        "stress": "stress",
+    }
+
     def compute(self, batch: Batch | AtomsLike) -> ModelOutputs:
         """
-        Perform the model forward pass to compute forces and energy.
+        Perform the model forward pass to compute forces and energies.
 
         This method:
         1. Runs the model forward pass, which should enable gradients
         2. Adapts outputs to the standard format
         3. Validates outputs against dynamics requirements
-        4. Writes forces/energy back to the batch in-place
+        4. Writes known keys back to the batch in-place via
+           :attr:`_OUTPUT_KEY_TO_BATCH_ATTR`
+        5. Detaches all output tensors from the computation graph and
+           exposes them as ``_last_outputs`` for custom dynamics subclasses
+           that need charges, embeddings, or other non-standard outputs.
+
+        The detach in step 5 is deliberate: model wrappers may return
+        tensors that are still attached to the autograd graph (e.g. MACE
+        returns energies on the graph even after computing forces
+        internally).  Since ``compute()`` is a terminal consumer — values
+        have already been copied into the batch — holding the graph would
+        cause memory to grow without bound across dynamics steps.  Callers
+        that need the live graph (e.g. training loops computing a loss)
+        should call ``model(batch)`` directly instead of ``compute()``.
 
         Parameters
         ----------
         batch : Batch
             The current batch of atomic data. Will have forces and
-            energy updated in-place.
+            energies updated in-place.
 
         Returns
         -------
         ModelOutputs
-            OrderedDict containing the model outputs (energy, forces,
-            and any other computed properties).
+            OrderedDict containing the model outputs (energies, forces,
+            and any other computed properties).  All tensors are detached
+            from the computation graph.
 
         Raises
         ------
@@ -1717,23 +1740,39 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
             If the model outputs do not satisfy the dynamics requirements
             specified by ``__needs_keys__``.
         """
+        self._last_outputs = None
+
         # model.forward() is responsible for returning a fully adapted ModelOutputs dict.
         # adapt_output() must NOT be called again here; each wrapper handles adaptation
         # internally and returns canonical keys directly from forward().
         outputs: ModelOutputs = self.model(batch)
         self._validate_model_outputs(outputs)
 
-        # Use view() to handle shape mismatches (e.g. model [M,1] vs batch [M,1,1]).
-        if outputs.get("energy") is not None:
-            batch.energy.copy_(outputs["energy"].view(batch.energy.shape))
-        if outputs.get("forces") is not None:
-            batch.forces.copy_(outputs["forces"])
-        if outputs.get("stress") is not None:
-            # batch.stress must be pre-allocated (e.g. AtomicData(stress=zeros(1,3,3))).
-            # NPT/NPH read this after each compute(); variable-cell optimizers also use it.
-            batch.stress.copy_(outputs["stress"].view(batch.stress.shape))
+        # Write known keys to batch via copy_, then detach all tensors from the
+        # computation graph.  Models like MACE return energies still attached to
+        # the graph after internal autograd; without detaching, _last_outputs
+        # would keep the entire forward graph alive until the next compute().
+        detached: ModelOutputs = OrderedDict()
+        for key, value in outputs.items():
+            if isinstance(value, torch.Tensor):
+                detached[key] = value.detach()
+            else:
+                detached[key] = value
+        # Explicitly break all references to graph-attached tensors before
+        # any further work.  Without this, the local `outputs` dict and its
+        # values keep the autograd graph alive for the remainder of compute().
+        del outputs
 
-        return outputs
+        for out_key, batch_attr in self._OUTPUT_KEY_TO_BATCH_ATTR.items():
+            value = detached.get(out_key)
+            if value is not None:
+                target = getattr(batch, batch_attr, None)
+                if target is not None:
+                    target.copy_(value.view(target.shape))
+
+        self._last_outputs = detached
+
+        return detached
 
     def step(self, batch: Batch) -> tuple[Batch, torch.Tensor | None]:
         """
@@ -2055,7 +2094,6 @@ class BaseDynamics(HookRegistryMixin, _CommunicationMixin):
                 saved[field] = val[sys_mask].clone()
 
         self.pre_update(batch)
-        self.post_update(batch)
 
         with torch.no_grad():
             for field, sv in saved.items():

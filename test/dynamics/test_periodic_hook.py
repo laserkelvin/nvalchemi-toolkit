@@ -24,7 +24,7 @@ import torch
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.dynamics.base import BaseDynamics, DynamicsStage
 from nvalchemi.hooks import Hook, HookContext, WrapPeriodicHook
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,7 +61,7 @@ def _make_periodic_batch(
 
 
 def _make_dynamics() -> BaseDynamics:
-    return BaseDynamics(DemoModelWrapper())
+    return BaseDynamics(DemoModelWrapper(DemoModel()))
 
 
 def _make_ctx(batch: Batch, dynamics: BaseDynamics) -> HookContext:

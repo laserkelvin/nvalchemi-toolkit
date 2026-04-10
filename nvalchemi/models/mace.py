@@ -40,14 +40,14 @@ with ``format=NeighborListFormat.COO`` so that ``neighbor_list`` and
     from nvalchemi.hooks import NeighborListHook
     from nvalchemi.dynamics.base import DynamicsStage
 
-    nl_hook = NeighborListHook(model.model_card.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
+    nl_hook = NeighborListHook(model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
     dynamics.register_hook(nl_hook)
     dynamics.model = model
 
 Notes
 -----
 * Forces are computed **conservatively** via MACE's internal autograd, so
-  :attr:`~ModelCard.forces_via_autograd` is ``True``.
+  ``"forces"`` is in ``autograd_outputs``.
 * ``node_attrs`` (one-hot atomic-number encodings) are computed via a
   pre-built GPU lookup table — no CPU round-trips per step.
 * For PBC systems, both ``neighbor_list_shifts`` (integer image indices ``[E, 3]``)
@@ -66,12 +66,12 @@ from typing import Any
 import torch
 from torch import nn
 
-from nvalchemi import OptionalDependency
+from nvalchemi._optional import OptionalDependency
 from nvalchemi._typing import ModelOutputs
 from nvalchemi.data import AtomicData, Batch
+from nvalchemi.models._ops.neighbor_filter import prepare_neighbors_for_model
 from nvalchemi.models.base import (
     BaseModelMixin,
-    ModelCard,
     ModelConfig,
     NeighborConfig,
     NeighborListFormat,
@@ -82,6 +82,25 @@ _torch_version = version("torch")
 __all__ = ["MACEWrapper"]
 
 
+def _patch_e3nn_irrep_len_for_compile() -> None:
+    """Patch ``e3nn.o3.Irrep.__len__`` for ``torch.compile`` compatibility.
+
+    TorchDynamo may treat ``Irrep`` as a sequence while building guards.
+    Some e3nn versions override ``__len__`` to raise
+    ``NotImplementedError`` even though ``Irrep`` subclasses ``tuple``.
+    Restoring ``tuple.__len__`` keeps the tuple semantics without
+    modifying the installed package on disk.
+    """
+    try:
+        from e3nn.o3 import Irrep
+
+        if Irrep.__len__ is not tuple.__len__:
+            Irrep.__len__ = tuple.__len__
+    except ImportError:
+        pass
+
+
+@OptionalDependency.MACE.require
 class MACEWrapper(nn.Module, BaseModelMixin):
     """Wrapper for any MACE model implementing the :class:`~nvalchemi.models.base.BaseModelMixin` interface.
 
@@ -101,7 +120,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
     ----------
     model : nn.Module
         An instantiated MACE model.  Any subclass of ``mace.modules.MACE``
-        is accepted.  The wrapper mirrors the model's training/eval state.
+        is accepted.
 
     Attributes
     ----------
@@ -113,12 +132,10 @@ class MACEWrapper(nn.Module, BaseModelMixin):
 
     model: nn.Module
 
-    @OptionalDependency.MACE.require
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
         self.model = model
-        self.train(mode=model.training)
-        self.model_config = ModelConfig()
+
         # Cache the model dtype — determined at construction, stable thereafter.
         self._cached_model_dtype: torch.dtype = next(model.parameters()).dtype
 
@@ -139,23 +156,14 @@ class MACEWrapper(nn.Module, BaseModelMixin):
         # persistent=False: derived from model.atomic_numbers, excluded from
         # state_dict but still tracked for device / dtype moves.
         self.register_buffer("_node_emb", node_emb, persistent=False)
-        self._model_card: ModelCard = self._build_model_card()
-
-    # ------------------------------------------------------------------
-    # BaseModelMixin required properties
-    # ------------------------------------------------------------------
-
-    def _build_model_card(self) -> ModelCard:
-        return ModelCard(
-            forces_via_autograd=True,
-            supports_energies=True,
-            supports_forces=True,
-            supports_stresses=True,
+        self.model_config = ModelConfig(
+            outputs=frozenset({"energy", "forces", "stress", "hessian"}),
+            autograd_outputs=frozenset({"forces", "stress"}),
+            autograd_inputs=frozenset({"positions"}),
+            required_inputs=frozenset(),
+            optional_inputs=frozenset({"unit_shifts", "cell"}),
             supports_pbc=True,
             needs_pbc=False,
-            supports_non_batch=True,
-            supports_node_embeddings=True,
-            supports_graph_embeddings=True,
             neighbor_config=NeighborConfig(
                 cutoff=self.cutoff,
                 format=NeighborListFormat.COO,
@@ -163,9 +171,9 @@ class MACEWrapper(nn.Module, BaseModelMixin):
             ),
         )
 
-    @property
-    def model_card(self) -> ModelCard:
-        return self._model_card
+    # ------------------------------------------------------------------
+    # BaseModelMixin required properties
+    # ------------------------------------------------------------------
 
     @property
     def embedding_shapes(self) -> dict[str, tuple[int, ...]]:
@@ -218,12 +226,17 @@ class MACEWrapper(nn.Module, BaseModelMixin):
     def adapt_input(self, data: AtomicData | Batch, **kwargs: Any) -> dict[str, Any]:
         """Build the input dict expected by ``MACE.forward``.
 
-        Handles ``AtomicData → Batch`` promotion, ``node_attrs`` encoding,
-        gradient enabling on ``positions``, transposing ``neighbor_list`` from
+        Handles ``AtomicData -> Batch`` promotion, ``node_attrs`` encoding,
+        gradient enabling on ``positions``, transposing ``edge_index`` from
         nvalchemi's ``[E, 2]`` to MACE's ``[2, E]`` convention, zero-filling
         of ``neighbor_list_shifts`` / ``cell`` for non-PBC systems, and
         pre-computation of physical ``shifts`` vectors from
         ``neighbor_list_shifts @ cell``.
+
+        Uses :func:`~nvalchemi.models._ops.neighbor_filter.prepare_neighbors_for_model`
+        to obtain COO neighbor data, which transparently converts from MATRIX
+        format when the batch was built with a MATRIX-format neighbor hook
+        (e.g. in a pipeline with MATRIX-format sub-models).
 
         .. note::
             This method does **not** call ``super().adapt_input()`` because
@@ -236,23 +249,31 @@ class MACEWrapper(nn.Module, BaseModelMixin):
 
         dtype = self._model_dtype
         device = data.positions.device
-        # nvalchemi (E, 2) -> MACE COO (2, E)
-        edge_index = data.neighbor_list.long().T  # [2, E]
-        E = edge_index.shape[1]
         B = data.num_graphs
+
+        # Obtain COO neighbor data via prepare_neighbors_for_model, which
+        # handles MATRIX->COO conversion when the pipeline hook built MATRIX.
+        neighbor_dict = prepare_neighbors_for_model(
+            data, self.cutoff, NeighborListFormat.COO, data.num_nodes
+        )
+        # nvalchemi (E, 2) -> MACE COO (2, E)
+        edge_index = neighbor_dict["neighbor_list"].long().T  # [2, E]
+        E = edge_index.shape[1]
 
         # Cast positions to model dtype, then enable gradients on the converted
         # tensor.  We always clone before enabling grad so that data.positions
         # is never mutated in-place (which would happen when dtype already
         # matches and .to() returns the same storage).
         positions = data.positions.to(dtype=dtype)
-        if self.model_config.compute_forces or self.model_config.compute_stresses:
+        compute_forces = "forces" in self.model_config.active_outputs
+        compute_stresses = "stress" in self.model_config.active_outputs
+        if compute_forces or compute_stresses:
             positions = positions.clone()
             positions.requires_grad_(True)
 
         # neighbor_list_shifts: integer PBC image indices [E, 3], cast to float for
         # MACE's cell @ neighbor_list_shifts contraction.  Zero for non-PBC systems.
-        neighbor_list_shifts_raw = getattr(data, "neighbor_list_shifts", None)
+        neighbor_list_shifts_raw = neighbor_dict.get("neighbor_list_shifts")
         if neighbor_list_shifts_raw is None:
             neighbor_list_shifts = torch.zeros(E, 3, dtype=dtype, device=device)
         else:
@@ -301,7 +322,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
         """Map MACE output keys to nvalchemi standard keys.
 
         MACE uses ``"energy"`` / ``"stress"`` / ``"hessian"``; nvalchemi
-        expects ``"energy"`` / ``"stress"`` / ``"hessians"``.
+        expects ``"energy"`` / ``"stress"`` / ``"hessian"``.
         Renaming happens *before* calling ``super()`` so the base auto-mapper
         sees the canonical key names.
         """
@@ -314,7 +335,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
         if raw_output.get("stress") is not None:
             mapped["stress"] = raw_output["stress"]
         if raw_output.get("hessian") is not None:
-            mapped["hessians"] = raw_output["hessian"]
+            mapped["hessian"] = raw_output["hessian"]
 
         return super().adapt_output(mapped, data)
 
@@ -326,11 +347,11 @@ class MACEWrapper(nn.Module, BaseModelMixin):
         """Run the MACE model and return the output."""
         model_inputs = self.adapt_input(data, **kwargs)
 
-        compute_forces = self._verify_request(
-            self.model_config, self.model_card, "forces"
+        compute_forces = "forces" in (
+            self.model_config.active_outputs & self.model_config.outputs
         )
-        compute_stresses = self._verify_request(
-            self.model_config, self.model_card, "stresses"
+        compute_stresses = "stress" in (
+            self.model_config.active_outputs & self.model_config.outputs
         )
 
         raw_output = self.model.forward(
@@ -340,7 +361,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
             # compute_displacement enables the MACE displacement trick required
             # for stress computation via autograd through cell @ neighbor_list_shifts.
             compute_displacement=compute_stresses,
-            training=self.training,
+            training=False,  # Only inference supported right now.
         )
         result = self.adapt_output(raw_output, data)
         return result
@@ -411,7 +432,6 @@ class MACEWrapper(nn.Module, BaseModelMixin):
     # ------------------------------------------------------------------
 
     @classmethod
-    @OptionalDependency.MACE.require
     def from_checkpoint(
         cls,
         checkpoint_path: Path | str,
@@ -467,7 +487,13 @@ class MACEWrapper(nn.Module, BaseModelMixin):
             If ``mace-torch`` is not installed, or if ``enable_cueq=True``
             and ``cuequivariance`` is not installed.
         """
-        from mace.calculators.foundations_models import download_mace_mp_checkpoint
+        OptionalDependency.MACE.is_available() or OptionalDependency.MACE._raise_error(
+            "MACEWrapper.from_checkpoint"
+        )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            from mace.calculators.foundations_models import download_mace_mp_checkpoint
 
         cached_path = download_mace_mp_checkpoint(checkpoint_path)
         model: nn.Module = torch.load(
@@ -495,14 +521,7 @@ class MACEWrapper(nn.Module, BaseModelMixin):
 
         # Step 3: torch.compile — inference-only after this point.
         if compile_model:
-            if _torch_version.startswith("2.8"):
-                warnings.warn(
-                    "torch.compile has known issues with e3nn in torch 2.8. "
-                    "You may need to patch e3nn before compiling:\n"
-                    "  sed -i '238s/raise NotImplementedError/return 2/' "
-                    "<site-packages>/e3nn/o3/_irreps.py",
-                    stacklevel=2,
-                )
+            _patch_e3nn_irrep_len_for_compile()
             model.eval()
             for param in model.parameters():
                 param.requires_grad = False

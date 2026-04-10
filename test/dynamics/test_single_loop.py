@@ -41,8 +41,8 @@ from nvalchemi.dynamics.base import (
 from nvalchemi.dynamics.hooks import ConvergedSnapshotHook
 from nvalchemi.dynamics.sinks import HostMemory
 from nvalchemi.hooks._context import HookContext
-from nvalchemi.models.base import BaseModelMixin, ModelCard
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.base import BaseModelMixin, ModelConfig
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 # -----------------------------------------------------------------------------
 # DemoModelWrapper Subclasses for Testing
@@ -55,7 +55,7 @@ class CountingDemoModel(DemoModelWrapper):
     # TODO: refactor this just to use register hook
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(DemoModel())
         self.forward_count = 0
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -65,29 +65,42 @@ class CountingDemoModel(DemoModelWrapper):
 
 
 class NonConservativeDemoModel(DemoModelWrapper):
-    """DemoModelWrapper with forces_via_autograd=False."""
+    """DemoModelWrapper with forces computed directly (not via autograd).
 
-    @property
-    def model_card(self) -> ModelCard:
-        """Return a non-conservative model card."""
-        return ModelCard(
-            forces_via_autograd=False,
-            supports_energies=True,
-            supports_forces=True,
-            supports_stresses=False,
-            supports_hessians=False,
-            supports_dipoles=False,
-            supports_non_batch=True,
+    Overrides forward to compute dummy analytical forces (negative of
+    embedding gradient direction) so that ``requires_grad`` is not needed
+    on positions.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(DemoModel())
+        self.model_config = ModelConfig(
+            outputs=frozenset({"energy", "forces"}),
+            autograd_outputs=frozenset(),
+            autograd_inputs=frozenset({"positions"}),
             neighbor_config=None,
             needs_pbc=False,
         )
+
+    def forward(self, data: Any, **kwargs: Any) -> Any:
+        """Compute energies and dummy analytical forces."""
+        model_inputs = self.adapt_input(data, **kwargs)
+        # Call the underlying DemoModel with compute_forces=False to avoid autograd
+        model_inputs["compute_forces"] = False
+        model_outputs = self.model(**model_inputs)
+        # Add dummy analytical forces (non-zero, non-conservative)
+        N = data.positions.shape[0]
+        model_outputs["forces"] = torch.randn(
+            N, 3, dtype=data.positions.dtype, device=data.positions.device
+        )
+        return self.adapt_output(model_outputs, data)
 
 
 class CountingNonConservativeDemoModel(NonConservativeDemoModel):
     """Non-conservative DemoModelWrapper that tracks forward calls."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__()  # NonConservativeDemoModel.__init__ handles DemoModel()
         self.forward_count = 0
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -147,7 +160,7 @@ class TestConvergenceHook:
 
     def setup_method(self) -> None:
         """Set up test fixtures before each test method."""
-        self.model = DemoModelWrapper()
+        self.model = DemoModelWrapper(DemoModel())
 
     def test_satisfies_hook_protocol(self) -> None:
         """ConvergenceHook should satisfy the Hook protocol."""
@@ -908,7 +921,7 @@ class TestCommunicationMixinStreamContext:
 
     def setup_method(self) -> None:
         """Set up test fixtures before each test method."""
-        self.model = DemoModelWrapper()
+        self.model = DemoModelWrapper(DemoModel())
 
     def test_enter_creates_stream_on_cuda(self) -> None:
         """__enter__ creates a CUDA stream and enters a StreamContext on CUDA devices."""

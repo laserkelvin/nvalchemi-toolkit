@@ -75,7 +75,7 @@ from nvalchemi.dynamics import FIRE, NVTLangevin, SizeAwareSampler
 from nvalchemi.dynamics.base import ConvergenceHook, FusedStage
 from nvalchemi.dynamics.hooks import ConvergedSnapshotHook
 from nvalchemi.dynamics.sinks import HostMemory
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 
 class HostMemoryWithSystemId(HostMemory):
@@ -266,7 +266,7 @@ logging.info(
 # writing intermediate states.
 
 torch.manual_seed(42)
-model = DemoModelWrapper()
+model = DemoModelWrapper(DemoModel())
 model.eval()
 
 results_sink = HostMemoryWithSystemId(capacity=30)

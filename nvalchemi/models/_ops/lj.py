@@ -436,7 +436,7 @@ def _lj_energy_forces_batch_into_fake(
 
 @torch.library.custom_op(
     "nvalchemi::lj_energy_forces_virial_batch_into",
-    mutates_args={"atomic_energies", "forces", "virials"},
+    mutates_args={"atomic_energies", "forces", "virial"},
 )
 def lj_energy_forces_virial_batch_into(
     positions: Tensor,
@@ -453,12 +453,12 @@ def lj_energy_forces_virial_batch_into(
     half_list: bool,
     atomic_energies: Tensor,
     forces: Tensor,
-    virials: Tensor,
+    virial: Tensor,
 ) -> None:
     """In-place LJ energy+force+virial kernel writing into pre-allocated buffers.
 
-    ``atomic_energies``, ``forces``, and ``virials`` are zeroed then filled.
-    ``virials`` must have shape ``(B, 9)``.
+    ``atomic_energies``, ``forces``, and ``virial`` are zeroed then filled.
+    ``virial`` must have shape ``(B, 9)``.
     """
     from nvalchemiops.interactions.lj import (  # noqa: PLC0415
         _batch_lj_energy_forces_virial_matrix_kernel_overload,
@@ -475,7 +475,7 @@ def lj_energy_forces_virial_batch_into(
 
     atomic_energies.zero_()
     forces.zero_()
-    virials.zero_()
+    virial.zero_()
 
     wp_params = _get_cached_wp_params(
         epsilon, sigma, cutoff, switch_width, scl_t, wp_dev
@@ -499,7 +499,7 @@ def lj_energy_forces_virial_batch_into(
             wp.int32(fill_value),
             wp.from_torch(atomic_energies, scl_t),
             wp.from_torch(forces.contiguous(), vec_t),
-            wp.from_torch(virials.contiguous(), scl_t),
+            wp.from_torch(virial.contiguous(), scl_t),
         ],
         device=wp_dev,
     )
@@ -521,6 +521,6 @@ def _lj_energy_forces_virial_batch_into_fake(
     half_list: bool,
     atomic_energies: Tensor,
     forces: Tensor,
-    virials: Tensor,
+    virial: Tensor,
 ) -> None:
     return None

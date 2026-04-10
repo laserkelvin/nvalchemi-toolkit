@@ -77,21 +77,20 @@ def _make_stress_model():
     """
     from collections import OrderedDict
 
-    from nvalchemi.models.base import ModelCard
-    from nvalchemi.models.demo import DemoModelWrapper
+    from nvalchemi.models.base import ModelConfig
+    from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
     class _Wrapper(DemoModelWrapper):
-        @property
-        def model_card(self):
-            base = super().model_card
-            return ModelCard(
-                forces_via_autograd=base.forces_via_autograd,
-                supports_energies=base.supports_energies,
-                supports_forces=base.supports_forces,
-                supports_stresses=True,
-                supports_hessians=base.supports_hessians,
-                supports_dipoles=base.supports_dipoles,
-                supports_non_batch=base.supports_non_batch,
+        def __init__(self):
+            super().__init__(DemoModel())
+            base = self.model_config
+            self.model_config = ModelConfig(
+                outputs=frozenset(set(base.outputs) | {"stress"}),
+                autograd_outputs=base.autograd_outputs,
+                autograd_inputs=base.autograd_inputs,
+                required_inputs=base.required_inputs,
+                optional_inputs=base.optional_inputs,
+                supports_pbc=base.supports_pbc,
                 neighbor_config=base.neighbor_config,
                 needs_pbc=base.needs_pbc,
             )
@@ -119,11 +118,11 @@ def _make_stress_model():
 
 
 def _make_model(needs_stress: bool = False):
-    from nvalchemi.models.demo import DemoModelWrapper
+    from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
     if needs_stress:
         return _make_stress_model()
-    return DemoModelWrapper()
+    return DemoModelWrapper(DemoModel())
 
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ from nvalchemi.dynamics.base import ConvergenceHook, DynamicsStage, FusedStage
 from nvalchemi.dynamics.hooks import LoggingHook
 from nvalchemi.dynamics.sinks import HostMemory
 from nvalchemi.hooks import HookContext
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 logging.basicConfig(level=logging.INFO)
 
@@ -70,7 +70,7 @@ TEMPERATURE = 300.0  # Kelvin
 # ---------------------------------------------------------------------------
 
 torch.manual_seed(42)
-model = DemoModelWrapper()
+model = DemoModelWrapper(DemoModel())
 model.eval()
 
 

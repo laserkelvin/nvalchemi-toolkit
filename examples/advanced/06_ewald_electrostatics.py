@@ -80,7 +80,10 @@ from nvalchemi.models.ewald import EwaldModelWrapper
 
 CUTOFF = 10.0  # Å — real-space cutoff
 model = EwaldModelWrapper(cutoff=CUTOFF, accuracy=1e-6, max_neighbors=256)
-model.model_config.compute_forces = True
+model.model_config.active_outputs = {
+    "energy",
+    "forces",
+}  # Remove stress, we don't need it for this example
 
 # %%
 # Building a NaCl rock-salt supercell
@@ -174,7 +177,7 @@ print(
 # :class:`~nvalchemi.hooks.NeighborListHook` outside the dynamics loop.
 
 nl_hook = NeighborListHook(
-    model.model_card.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
+    model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
 )
 # Create a minimal HookContext for one-time neighbor list build
 ctx = HookContext(

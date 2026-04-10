@@ -22,23 +22,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nvalchemi.models.aimnet2 import AIMNet2, AIMNet2Wrapper
-    from nvalchemi.models.composable import ComposableModelWrapper
     from nvalchemi.models.demo import DemoModelWrapper
     from nvalchemi.models.dftd3 import DFTD3ModelWrapper
     from nvalchemi.models.ewald import EwaldModelWrapper
     from nvalchemi.models.lj import LennardJonesModelWrapper
     from nvalchemi.models.mace import MACEWrapper
-    from nvalchemi.models.pme import PMEModelWrapper
-    from nvalchemi.models.registry import (
-        ModelRegistryEntry,
-        download_and_verify,
-        get_registry_entry,
-        list_foundation_models,
-        register_model,
+    from nvalchemi.models.pipeline import (
+        PipelineGroup,
+        PipelineModelWrapper,
+        PipelineStep,
     )
+    from nvalchemi.models.pme import PMEModelWrapper
 
 __all__ = [
-    "ComposableModelWrapper",
     "DemoModelWrapper",
     "DFTD3ModelWrapper",
     "EwaldModelWrapper",
@@ -47,12 +43,10 @@ __all__ = [
     "AIMNet2",
     "AIMNet2Wrapper",
     "MACEWrapper",
-    # Registry
-    "ModelRegistryEntry",
-    "download_and_verify",
-    "get_registry_entry",
-    "list_foundation_models",
-    "register_model",
+    # Pipeline composition
+    "PipelineModelWrapper",
+    "PipelineStep",
+    "PipelineGroup",
 ]
 
 
@@ -62,10 +56,6 @@ def __getattr__(name: str):
         from nvalchemi.models.aimnet2 import AIMNet2, AIMNet2Wrapper
 
         return {"AIMNet2": AIMNet2, "AIMNet2Wrapper": AIMNet2Wrapper}[name]
-    elif name == "ComposableModelWrapper":
-        from nvalchemi.models.composable import ComposableModelWrapper
-
-        return ComposableModelWrapper
     elif name == "DemoModelWrapper":
         from nvalchemi.models.demo import DemoModelWrapper
 
@@ -90,26 +80,16 @@ def __getattr__(name: str):
         from nvalchemi.models.pme import PMEModelWrapper
 
         return PMEModelWrapper
-    elif name in (
-        "ModelRegistryEntry",
-        "download_and_verify",
-        "get_registry_entry",
-        "list_foundation_models",
-        "register_model",
-    ):
-        from nvalchemi.models.registry import (
-            ModelRegistryEntry,
-            download_and_verify,
-            get_registry_entry,
-            list_foundation_models,
-            register_model,
+    elif name in ("PipelineModelWrapper", "PipelineStep", "PipelineGroup"):
+        from nvalchemi.models.pipeline import (
+            PipelineGroup,
+            PipelineModelWrapper,
+            PipelineStep,
         )
 
         return {
-            "ModelRegistryEntry": ModelRegistryEntry,
-            "download_and_verify": download_and_verify,
-            "get_registry_entry": get_registry_entry,
-            "list_foundation_models": list_foundation_models,
-            "register_model": register_model,
+            "PipelineModelWrapper": PipelineModelWrapper,
+            "PipelineStep": PipelineStep,
+            "PipelineGroup": PipelineGroup,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

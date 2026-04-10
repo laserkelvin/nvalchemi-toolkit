@@ -215,7 +215,7 @@ def my_bias_fn(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
 
 bias_hook = BiasedPotentialHook(bias_fn=my_bias_fn, stage=DynamicsStage.AFTER_COMPUTE)
 neighbor_hook = NeighborListHook(
-    model.model_card.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
+    model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
 )
 
 nvt_biased = NVTLangevin(
@@ -271,11 +271,7 @@ nvt_unbiased = NVTLangevin(
     n_steps=200,
     random_seed=7,
 )
-nvt_unbiased.register_hook(
-    NeighborListHook(
-        model.model_card.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
-    )
-)
+nvt_unbiased.register_hook(neighbor_hook)
 nvt_unbiased.register_hook(_COMRecorder(com_unbiased))
 batch_unbiased = nvt_unbiased.run(batch_unbiased)
 print(f"Unbiased run complete: {nvt_unbiased.step_count} steps")

@@ -17,7 +17,7 @@ the private helpers in nvalchemi/models/_ops/lj.py.
 
 Strategy
 --------
-* All tests that touch ``__init__``, ``model_card``, ``adapt_input``,
+* All tests that touch ``__init__``, ``model_config``, ``adapt_input``,
   ``adapt_output``, ``input_data``, and ``output_data`` run without
   ``nvalchemiops`` installed, because the forward pass (which calls the
   Warp kernels) is never exercised.
@@ -32,7 +32,6 @@ import torch
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.models.base import (
-    ModelCard,
     ModelConfig,
     NeighborListFormat,
 )
@@ -46,12 +45,12 @@ from nvalchemi.models.lj import LennardJonesModelWrapper
 def _make_lj_batch(n_atoms: int = 4, max_neighbors: int = 8) -> Batch:
     """Create a Batch with neighbor_matrix and num_neighbors set manually."""
     positions = torch.randn(n_atoms, 3)
-    numbers = torch.ones(n_atoms, dtype=torch.int64)
+    atomic_numbers = torch.ones(n_atoms, dtype=torch.int64)
     atomic_masses = torch.ones(n_atoms, dtype=torch.float32)
 
     data = AtomicData(
         positions=positions,
-        atomic_numbers=numbers,
+        atomic_numbers=atomic_numbers,
         atomic_masses=atomic_masses,
     )
     # Attach neighbor matrix (padded with fill_value = n_atoms)
@@ -115,7 +114,7 @@ class TestLennardJonesModelWrapperInit:
 
     def test_stores_max_neighbors_default(self):
         model = LennardJonesModelWrapper(epsilon=0.5, sigma=2.0, cutoff=6.0)
-        assert model.max_neighbors == 128
+        assert model.max_neighbors is None
 
     def test_stores_max_neighbors_custom(self):
         model = LennardJonesModelWrapper(
@@ -143,47 +142,48 @@ class TestLennardJonesModelWrapperInit:
         model = _make_model()
         assert isinstance(model.model_config, ModelConfig)
 
-    def test_model_config_compute_forces_default_true(self):
+    def test_model_config_active_outputs_forces_default_true(self):
         model = _make_model()
-        assert model.model_config.compute_forces is True
+        assert "forces" in model.model_config.active_outputs
 
-    def test_model_config_compute_stresses_default_false(self):
+    def test_model_config_active_outputs_stresses_default_true(self):
         model = _make_model()
-        assert model.model_config.compute_stresses is False
+        # active_outputs defaults to outputs = {"energy", "forces", "stress"}
+        assert "stress" in model.model_config.active_outputs
 
 
 # ---------------------------------------------------------------------------
-# TestModelCard
+# TestModelConfig
 # ---------------------------------------------------------------------------
 
 
-class TestModelCard:
-    """Tests for model_card property and embedding_shapes."""
+class TestModelConfig:
+    """Tests for model_config and embedding_shapes."""
 
-    def test_model_card_returns_model_card(self):
+    def test_model_config_returns_model_config(self):
         model = _make_model()
-        assert isinstance(model.model_card, ModelCard)
+        assert isinstance(model.model_config, ModelConfig)
 
-    def test_forces_via_autograd_false(self):
+    def test_forces_not_via_autograd(self):
         model = _make_model()
-        assert model.model_card.forces_via_autograd is False
+        assert "forces" not in model.model_config.autograd_outputs
 
     def test_neighbor_config_is_matrix_format(self):
         model = _make_model()
-        assert model.model_card.neighbor_config is not None
-        assert model.model_card.neighbor_config.format == NeighborListFormat.MATRIX
+        assert model.model_config.neighbor_config is not None
+        assert model.model_config.neighbor_config.format == NeighborListFormat.MATRIX
 
     def test_neighbor_config_cutoff_matches_constructor(self):
         model = LennardJonesModelWrapper(epsilon=0.1, sigma=3.0, cutoff=9.0)
-        assert model.model_card.neighbor_config.cutoff == 9.0
+        assert model.model_config.neighbor_config.cutoff == 9.0
 
     def test_supports_stresses_true(self):
         model = _make_model()
-        assert model.model_card.supports_stresses is True
+        assert "stress" in model.model_config.outputs
 
     def test_supports_pbc_true(self):
         model = _make_model()
-        assert model.model_card.supports_pbc is True
+        assert model.model_config.supports_pbc is True
 
     def test_embedding_shapes_empty_dict(self):
         model = _make_model()
@@ -257,7 +257,7 @@ class TestAdaptInput:
         """adapt_input raises TypeError when given an AtomicData rather than a Batch.
 
         The wrapper iterates over input_data() keys before the isinstance
-        guard, so we must supply all required keys (positions, numbers,
+        guard, so we must supply all required keys (positions, atomic_numbers,
         neighbor_matrix, num_neighbors) to reach the isinstance check.
         """
         model = _make_model()
@@ -395,46 +395,46 @@ class TestAdaptOutput:
 
     def test_forces_in_output_when_compute_forces_true(self):
         model = _make_model()
-        model.model_config.compute_forces = True
+        model.model_config.active_outputs = {"energy", "forces"}
         batch = _make_lj_batch()
         result = model.adapt_output(self._model_output(), batch)
         assert "forces" in result
 
     def test_forces_not_in_output_when_compute_forces_false(self):
         model = _make_model()
-        model.model_config.compute_forces = False
+        model.model_config.active_outputs = {"energy"}
         batch = _make_lj_batch()
         result = model.adapt_output(self._model_output(), batch)
         assert "forces" not in result
 
     def test_stresses_not_in_output_when_compute_stresses_false(self):
         model = _make_model()
-        model.model_config.compute_stresses = False
+        model.model_config.active_outputs = {"energy", "forces"}
         batch = _make_lj_batch()
         result = model.adapt_output(self._model_output(include_virials=True), batch)
         assert "stress" not in result
 
     def test_stresses_negated_virials_when_compute_stresses_true_and_virials_key(self):
         model = _make_model()
-        model.model_config.compute_stresses = True
+        model.model_config.active_outputs = {"energy", "forces", "stress"}
         batch = _make_lj_batch()
-        virial = torch.randn(1, 3, 3)
+        virials = torch.randn(1, 3, 3)
         mo = self._model_output()
-        mo["virial"] = virial
+        mo["virial"] = virials
         result = model.adapt_output(mo, batch)
         assert "stress" in result
-        assert torch.allclose(result["stress"], -virial)
+        assert torch.allclose(result["stress"], -virials)
 
     def test_stresses_is_stresses_when_no_virials_key(self):
         model = _make_model()
-        model.model_config.compute_stresses = True
+        model.model_config.active_outputs = {"energy", "forces", "stress"}
         batch = _make_lj_batch()
-        stress = torch.randn(1, 3, 3)
+        stresses = torch.randn(1, 3, 3)
         mo = self._model_output()
-        mo["stress"] = stress
+        mo["stress"] = stresses
         result = model.adapt_output(mo, batch)
         assert "stress" in result
-        assert torch.allclose(result["stress"], stress)
+        assert torch.allclose(result["stress"], stresses)
 
 
 # ---------------------------------------------------------------------------
@@ -451,17 +451,17 @@ class TestOutputData:
 
     def test_forces_in_output_data_when_compute_forces_true(self):
         model = _make_model()
-        model.model_config.compute_forces = True
+        model.model_config.active_outputs = {"energy", "forces"}
         assert "forces" in model.output_data()
 
     def test_stresses_in_output_data_when_compute_stresses_true(self):
         model = _make_model()
-        model.model_config.compute_stresses = True
+        model.model_config.active_outputs = {"energy", "forces", "stress"}
         assert "stress" in model.output_data()
 
     def test_stresses_not_in_output_data_when_compute_stresses_false(self):
         model = _make_model()
-        model.model_config.compute_stresses = False
+        model.model_config.active_outputs = {"energy", "forces"}
         assert "stress" not in model.output_data()
 
 
