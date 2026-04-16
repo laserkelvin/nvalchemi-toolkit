@@ -1,103 +1,76 @@
 .. SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 .. SPDX-License-Identifier: Apache-2.0
 
-.. _hooks-guide:
+.. _dynamics-hooks:
 
-==============================
-Hooks — Observe & Modify
-==============================
+================================
+Dynamics Hooks — Stages & Usage
+================================
 
-Hooks are the primary extensibility mechanism for nvalchemi workflows.
-They let you inject custom logic at any stage of an engine's execution
-loop—dynamics simulations or custom pipelines—without modifying the
-engine itself.
+This page covers hook behaviour specific to dynamics simulations.
+For the general hook protocol, context, and registry see
+:ref:`hooks-api`.
 
-The Hook protocol
------------------
+.. seealso::
 
-Any object matching the :class:`~nvalchemi.hooks.Hook` protocol can
-be registered with an engine:
-
-.. code-block:: python
-
-   from enum import Enum
-   from nvalchemi.hooks import Hook, HookContext
-   from nvalchemi.dynamics.base import DynamicsStage
-
-   class MyHook:
-       """A minimal custom hook — no inheritance required."""
-
-       stage: Enum
-       frequency: int = 1
-
-       def __call__(self, ctx: HookContext, stage: DynamicsStage) -> None:
-           print(f"Step {ctx.step_count}: energy = {ctx.batch.energy.mean():.4f}")
-
-Because ``Hook`` is a ``runtime_checkable`` ``Protocol``, you can also
-use it as a type hint and check membership with ``isinstance``:
-
-.. code-block:: python
-
-   assert isinstance(MyHook(), Hook)  # True ✓
-
-.. tip::
-
-   **No subclassing required.** The protocol approach means any
-   class---or even a frozen ``dataclass``---that provides
-   ``frequency``, ``stage``, and ``__call__`` works as a hook.
+   - **User guide**: :ref:`hooks_guide` — conceptual overview, writing
+     custom hooks, and composing hook pipelines.
+   - **Core framework**: :ref:`hooks-api` — the ``Hook`` protocol,
+     ``HookContext``, and ``HookRegistryMixin``.
 
 
-HookContext
------------
+DynamicsStage
+--------------
 
-Every hook receives a :class:`~nvalchemi.hooks.HookContext`, which is a dataclass
-that bundles the current workflow state into a single object:
+:class:`~nvalchemi.dynamics.base.DynamicsStage` enumerates the nine
+hook-firing points within a single dynamics step:
 
-.. list-table:: HookContext fields
-   :widths: 20 25 55
-   :header-rows: 1
+.. graphviz::
+   :caption: DynamicsStage hook firing points within a single step.
 
-   * - Field
-     - Type
-     - Description
-   * - ``batch``
-     - ``Batch``
-     - Current batch being processed (all engines).
-   * - ``step_count``
-     - ``int``
-     - Current step number.
-   * - ``model``
-     - ``BaseModelMixin | None``
-     - Model being used (if applicable).
-   * - ``converged_mask``
-     - ``torch.Tensor | None``
-     - Boolean mask of converged samples (dynamics only).
-   * - ``global_rank``
-     - ``int``
-     - Distributed rank of this process.
+   digraph dynamics_stages {
+       rankdir=TB
+       compound=true
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10 style=bold]
 
-Each engine overrides ``_build_context(batch)`` to populate the fields
-relevant to its workflow.
+       BEFORE_STEP [label="BEFORE_STEP" fillcolor="#f9e2ae"]
 
+       subgraph cluster_step {
+           label="step body"
+           style=rounded
+           color="#4a90d9"
+           fontcolor="#4a90d9"
+           fontname="Helvetica"
+           fontsize=12
 
-Task-category specialization
------------------------------
+           BEFORE_PRE_UPDATE  [label="BEFORE_PRE_UPDATE"]
+           pre_update         [label="pre_update()" fillcolor="#eeeeee"]
+           AFTER_PRE_UPDATE   [label="AFTER_PRE_UPDATE"]
 
-The hook system supports multiple task categories through stage enums.
-Each engine declares which stage types it accepts via ``_stage_type``.
+           BEFORE_COMPUTE     [label="BEFORE_COMPUTE"]
+           compute            [label="compute()" fillcolor="#eeeeee"]
+           AFTER_COMPUTE      [label="AFTER_COMPUTE"]
 
-**Dynamics stages** — :class:`~nvalchemi.dynamics.base.DynamicsStage`:
+           BEFORE_POST_UPDATE [label="BEFORE_POST_UPDATE"]
+           post_update        [label="post_update()" fillcolor="#eeeeee"]
+           AFTER_POST_UPDATE  [label="AFTER_POST_UPDATE"]
 
-.. code-block:: text
+           BEFORE_PRE_UPDATE -> pre_update -> AFTER_PRE_UPDATE
+           AFTER_PRE_UPDATE -> BEFORE_COMPUTE
+           BEFORE_COMPUTE -> compute -> AFTER_COMPUTE
+           AFTER_COMPUTE -> BEFORE_POST_UPDATE
+           BEFORE_POST_UPDATE -> post_update -> AFTER_POST_UPDATE
+       }
 
-   BEFORE_STEP ─────────────────────────────────────────────────┐
-   │                                                            │
-   │  BEFORE_PRE_UPDATE → pre_update() → AFTER_PRE_UPDATE      │
-   │  BEFORE_COMPUTE    → compute()    → AFTER_COMPUTE         │
-   │  BEFORE_POST_UPDATE→ post_update()→ AFTER_POST_UPDATE     │
-   │                                                            │
-   AFTER_STEP ──────────────────────────────────────────────────┘
-   ON_CONVERGE  (fires only when convergence is detected)
+       AFTER_STEP  [label="AFTER_STEP" fillcolor="#f9e2ae"]
+       ON_CONVERGE [label="ON_CONVERGE\n(if converged)" fillcolor="#f9e2ae"]
+
+       BEFORE_STEP -> BEFORE_PRE_UPDATE [lhead=cluster_step]
+       AFTER_POST_UPDATE -> AFTER_STEP [ltail=cluster_step]
+       AFTER_STEP -> ON_CONVERGE [style=dashed]
+   }
 
 .. list-table:: Dynamics stages reference
    :widths: 30 10 60
@@ -135,64 +108,15 @@ Each engine declares which stage types it accepts via ``_stage_type``.
      - Only when the convergence hook detects converged samples.
 
 
-Registration and execution
---------------------------
-
-Hooks are registered either at construction or via ``register_hook()``:
-
-.. code-block:: python
-
-   from nvalchemi.dynamics import DemoDynamics
-   from nvalchemi.dynamics.hooks import LoggingHook, NaNDetectorHook
-
-   # At construction (recommended for most cases)
-   dynamics = DemoDynamics(
-       model=model,
-       dt=0.5,
-       hooks=[LoggingHook(backend="csv", log_path="log.csv", frequency=100), NaNDetectorHook()],
-   )
-
-   # Or register later
-   dynamics.register_hook(MaxForceClampHook(max_force=50.0))
-
-Hooks are dispatched by the :class:`~nvalchemi.hooks.HookRegistryMixin`
-machinery. At each stage, **all** registered hooks for that stage fire in
-registration order, but only if ``step_count % hook.frequency == 0``.
-
-The dispatch logic for each hook is:
-
-1. If the hook defines ``_runs_on_stage(stage) -> bool``, call it.
-2. Otherwise, check ``stage == hook.stage``.
-3. If matched, call ``hook(ctx, stage)`` with a fresh
-   :class:`~nvalchemi.hooks.HookContext`.
-
-.. note::
-
-   At ``step_count == 0`` all hooks fire (since ``0 % n == 0`` for
-   any ``n``), making step 0 a good point for initialization logic.
-
-
-Built-in hooks reference
+Built-in dynamics hooks
 ------------------------
 
-The ``nvalchemi.dynamics.hooks`` package ships eleven production-ready
-hooks organized into four categories.
-
-Pre-compute hooks (modify batch, fire at ``BEFORE_COMPUTE``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-These hooks prepare the batch **before** the model forward pass.
-
-.. list-table::
-   :widths: 25 75
-   :header-rows: 1
-
-   * - Hook
-     - Purpose
-   * - :class:`~nvalchemi.hooks.NeighborListHook`
-     - Compute or refresh the neighbor list (``MATRIX`` or ``COO``
-       format) with optional Verlet-skin buffering to skip redundant
-       rebuilds.
+The ``nvalchemi.dynamics.hooks`` package ships production-ready hooks
+organized into four categories. General-purpose hooks
+(:class:`~nvalchemi.hooks.NeighborListHook`,
+:class:`~nvalchemi.hooks.BiasedPotentialHook`,
+:class:`~nvalchemi.hooks.WrapPeriodicHook`) are documented in
+:ref:`hooks-api`.
 
 Observer hooks (read-only, fire at ``AFTER_STEP``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -245,14 +169,6 @@ These hooks modify the batch **after** the model forward pass and
    * - :class:`~nvalchemi.dynamics.hooks.MaxForceClampHook`
      - Clamp per-atom force magnitudes to a safe maximum,
        preserving force direction. Prevents numerical explosions.
-   * - :class:`~nvalchemi.hooks.BiasedPotentialHook`
-     - Add an external bias potential (energy + forces) for
-       enhanced sampling: umbrella sampling, metadynamics,
-       steered MD, harmonic restraints, wall potentials.
-   * - :class:`~nvalchemi.hooks.WrapPeriodicHook`
-     - Wrap atomic positions back into the unit cell under PBC.
-       Fires at ``AFTER_POST_UPDATE``, respects per-system
-       ``batch.pbc`` flags.
 
 Constraint hooks (modify batch, fire at ``BEFORE_PRE_UPDATE``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -364,145 +280,6 @@ NVE energy drift monitoring
    )
    dynamics = DemoDynamics(model=model, dt=0.5, hooks=[hook])
 
-Custom scalars via LoggingHook
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: python
-
-   from nvalchemi.dynamics.hooks import LoggingHook
-
-   def pressure(ctx, stage):
-       """Compute instantaneous pressure from the virial."""
-       return compute_pressure(ctx.batch.stress, ctx.batch.cell)
-
-   hook = LoggingHook(
-       backend="csv",
-       log_path="log.csv",
-       frequency=50,
-       custom_scalars={"pressure": pressure},
-   )
-
-Writing a custom hook from scratch
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The built-in hooks cover common needs, but you will often want to write
-your own.  Typical reasons include:
-
-- Recording a domain-specific observable (e.g. an RDF, a diffusion
-  coefficient, or a custom order parameter).
-- Injecting physics that the integrator does not natively support
-  (e.g. thermostat rescaling, external fields).
-- Bridging to an external system (database writes, message queues,
-  dashboard updates).
-
-A hook is **any Python object** that provides three things:
-
-1. A ``stage`` attribute — an ``Enum`` value that tells the engine
-   *when* the hook should fire (e.g. ``DynamicsStage.AFTER_STEP``).
-2. A ``frequency`` attribute — a positive ``int`` controlling how often
-   it fires (``1`` = every step, ``10`` = every tenth step, etc.).
-3. A ``__call__(self, ctx: HookContext, stage: Enum) -> None`` method
-   that contains the hook's logic.
-
-That's it.  There is no base class to inherit from.  The
-:class:`~nvalchemi.hooks.Hook` interface is defined as a
-``runtime_checkable`` ``Protocol``, which means Python uses *structural
-subtyping*: any object whose methods and attributes
-matches the protocol is accepted, regardless of its class hierarchy.
-You never *need* to write ``class MyHook(Hook)``; just provide the three
-members.
-
-Here is a concrete example---a Berendsen-like velocity rescaling hook:
-
-.. code-block:: python
-
-   from nvalchemi.dynamics.base import DynamicsStage
-   from nvalchemi.hooks import HookContext
-
-   class VelocityRescaleHook:
-       """Rescale velocities to a target temperature (Berendsen-like)."""
-
-       frequency: int
-       stage = DynamicsStage.AFTER_POST_UPDATE
-
-       def __init__(self, target_temp: float, tau: float, frequency: int = 1):
-           self.target_temp = target_temp
-           self.tau = tau
-           self.frequency = frequency
-
-       def __call__(self, ctx: HookContext, stage: DynamicsStage) -> None:
-           current_temp = compute_temperature(ctx.batch)
-           dt = getattr(ctx.model, 'dt', 1.0)
-           scale = (1.0 + (dt / self.tau)
-                    * (self.target_temp / current_temp - 1.0)) ** 0.5
-           ctx.batch.velocities.mul_(scale)
-
-Because the hook protocol checks structure rather than inheritance, even
-a ``dataclass`` or ``NamedTuple`` would work, as long as it exposes the
-three required members.  This makes hooks easy to test in isolation —
-instantiate one, construct a :class:`~nvalchemi.hooks.HookContext` by
-hand, and call it directly without spinning up a full dynamics engine.
-
-Writing a cross-category hook with plum dispatch
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Sometimes a single hook should work across *multiple* stage enum types---
-for example, a profiler that instruments both dynamics and a custom pipeline.
-Because the ``stage`` argument to ``__call__`` is a generic ``Enum``,
-you can use `plum-dispatch <https://github.com/beartype/plum>`_ to
-overload the method for each stage type.  This gives you type-safe
-branching: the runtime dispatches to the correct overload based on the
-concrete ``Enum`` subclass passed by the engine.
-
-Two additional pieces are needed for a cross-category hook:
-
-- ``_runs_on_stage(self, stage: Enum) -> bool`` — tells the registry
-  which stages this hook should fire at.  Without it, the registry only
-  checks ``stage == self.stage``, which limits you to a single value.
-- Multiple ``@dispatch``-decorated ``__call__`` overloads, one per
-  category plus a fallback for unknown enum types.
-
-.. code-block:: python
-
-   from enum import Enum
-   from plum import dispatch
-   from nvalchemi.dynamics.base import DynamicsStage
-   from nvalchemi.hooks import HookContext
-
-   # Example custom stage enum for a hypothetical pipeline
-   class MyPipelineStage(Enum):
-       BEFORE_PROCESS = 0
-       AFTER_PROCESS = 1
-
-   class UniversalProfiler:
-       """Hook that behaves differently in dynamics vs custom pipeline."""
-
-       stage = DynamicsStage.BEFORE_STEP  # primary stage
-       frequency = 1
-
-       def __init__(self):
-           self._stages = {DynamicsStage.BEFORE_STEP, DynamicsStage.AFTER_STEP,
-                           MyPipelineStage.BEFORE_PROCESS, MyPipelineStage.AFTER_PROCESS}
-
-       def _runs_on_stage(self, stage: Enum) -> bool:
-           return stage in self._stages
-
-       @dispatch
-       def __call__(self, ctx: HookContext, stage: DynamicsStage) -> None:
-           print(f"[dynamics] {stage.name} at step {ctx.step_count}")
-
-       @dispatch
-       def __call__(self, ctx: HookContext, stage: MyPipelineStage) -> None:
-           print(f"[pipeline] {stage.name} at step {ctx.step_count}")
-
-       @dispatch
-       def __call__(self, ctx: HookContext, stage: Enum) -> None:
-           print(f"[custom] {stage.name} at step {ctx.step_count}")
-
-The built-in :class:`~nvalchemi.dynamics.hooks.ProfilerHook` follows
-exactly this pattern, using dispatch to annotate NVTX ranges with the
-appropriate domain string (``"dynamics"`` or ``"custom"``).
-
 
 Hooks inside ``FusedStage``
 ---------------------------
@@ -527,18 +304,76 @@ inside fused stages, since they fire at ``AFTER_COMPUTE`` or
 
 Hook ordering inside a fused step:
 
-.. code-block:: text
+.. graphviz::
+   :caption: Hook ordering inside a single ``FusedStage.step()``.
 
-   for each sub-stage:
-       BEFORE_STEP hooks
-   ── single compute() ──
-   for each sub-stage:
-       AFTER_COMPUTE hooks
-   for each sub-stage:
-       BEFORE_PRE_UPDATE hooks
-       masked_update() (if any samples match status)
-       AFTER_POST_UPDATE hooks
-   for each sub-stage:
-       AFTER_STEP hooks
-   for each sub-stage:
-       convergence check → ON_CONVERGE hooks
+   digraph fused_hook_order {
+       rankdir=TB
+       compound=true
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10 style=bold]
+
+       subgraph cluster_before {
+           label="for each sub-stage"
+           style=dashed
+           color="#4a90d9"
+           fontcolor="#4a90d9"
+           fontname="Helvetica"
+           fontsize=10
+           BEFORE_STEP [label="BEFORE_STEP hooks"]
+       }
+
+       compute [label="single compute()" fillcolor="#f9e2ae"]
+
+       subgraph cluster_after_compute {
+           label="for each sub-stage"
+           style=dashed
+           color="#4a90d9"
+           fontcolor="#4a90d9"
+           fontname="Helvetica"
+           fontsize=10
+           AFTER_COMPUTE [label="AFTER_COMPUTE hooks"]
+       }
+
+       subgraph cluster_update {
+           label="for each sub-stage"
+           style=dashed
+           color="#4a90d9"
+           fontcolor="#4a90d9"
+           fontname="Helvetica"
+           fontsize=10
+           BEFORE_PRE [label="BEFORE_PRE_UPDATE hooks"]
+           masked     [label="masked_update()\n(if samples match status)" fillcolor="#eeeeee"]
+           AFTER_POST [label="AFTER_POST_UPDATE hooks"]
+           BEFORE_PRE -> masked -> AFTER_POST
+       }
+
+       subgraph cluster_after_step {
+           label="for each sub-stage"
+           style=dashed
+           color="#4a90d9"
+           fontcolor="#4a90d9"
+           fontname="Helvetica"
+           fontsize=10
+           AFTER_STEP [label="AFTER_STEP hooks"]
+       }
+
+       subgraph cluster_converge {
+           label="for each sub-stage"
+           style=dashed
+           color="#4a90d9"
+           fontcolor="#4a90d9"
+           fontname="Helvetica"
+           fontsize=10
+           conv_check  [label="convergence check" fillcolor="#eeeeee"]
+           ON_CONVERGE [label="ON_CONVERGE hooks" fillcolor="#f9e2ae"]
+           conv_check -> ON_CONVERGE [style=dashed label="if converged"]
+       }
+
+       BEFORE_STEP -> compute
+       compute -> AFTER_COMPUTE
+       AFTER_COMPUTE -> BEFORE_PRE
+       AFTER_POST -> AFTER_STEP
+       AFTER_STEP -> conv_check
+   }

@@ -22,10 +22,23 @@ running in parallel across 4 GPUs using
 
 .. rubric:: Topology
 
-.. code-block:: text
+.. graphviz::
+   :caption: Two independent FIRE → Langevin pipelines across 4 GPUs.
 
-    Rank 0 (FIRE, sampler_a)  ─→  Rank 1 (NVTLangevin, sink_a)
-    Rank 2 (FIRE, sampler_b)  ─→  Rank 3 (NVTLangevin, sink_b)
+   digraph topology {
+       rankdir=LR
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10]
+
+       r0 [label="Rank 0\\nFIRE + sampler_a"]
+       r1 [label="Rank 1\\nNVTLangevin + sink_a" fillcolor="#f9e2ae"]
+       r2 [label="Rank 2\\nFIRE + sampler_b"]
+       r3 [label="Rank 3\\nNVTLangevin + sink_b" fillcolor="#f9e2ae"]
+
+       r0 -> r1 [style=bold color="#c0392b" penwidth=2]
+       r2 -> r3 [style=bold color="#c0392b" penwidth=2]
+   }
 
 Each FIRE rank draws molecules from a dataset, optimises them until
 convergence, and sends them to the paired Langevin rank for short MD
@@ -64,7 +77,7 @@ from nvalchemi.dynamics import (
 from nvalchemi.dynamics.base import BufferConfig, DynamicsStage
 from nvalchemi.dynamics.hooks import ConvergedSnapshotHook
 from nvalchemi.hooks import HookContext
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 logging.basicConfig(level=logging.INFO)
 
@@ -271,7 +284,7 @@ def make_langevin(
 
 def main() -> None:
     """Launch two parallel FIRE -> Langevin pipelines on 4 GPUs."""
-    model = DemoModelWrapper()
+    model = DemoModelWrapper(DemoModel())
 
     # Sinks (only used by ranks 1 and 3, but created on all for simplicity)
     sink_a = HostMemory(capacity=100)

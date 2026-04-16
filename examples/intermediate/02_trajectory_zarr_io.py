@@ -24,16 +24,25 @@ reads and incremental appends are both efficient.
 
 The data flow for a full simulation-to-training pipeline is:
 
-::
+.. graphviz::
+   :caption: Simulation-to-training data flow via Zarr.
 
-    NVTLangevin + SnapshotHook
-        │  (writes every N steps)
-        ▼
-    ZarrData  (DataSink backed by Zarr store on disk)
-        │
-        ▼
-    AtomicDataZarrReader  ──►  Dataset  ──►  DataLoader
-                                              (yields Batch objects)
+   digraph zarr_flow {
+       rankdir=TB
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10]
+
+       sim   [label="NVTLangevin\\n+ SnapshotHook"]
+       zarr  [label="ZarrData\\n(DataSink on disk)" shape=cylinder fillcolor="#f9e2ae"]
+       reader [label="AtomicDataZarrReader"]
+       ds    [label="Dataset"]
+       dl    [label="DataLoader\\n(yields Batch objects)" fillcolor="#eeeeee"]
+
+       sim -> zarr [label="writes every\\nN steps" style=bold]
+       zarr -> reader [style=bold]
+       reader -> ds -> dl [style=bold]
+   }
 
 This example demonstrates each step:
 

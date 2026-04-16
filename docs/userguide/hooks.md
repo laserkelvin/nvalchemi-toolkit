@@ -1,14 +1,21 @@
 <!-- markdownlint-disable MD014 -->
 
+(hooks_guide)=
 (dynamics_hooks_guide)=
 
 # Hooks
 
 Hooks let you observe or modify workflow state at specific points in any
-engine's execution loop—dynamics simulations or custom pipelines—without
-touching the engine code itself. They are the primary
+engine's execution loop---dynamics simulations, training loops, or custom
+pipelines---without touching the engine code itself. They are the primary
 extension mechanism for logging, convergence checking, trajectory recording,
 and any custom per-step logic.
+
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-dynamics-hooks``
+{ref}`agent skill <agent_skills>` for concise instructions on writing
+and registering hooks for dynamics simulations.
+```
 
 ## The Hook protocol
 
@@ -23,8 +30,8 @@ A hook is any object that satisfies the
 | `__call__(ctx, stage)` | `None` | The hook's logic, called with a {py:class}`~nvalchemi.hooks.HookContext` and the current stage |
 
 The `Hook` protocol lives in {py:mod}`nvalchemi.hooks` and is
-stage-enum agnostic — the same protocol works for dynamics or any custom
-workflow.
+stage-enum agnostic --- the same protocol works for dynamics, training,
+or any custom workflow.
 
 ```python
 from nvalchemi.hooks import Hook, HookContext
@@ -37,7 +44,7 @@ class MyHook:
     def __call__(self, ctx: HookContext, stage: DynamicsStage) -> None:
         print(f"Step {ctx.step_count}: energy = {ctx.batch.energy.mean():.4f}")
 
-assert isinstance(MyHook(), Hook)  # True — structural subtyping
+assert isinstance(MyHook(), Hook)  # True --- structural subtyping
 ```
 
 Hooks are attached at construction time via the `hooks` parameter:
@@ -80,7 +87,13 @@ provides a unified snapshot of the current workflow state:
 | `step_count` | `int` | All engines |
 | `model` | `BaseModelMixin \| None` | All engines |
 | `converged_mask` | `torch.Tensor \| None` | Dynamics only |
+| `loss` | `torch.Tensor \| None` | Training only |
+| `optimizer` | `torch.optim.Optimizer \| None` | Training only |
+| `lr_scheduler` | `object \| None` | Training only |
+| `gradients` | `dict[str, torch.Tensor] \| None` | Training only |
+| `epoch` | `int \| None` | Training only |
 | `global_rank` | `int` | All engines (distributed) |
+| `workflow` | `Any` | Back-reference to the engine |
 
 The engine builds this context object at each stage via an overridable
 `_build_context(batch)` method, so each engine type populates the fields
@@ -88,9 +101,9 @@ relevant to its workflow.
 
 ### Optional context manager support
 
-Hooks may optionally implement `__enter__` and `__exit__`. If present, the dynamics
-engine calls them when the simulation starts and ends (or when using the dynamics
-object as a context manager). This is useful for hooks that manage resources like
+Hooks may optionally implement `__enter__` and `__exit__`. If present, the
+engine calls them when the workflow starts and ends (or when using the engine
+as a context manager). This is useful for hooks that manage resources like
 open files or logger instances --- for example,
 {py:class}`~nvalchemi.dynamics.hooks.LoggingHook` uses this to set up and tear down
 its logger.
@@ -99,9 +112,9 @@ its logger.
 
 The hook system supports multiple **task categories** through stage enums:
 
-- **Dynamics**: {py:class}`~nvalchemi.dynamics.base.DynamicsStage` — 9 stages from
+- **Dynamics**: {py:class}`~nvalchemi.dynamics.base.DynamicsStage` --- 9 stages from
   `BEFORE_STEP` through `ON_CONVERGE`
-- **Custom pipelines**: Any custom `Enum` type — the hook system accepts arbitrary
+- **Custom pipelines**: Any custom `Enum` type --- the hook system accepts arbitrary
   enum types via the `Enum` fallback
 
 Each engine declares which stage enum type(s) it accepts via

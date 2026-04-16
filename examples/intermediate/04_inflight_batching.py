@@ -30,21 +30,27 @@ replacement fits within the memory envelope of the slot it replaces.
 
 Lifecycle of a system:
 
-::
+.. graphviz::
+   :caption: Lifecycle of a system through inflight batching.
 
-    Dataset → SizeAwareSampler.request_replacement()
-        │
-        ▼
-    Live batch (GPU) — stage 0 (FIRE relaxation)
-        │ converges
-        ▼
-    Live batch (GPU) — stage 1 (NVT equilibration)
-        │ n_steps exhausted
-        ▼
-    ConvergedSnapshotHook → HostMemory sink
-        │
-        ▼
-    Slot freed → next sample loaded from dataset
+   digraph inflight_lifecycle {
+       rankdir=TB
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10]
+
+       dataset [label="Dataset\\nSizeAwareSampler.request_replacement()" fillcolor="#eeeeee"]
+       stage0  [label="Live batch (GPU)\\nstage 0 — FIRE relaxation"]
+       stage1  [label="Live batch (GPU)\\nstage 1 — NVT equilibration"]
+       sink    [label="ConvergedSnapshotHook\\n→ HostMemory sink" fillcolor="#f9e2ae"]
+       freed   [label="Slot freed" fillcolor="#eeeeee"]
+
+       dataset -> stage0 [style=bold]
+       stage0 -> stage1 [label="converges" style=bold]
+       stage1 -> sink [label="n_steps\\nexhausted" style=bold]
+       sink -> freed [style=bold]
+       freed -> dataset [label="next sample\\nloaded" style=dashed color="#999999"]
+   }
 
 Key concept: **system_id**.  Each sample loaded from the dataset receives a
 monotonically-increasing integer ``system_id`` stamped by the sampler as a

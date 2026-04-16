@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from nvalchemi.models.aimnet2 import AIMNet2, AIMNet2Wrapper
+    from nvalchemi.models.aimnet2 import AIMNet2Wrapper
     from nvalchemi.models.demo import DemoModelWrapper
     from nvalchemi.models.dftd3 import DFTD3ModelWrapper
     from nvalchemi.models.ewald import EwaldModelWrapper
@@ -37,7 +37,6 @@ __all__ = [
     "EwaldModelWrapper",
     "LennardJonesModelWrapper",
     "PMEModelWrapper",
-    "AIMNet2",
     "AIMNet2Wrapper",
     "MACEWrapper",
     # Pipeline composition
@@ -49,10 +48,10 @@ __all__ = [
 
 def __getattr__(name: str):
     """Lazy import to handle missing optional model implementations."""
-    if name in ("AIMNet2", "AIMNet2Wrapper"):
-        from nvalchemi.models.aimnet2 import AIMNet2, AIMNet2Wrapper
+    if name == "AIMNet2Wrapper":
+        from nvalchemi.models.aimnet2 import AIMNet2Wrapper
 
-        return {"AIMNet2": AIMNet2, "AIMNet2Wrapper": AIMNet2Wrapper}[name]
+        return AIMNet2Wrapper
     elif name == "DemoModelWrapper":
         from nvalchemi.models.demo import DemoModelWrapper
 

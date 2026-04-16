@@ -21,12 +21,25 @@ dynamics class that coordinates model evaluation with integrator updates,
 and the ``FusedStage`` class for fusing multiple dynamics stages on a
 single GPU with shared batch and forward pass.
 
-Inheritance structure::
+Inheritance structure:
 
-    object
-    └── _CommunicationMixin          # inter-rank communication base
-        └── BaseDynamics(_CommunicationMixin)
-            └── FusedStage(BaseDynamics)
+.. graphviz::
+
+   digraph dynamics_inheritance {
+       rankdir=BT
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10]
+
+       object [label="object" fillcolor="#eeeeee"]
+       comm   [label="_CommunicationMixin\n(inter-rank communication)"]
+       base   [label="BaseDynamics"]
+       fused  [label="FusedStage"]
+
+       comm  -> object [style=bold]
+       base  -> comm   [style=bold]
+       fused -> base   [style=bold]
+   }
 
 ``BaseDynamics`` inherits from ``_CommunicationMixin``, so all dynamics
 subclasses automatically have communication capabilities for pipeline

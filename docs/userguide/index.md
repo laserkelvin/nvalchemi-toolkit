@@ -32,11 +32,13 @@ $ python -c "import nvalchemi; print(nvalchemi.__version__)"
 - [AtomicData and Batch](data)
 - [Data Loading Pipeline](datapipes)
 - {doc}`Models: Wrapping ML Interatomic Potentials <models>`
+- {doc}`Hooks: Observe & Modify <hooks>`
 - [Dynamics: Optimization and MD](dynamics)
 
 ## Advanced Usage
 
 - [Zarr Compression Tuning](zarr_compression)
+- [Agent Skills](agent_skills)
 
 ```{toctree}
 :caption: About
@@ -58,6 +60,7 @@ about/contributing
 data
 datapipes
 models
+hooks
 dynamics
 ```
 
@@ -67,4 +70,5 @@ dynamics
 :hidden:
 
 zarr_compression
+agent_skills
 ```

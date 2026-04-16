@@ -10,6 +10,12 @@ PyTorch model and the rest of the framework (dynamics, data loading, active
 learning). Any machine-learning interatomic potential (MLIP) can be used with
 the toolkit as long as it is wrapped with this interface.
 
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-model-wrapping``
+{ref}`agent skill <agent_skills>` for concise instructions on wrapping
+an arbitrary MLIP with the ``BaseModelMixin`` interface.
+```
+
 This guide covers:
 
 1. What models are currently supported out of the box.
@@ -28,17 +34,18 @@ potentials:
 | Wrapper class | Underlying model | Notes |
 |---|---|---|
 | {py:class}`~nvalchemi.models.demo.DemoModelWrapper` | {py:class}`~nvalchemi.models.demo.DemoModel` | Non-invariant demo; useful for testing and tutorials |
-| `AIMNet2Wrapper` | `AIMNet2` | Requires the `aimnet2` optional dependency |
+| {py:class}`~nvalchemi.models.aimnet2.AIMNet2Wrapper` | {py:class}`~aimnet.calculators.AIMNet2Calculator` | Requires the `aimnet2` optional dependency |
 | {py:class}`~nvalchemi.models.mace.MACEWrapper` | Any MACE variant | Requires the `mace-torch` optional dependency |
 
-`AIMNet2Wrapper` and `MACEWrapper` are lazily imported --- they only
-load when accessed, so missing dependencies will not break other imports.
+{py:class}`~nvalchemi.models.aimnet2.AIMNet2Wrapper` and {py:class}`~nvalchemi.models.mace.MACEWrapper`
+are lazily imported --- they only load when accessed, so missing dependencies will not
+break other imports.
 
 ## Architecture overview
 
-A wrapped model uses **multiple inheritance**: your existing `nn.Module`
-subclass provides the forward pass, while `BaseModelMixin` adds the
-standardized interface.
+A wrapped model uses **multiple inheritance**: your existing {py:class}`~torch.nn.Module`
+subclass provides the forward pass, while
+{py:class}`~nvalchemi.models.base.BaseModelMixin` adds the standardized interface.
 
 ```{graphviz}
 :caption: Multiple-inheritance pattern for model wrapping.
@@ -220,8 +227,8 @@ def compute_embeddings(self, data, **kwargs):
 
 ### Step 1 --- Create the wrapper class
 
-Subclass ``nn.Module`` and mix in ``BaseModelMixin``, then hold the
-underlying model as ``self.model``:
+Subclass {py:class}`~torch.nn.Module` and mix in
+{py:class}`~nvalchemi.models.base.BaseModelMixin`, then hold the underlying model as ``self.model``:
 
 ```python
 from torch import nn
@@ -405,8 +412,8 @@ inputs *and* outputs, as well as shape checking.
 
 ### Step 8 (optional) --- Implement `export_model`
 
-Export the model **without** the `BaseModelMixin` interface, for use with
-external tools (e.g. ASE calculators):
+Export the model **without** the {py:class}`~nvalchemi.models.base.BaseModelMixin`
+interface, for use with external tools (e.g. ASE calculators):
 
 ```python
 def export_model(self, path: Path, as_state_dict: bool = False) -> None:

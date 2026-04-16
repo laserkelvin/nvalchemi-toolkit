@@ -15,6 +15,13 @@ users should think and reason about dynamics workflows with multiple structures
 simultaneously, as opposed to individual structures being processed sequentially.
 ```
 
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-dynamics-api`` and
+``nvalchemi-dynamics-implementation`` {ref}`agent skills <agent_skills>`
+for concise instructions on configuring simulations and implementing
+custom integrators.
+```
+
 ## The execution loop
 
 Every simulation is driven by {py:class}`~nvalchemi.dynamics.base.BaseDynamics`,
@@ -56,8 +63,8 @@ what frequency, so you have fine-grained control over when callbacks execute.
 
 All dynamics objects (optimizers, integrators, fused stages) support Python's
 context manager protocol. The `with` block manages a dedicated
-`torch.cuda.Stream` for the simulation and ensures hooks are properly opened and
-closed:
+{py:class}`~torch.cuda.Stream` for the simulation and ensures hooks are
+properly opened and closed:
 
 ```python
 from nvalchemi.dynamics import FIRE, ConvergenceHook
@@ -325,13 +332,12 @@ including multi-pipeline topologies and monitoring with persistent storage.
 :maxdepth: 1
 
 dynamics_simulations
-dynamics_hooks
 dynamics_sinks
 ```
 
 - [Optimization and Integrators](dynamics_simulations) --- FIRE, NVE, NVT, NPT and
   their configuration.
-- [Hooks](dynamics_hooks) --- the hook protocol, built-in hooks, and writing custom
+- [Hooks](hooks_guide) --- the hook protocol, built-in hooks, and writing custom
   hooks.
 - [Data Sinks](dynamics_sinks) --- recording trajectories and simulation results.
 

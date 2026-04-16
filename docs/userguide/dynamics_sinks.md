@@ -154,7 +154,7 @@ with FIRE(
 
 ## See also
 
-- **Hooks**: The [Hooks guide](dynamics_hooks_guide) covers the hook protocol and
+- **Hooks**: The [Hooks guide](hooks_guide) covers the hook protocol and
   how to write custom hooks.
 - **Data loading**: The [Data Loading Pipeline](datapipes_guide) guide shows how to
   read Zarr stores back for analysis.

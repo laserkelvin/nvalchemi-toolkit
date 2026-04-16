@@ -25,39 +25,36 @@ Conceptually, a batched atomic dataset is a set of tensors split by level. Each
 level has either a **uniform** layout (one row per system, e.g. system-level
 fields like ``cell``, ``energy``) or a **segmented** layout (concatenated
 variable-length segments, e.g. per-atom ``positions``, per-edge ``neighbor_list``).
-The following diagram shows how the classes fit together::
+The following diagram shows how the classes fit together:
 
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │ LevelSchema                                                             │
-    │   Maps tensor names → level ("atoms" | "edges" | "system"), dtype,       │
-    │   and whether that level is segmented. No tensors; schema only.         │
-    └─────────────────────────────────────────────────────────────────────────┘
-                                        │
-                                        │ used by
-                                        ▼
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │ MultiLevelStorage                                                         │
-    │   Holds one container per level; routes name → correct container.          │
-    │   Typical keys: "atoms", "edges", "system".                               │
-    └─────────────────────────────────────────────────────────────────────────┘
-         │                    │                    │
-         │ atoms              │ edges              │ system
-         ▼                    ▼                    ▼
-    ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-    │ SegmentedLevel  │ │ SegmentedLevel  │ │ UniformLevel    │
-    │ Storage         │ │ Storage         │ │ Storage         │
-    │ (variable len)  │ │ (variable len)  │ │ (one per system)│
-    └────────┬────────┘ └────────┬────────┘ └────────┬────────┘
-             │                   │                   │
-             └───────────────────┼───────────────────┘
-                                 │
-                       inherit from
-                                 ▼
-                       ┌──────────────────┐
-                       │ BaseLevelStorage │
-                       │ (ABC: one level, │
-                       │  dict-like)      │
-                       └──────────────────┘
+.. graphviz::
+   :caption: MultiLevelStorage class hierarchy.
+
+   digraph level_storage {
+       rankdir=TB
+       fontname="Helvetica"
+       node [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#dce6f1"]
+       edge [fontname="Helvetica" fontsize=10]
+
+       schema [label="LevelSchema\n(maps tensor names → level, dtype,\nsegmentation flag; schema only)" fillcolor="#f9e2ae"]
+       multi  [label="MultiLevelStorage\n(one container per level;\nroutes name → container)"]
+
+       schema -> multi [label="used by" style=bold]
+
+       seg_atoms [label="SegmentedLevelStorage\n(atoms — variable len)"]
+       seg_edges [label="SegmentedLevelStorage\n(edges — variable len)"]
+       uni_sys   [label="UniformLevelStorage\n(system — one per system)"]
+
+       multi -> seg_atoms [label="atoms" style=bold]
+       multi -> seg_edges [label="edges" style=bold]
+       multi -> uni_sys   [label="system" style=bold]
+
+       base [label="BaseLevelStorage\n(ABC: one level, dict-like)" fillcolor="#eeeeee"]
+
+       seg_atoms -> base [label="inherits" style=dashed]
+       seg_edges -> base [label="inherits" style=dashed]
+       uni_sys   -> base [label="inherits" style=dashed]
+   }
 
 Classes
 -------

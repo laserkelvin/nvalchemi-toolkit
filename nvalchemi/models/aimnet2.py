@@ -108,7 +108,7 @@ class AIMNet2Wrapper(nn.Module, BaseModelMixin):
         Configuration with capability and runtime fields.
     model : nn.Module
         The underlying AIMNet2 model. If you want your model
-        to be compiled, wrap with torch.compile(model, **kwargs)
+        to be compiled, wrap with ``torch.compile(model, **kwargs)``
         before passing here.
     """
 
