@@ -28,7 +28,6 @@ Protocols and enums
    :toctree: _generated
    :nosignatures:
 
-   Hook
    DynamicsStage
 
 Convergence
@@ -58,15 +57,10 @@ Hooks
    ProfilerHook
    SnapshotHook
 
-.. currentmodule:: nvalchemi.hooks
-
-.. autosummary::
-   :toctree: _generated
-   :nosignatures:
-
-   BiasedPotentialHook
-   NeighborListHook
-   WrapPeriodicHook
+General-purpose hooks (:class:`~nvalchemi.hooks.NeighborListHook`,
+:class:`~nvalchemi.hooks.BiasedPotentialHook`,
+:class:`~nvalchemi.hooks.WrapPeriodicHook`) and the core hook
+protocol are documented in :ref:`hooks-api`.
 
 Data sinks
 ----------
