@@ -60,7 +60,7 @@ from nvalchemi.dynamics import (
 from nvalchemi.dynamics.base import BufferConfig, DynamicsStage
 from nvalchemi.dynamics.hooks import ConvergedSnapshotHook, LoggingHook, ProfilerHook
 from nvalchemi.hooks import HookContext
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 logging.basicConfig(level=logging.INFO)
 
@@ -255,7 +255,7 @@ def make_langevin(
 
 def main() -> None:
     """Launch two monitored FIRE -> Langevin pipelines on 4 GPUs."""
-    model = DemoModelWrapper()
+    model = DemoModelWrapper(DemoModel())
 
     # Dataset (only used by ranks 0 and 2)
     all_data = build_dataset()

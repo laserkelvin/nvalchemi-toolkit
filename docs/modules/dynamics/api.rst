@@ -49,16 +49,23 @@ Hooks
    :toctree: _generated
    :nosignatures:
 
-   BiasedPotentialHook
    ConvergedSnapshotHook
    EnergyDriftMonitorHook
    FreezeAtomsHook
    LoggingHook
    MaxForceClampHook
    NaNDetectorHook
-   NeighborListHook
    ProfilerHook
    SnapshotHook
+
+.. currentmodule:: nvalchemi.hooks
+
+.. autosummary::
+   :toctree: _generated
+   :nosignatures:
+
+   BiasedPotentialHook
+   NeighborListHook
    WrapPeriodicHook
 
 Data sinks

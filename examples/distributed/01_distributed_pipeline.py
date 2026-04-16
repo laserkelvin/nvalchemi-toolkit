@@ -64,7 +64,7 @@ from nvalchemi.dynamics import (
 from nvalchemi.dynamics.base import BufferConfig, DynamicsStage
 from nvalchemi.dynamics.hooks import ConvergedSnapshotHook
 from nvalchemi.hooks import HookContext
-from nvalchemi.models.demo import DemoModelWrapper
+from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 logging.basicConfig(level=logging.INFO)
 
@@ -271,7 +271,7 @@ def make_langevin(
 
 def main() -> None:
     """Launch two parallel FIRE -> Langevin pipelines on 4 GPUs."""
-    model = DemoModelWrapper()
+    model = DemoModelWrapper(DemoModel())
 
     # Sinks (only used by ranks 1 and 3, but created on all for simplicity)
     sink_a = HostMemory(capacity=100)
