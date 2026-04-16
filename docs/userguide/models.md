@@ -28,17 +28,18 @@ potentials:
 | Wrapper class | Underlying model | Notes |
 |---|---|---|
 | {py:class}`~nvalchemi.models.demo.DemoModelWrapper` | {py:class}`~nvalchemi.models.demo.DemoModel` | Non-invariant demo; useful for testing and tutorials |
-| `AIMNet2Wrapper` | `AIMNet2` | Requires the `aimnet2` optional dependency |
+| {py:class}`~nvalchemi.models.aimnet2.AIMNet2Wrapper` | {py:class}`~aimnet.calculators.AIMNet2Calculator` | Requires the `aimnet2` optional dependency |
 | {py:class}`~nvalchemi.models.mace.MACEWrapper` | Any MACE variant | Requires the `mace-torch` optional dependency |
 
-`AIMNet2Wrapper` and `MACEWrapper` are lazily imported --- they only
-load when accessed, so missing dependencies will not break other imports.
+{py:class}`~nvalchemi.models.aimnet2.AIMNet2Wrapper` and {py:class}`~nvalchemi.models.mace.MACEWrapper`
+are lazily imported --- they only load when accessed, so missing dependencies will not
+break other imports.
 
 ## Architecture overview
 
-A wrapped model uses **multiple inheritance**: your existing `nn.Module`
-subclass provides the forward pass, while `BaseModelMixin` adds the
-standardized interface.
+A wrapped model uses **multiple inheritance**: your existing {py:class}`~torch.nn.Module`
+subclass provides the forward pass, while
+{py:class}`~nvalchemi.models.base.BaseModelMixin` adds the standardized interface.
 
 ```{graphviz}
 :caption: Multiple-inheritance pattern for model wrapping.
