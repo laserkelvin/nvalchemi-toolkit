@@ -38,6 +38,7 @@ $ python -c "import nvalchemi; print(nvalchemi.__version__)"
 ## Advanced Usage
 
 - [Zarr Compression Tuning](zarr_compression)
+- [Agent Skills](agent_skills)
 
 ```{toctree}
 :caption: About
@@ -69,4 +70,5 @@ dynamics
 :hidden:
 
 zarr_compression
+agent_skills
 ```

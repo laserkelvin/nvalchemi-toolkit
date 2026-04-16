@@ -15,6 +15,13 @@ users should think and reason about dynamics workflows with multiple structures
 simultaneously, as opposed to individual structures being processed sequentially.
 ```
 
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-dynamics-api`` and
+``nvalchemi-dynamics-implementation`` {ref}`agent skills <agent_skills>`
+for concise instructions on configuring simulations and implementing
+custom integrators.
+```
+
 ## The execution loop
 
 Every simulation is driven by {py:class}`~nvalchemi.dynamics.base.BaseDynamics`,

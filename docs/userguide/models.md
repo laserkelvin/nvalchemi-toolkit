@@ -10,6 +10,12 @@ PyTorch model and the rest of the framework (dynamics, data loading, active
 learning). Any machine-learning interatomic potential (MLIP) can be used with
 the toolkit as long as it is wrapped with this interface.
 
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-model-wrapping``
+{ref}`agent skill <agent_skills>` for concise instructions on wrapping
+an arbitrary MLIP with the ``BaseModelMixin`` interface.
+```
+
 This guide covers:
 
 1. What models are currently supported out of the box.

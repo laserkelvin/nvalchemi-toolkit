@@ -10,6 +10,12 @@ optional edges (e.g. bonds or radius-cutoff neighbors) connect them. The
 structure), and {py:class}`nvalchemi.data.Batch` batches many such graphs into one
 structure for efficient GPU-friendly training and inference.
 
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-data-structures``
+{ref}`agent skill <agent_skills>` for concise instructions on creating,
+manipulating, and batching ``AtomicData`` objects.
+```
+
 ## AtomicData: a single graph
 
 {py:class}`nvalchemi.data.AtomicData` is a Pydantic model that stores:

@@ -11,6 +11,12 @@ pipelines---without touching the engine code itself. They are the primary
 extension mechanism for logging, convergence checking, trajectory recording,
 and any custom per-step logic.
 
+```{tip}
+**AI coding assistant?** Load the ``nvalchemi-dynamics-hooks``
+{ref}`agent skill <agent_skills>` for concise instructions on writing
+and registering hooks for dynamics simulations.
+```
+
 ## The Hook protocol
 
 A hook is any object that satisfies the
