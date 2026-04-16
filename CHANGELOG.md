@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — 2026-03-13
+## 0.1.0 — 2026-04-16
 
 Initial public-beta release of NVIDIA ALCHEMI Toolkit, a GPU-first Python
 framework for AI-driven atomic simulation workflows.
