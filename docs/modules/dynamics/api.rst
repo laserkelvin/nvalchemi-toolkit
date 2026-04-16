@@ -82,18 +82,6 @@ Data sinks
    HostMemory
    ZarrData
 
-Sink configuration
-------------------
-
-.. currentmodule:: nvalchemi.data.datapipes
-
-.. autosummary::
-   :toctree: _generated
-   :nosignatures:
-
-   ZarrArrayConfig
-   ZarrWriteConfig
-
 Sampling
 --------
 

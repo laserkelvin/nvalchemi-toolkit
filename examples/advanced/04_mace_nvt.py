@@ -34,7 +34,7 @@ Key concepts demonstrated
 --------------------------
 * Loading a MACE model via ``MACEWrapper.from_checkpoint``.
 * Reading ``model.model_config.neighbor_config`` to wire a
-   :class:`~nvalchemi.hooks.NeighborListHook` automatically —
+  :class:`~nvalchemi.hooks.NeighborListHook` automatically —
   the same code works for LJ (MATRIX format) and MACE (COO format).
 * Model-agnostic temperature and energy observation.
 
