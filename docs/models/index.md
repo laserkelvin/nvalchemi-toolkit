@@ -39,6 +39,15 @@ mechanical reference data.
   - ✓
   - —
   - COO
+* - {py:class}`~nvalchemi.models.aimnet2.AIMNet2Wrapper`
+  - ✓
+  - ✓
+  - ✓
+  - ✓
+  - ✗
+  - ✓
+  - charge
+  - MATRIX
 * - {py:class}`~nvalchemi.models.demo.DemoModelWrapper`
   - ✓
   - ✓
@@ -157,6 +166,11 @@ the original publications for the underlying methods.
   - Batatia, I. *et al.* "A foundation model for atomistic materials chemistry."
     *arXiv:2401.00096*, 2023.
     [doi:10.48550/arXiv.2401.00096](https://doi.org/10.48550/arXiv.2401.00096)
+* - **AIMNet2**
+  - Anstine, D. M., Zubatyuk, R. & Isayev, O. "AIMNet2: a neural network potential
+    to meet your neutral, charged, organic, and elemental-organic needs."
+    *Chem. Sci.* **16**, 10228--10244, 2025.
+    [doi:10.1039/D4SC08572H](https://doi.org/10.1039/D4SC08572H)
 * - **DFT-D3(BJ)**
   - Grimme, S. *et al.* "A consistent and accurate ab initio parametrization of
     density functional dispersion correction (DFT-D) for the 94 elements H-Pu."
