@@ -257,7 +257,7 @@ updates:
 
 - **Overview**: The [Dynamics overview](dynamics_guide) describes the shared execution
   loop and multi-stage pipelines.
-- **Hooks**: The [Hooks guide](dynamics_hooks_guide) covers convergence criteria,
+- **Hooks**: The [Hooks guide](hooks_guide) covers convergence criteria,
   logging, and snapshots.
 - **Examples**: ``basic/02_geometry_optimization.py`` demonstrates a complete relaxation
   workflow.

@@ -32,6 +32,7 @@ $ python -c "import nvalchemi; print(nvalchemi.__version__)"
 - [AtomicData and Batch](data)
 - [Data Loading Pipeline](datapipes)
 - {doc}`Models: Wrapping ML Interatomic Potentials <models>`
+- {doc}`Hooks: Observe & Modify <hooks>`
 - [Dynamics: Optimization and MD](dynamics)
 
 ## Advanced Usage
@@ -58,6 +59,7 @@ about/contributing
 data
 datapipes
 models
+hooks
 dynamics
 ```
 

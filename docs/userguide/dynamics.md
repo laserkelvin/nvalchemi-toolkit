@@ -325,13 +325,12 @@ including multi-pipeline topologies and monitoring with persistent storage.
 :maxdepth: 1
 
 dynamics_simulations
-dynamics_hooks
 dynamics_sinks
 ```
 
 - [Optimization and Integrators](dynamics_simulations) --- FIRE, NVE, NVT, NPT and
   their configuration.
-- [Hooks](dynamics_hooks) --- the hook protocol, built-in hooks, and writing custom
+- [Hooks](hooks_guide) --- the hook protocol, built-in hooks, and writing custom
   hooks.
 - [Data Sinks](dynamics_sinks) --- recording trajectories and simulation results.
 
