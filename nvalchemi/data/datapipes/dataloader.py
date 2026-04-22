@@ -35,9 +35,10 @@ from collections.abc import Iterator, Sequence
 import torch
 from torch.utils.data import RandomSampler, Sampler, SequentialSampler
 
+from nvalchemi._typing import BatchTransform
 from nvalchemi.data.batch import Batch
 from nvalchemi.data.datapipes.dataset import Dataset
-from nvalchemi.data.transforms import BatchTransform, Compose
+from nvalchemi.data.transforms import Compose
 
 
 class DataLoader:

@@ -27,11 +27,11 @@ from typing import Any
 import pytest
 import torch
 
+from nvalchemi._typing import BatchTransform
 from nvalchemi.data.atomic_data import AtomicData
 from nvalchemi.data.batch import Batch
 from nvalchemi.data.datapipes.dataloader import DataLoader
 from nvalchemi.data.datapipes.dataset import Dataset
-from nvalchemi.data.transforms import BatchTransform
 
 
 class _StubReader:
