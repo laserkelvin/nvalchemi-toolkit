@@ -14,6 +14,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+from nvalchemi.data import transforms
 from nvalchemi.data.atomic_data import AtomicData
 from nvalchemi.data.batch import Batch
 from nvalchemi.data.datapipes import (
@@ -23,13 +24,21 @@ from nvalchemi.data.datapipes import (
     Dataset,
     Reader,
 )
+from nvalchemi.data.transforms import BatchTransform, Compose, SampleTransform
 
 __all__ = [
+    # Core
     "AtomicData",
     "Batch",
+    # Datapipes
     "Reader",
-    "AtomicDataZarrWriter",
     "AtomicDataZarrReader",
+    "AtomicDataZarrWriter",
     "Dataset",
     "DataLoader",
+    # Transforms
+    "Compose",
+    "SampleTransform",
+    "BatchTransform",
+    "transforms",
 ]
