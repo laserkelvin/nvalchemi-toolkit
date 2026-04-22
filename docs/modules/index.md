@@ -12,6 +12,5 @@ data
 hooks
 dynamics/index
 models
-training/index
 typing
 ```
