@@ -269,14 +269,14 @@ class Compose:
 
         Raises
         ------
-        TypeError
-            If the call arity does not match the composition kind
-            (e.g., passing ``metadata`` to a batch composition, or
-            omitting it for a sample composition).
         RuntimeError
             If any transform raises; the message identifies the failing
             index and the original exception is attached via
-            ``__cause__``.
+            ``__cause__``. This includes the case where the call
+            argument types do not match the composition kind (e.g.,
+            passing a :class:`Batch` to a sample composition), in which
+            case the first transform will typically raise when invoked
+            on the wrong type.
         """
         ...
 

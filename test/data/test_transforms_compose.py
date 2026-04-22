@@ -308,13 +308,3 @@ class TestCompose:
 
         with pytest.raises(TypeError, match=r"expected AtomicData .* or Batch"):
             Compose([Bad()])
-
-    def test_sample_compose_rejects_batch_call(self) -> None:
-        compose = Compose([_append_tag_a])
-        with pytest.raises(TypeError, match=r"sample composition requires"):
-            compose(_make_batch())
-
-    def test_batch_compose_rejects_sample_call(self) -> None:
-        compose = Compose([_batch_tag_a])
-        with pytest.raises(TypeError, match=r"batch composition takes a single"):
-            compose(_make_sample(), {})
