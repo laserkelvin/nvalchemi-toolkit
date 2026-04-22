@@ -25,10 +25,10 @@ from typing import Any
 import pytest
 import torch
 
+from nvalchemi._typing import SampleTransform
 from nvalchemi.data.atomic_data import AtomicData
 from nvalchemi.data.datapipes.dataset import Dataset
 from nvalchemi.data.transforms import Compose
-from nvalchemi.data.transforms._types import SampleTransform
 
 
 class _StubReader:

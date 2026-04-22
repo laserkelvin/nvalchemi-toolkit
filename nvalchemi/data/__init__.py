@@ -24,7 +24,7 @@ from nvalchemi.data.datapipes import (
     Dataset,
     Reader,
 )
-from nvalchemi.data.transforms import BatchTransform, Compose, SampleTransform
+from nvalchemi.data.transforms import Compose
 
 __all__ = [
     # Core
@@ -38,7 +38,5 @@ __all__ = [
     "DataLoader",
     # Transforms
     "Compose",
-    "SampleTransform",
-    "BatchTransform",
     "transforms",
 ]

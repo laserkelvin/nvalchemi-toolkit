@@ -43,7 +43,7 @@ from nvalchemi.data.datapipes.backends.base import Reader
 from nvalchemi.data.transforms import Compose
 
 if TYPE_CHECKING:
-    from nvalchemi.data.transforms._types import SampleTransform
+    from nvalchemi._typing import SampleTransform
 
 logger = logging.getLogger(__name__)
 

@@ -17,24 +17,13 @@
 This package hosts composition infrastructure for transforms that plug
 into :class:`~nvalchemi.data.Dataset` (per-sample transforms) and
 :class:`~nvalchemi.data.DataLoader` (per-batch transforms), and is the
-intended home for future concrete transform submodules (for example,
-``nvalchemi.data.transforms.rotation``).
-
-A single polymorphic :class:`Compose` handles both arities. Two type
-aliases describe the required callable signatures for user annotations:
-
-* :data:`SampleTransform` — receives and returns
-  ``(AtomicData, dict[str, Any])``.
-* :data:`BatchTransform` — receives and returns :class:`Batch`.
+intended home for future concrete transform submodules
 """
 
 from __future__ import annotations
 
-from nvalchemi.data.transforms._types import BatchTransform, SampleTransform
 from nvalchemi.data.transforms.compose import Compose
 
 __all__ = [
-    "BatchTransform",
     "Compose",
-    "SampleTransform",
 ]
