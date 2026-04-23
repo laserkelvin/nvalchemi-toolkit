@@ -110,6 +110,13 @@ class _FromSpecLinear(FromSpecMixin, nn.Linear):
     """Toy user-defined subclass combining FromSpecMixin with nn.Linear."""
 
 
+class Outer:
+    """Module-level host class for nested-class qualname resolution tests."""
+
+    class Inner:
+        """Nested class used to verify ``_import_cls`` handles nested qualnames."""
+
+
 # Prototype `main()` fixtures — used by TestFullPrototypeScenario. Defined at
 # module level (not inside a test class) so their __qualname__ stays clean.
 
@@ -188,12 +195,20 @@ class TestClsPathResolution:
         assert _import_cls("torch.nn.Linear") is nn.Linear
 
     def test_resolves_deep_module_path(self) -> None:
-        # Multi-level module path: `rsplit(".", 1)` must land on the
-        # correct module/class boundary.
+        # Multi-level module path: greedy prefix matching must import
+        # the longest valid module and walk the remainder as attributes.
         assert (
             _import_cls("torch.nn.modules.activation.SiLU")
             is nn.modules.activation.SiLU
         )
+
+    def test_resolves_nested_qualname(self) -> None:
+        """Resolve a nested-class qualname via greedy module-prefix matching."""
+        # ``Outer`` is defined at module scope in this test file, so the
+        # importable prefix is the test module and ``Outer.Inner`` is an
+        # attribute chain on it.
+        cls = _import_cls(f"{Outer.__module__}.Outer.Inner")
+        assert cls is Outer.Inner
 
     def test_raises_on_invalid_module(self) -> None:
         with pytest.raises(ModuleNotFoundError):

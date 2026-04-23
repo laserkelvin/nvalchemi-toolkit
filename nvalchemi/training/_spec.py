@@ -211,15 +211,57 @@ register_type_serializer(torch.Tensor, _tensor_serialize, _tensor_deserialize)
 
 
 def _import_cls(cls_path: str) -> type:
-    """Import the class identified by a dotted ``"module.submodule.QualName"`` path.
+    """Import the class identified by a dotted path.
 
-    Supports nested qualified names (``Outer.Inner``) via repeated
-    :func:`getattr` after locating the module.
+    Resolves a dotted path such as ``"module.submodule.Class"`` or
+    ``"module.Outer.Inner"`` into a class object. The module prefix is
+    matched greedily: the longest importable prefix of ``cls_path`` is
+    used as the module, and the remaining dotted components are resolved
+    as attributes via :func:`getattr` (supporting nested classes).
+
+    Parameters
+    ----------
+    cls_path : str
+        Dotted path of the form ``"module.[submodule...].QualName"``.
+        ``QualName`` may itself contain dots when the target is a nested
+        class (e.g. ``"pkg.mod.Outer.Inner"``).
+
+    Returns
+    -------
+    type
+        The resolved class object.
+
+    Raises
+    ------
+    ModuleNotFoundError
+        No importable module prefix was found in ``cls_path``.
+    AttributeError
+        A component of the attribute chain after the module does not
+        exist on its parent.
+    TypeError
+        The resolved object is not a class.
     """
-    module_path, cls_name = cls_path.rsplit(".", 1)
-    mod = importlib.import_module(module_path)
-    obj: Any = mod
-    for part in cls_name.split("."):  # handles nested qualname
+    parts = cls_path.split(".")
+    # Find the longest dotted prefix that is an importable module. Try
+    # increasingly long prefixes left-to-right; stop at the first
+    # ModuleNotFoundError and keep the last successful module. Only
+    # catch ModuleNotFoundError so genuine import failures inside a
+    # real module still propagate.
+    module: Any = None
+    module_depth = 0
+    for i in range(1, len(parts)):
+        try:
+            module = importlib.import_module(".".join(parts[:i]))
+        except ModuleNotFoundError:
+            break
+        module_depth = i
+    if module is None:
+        raise ModuleNotFoundError(
+            f"Could not import any module prefix of {cls_path!r}. "
+            "Expected a dotted path like 'pkg.mod.Class' or 'pkg.mod.Outer.Inner'."
+        )
+    obj: Any = module
+    for part in parts[module_depth:]:
         obj = getattr(obj, part)
     if not isinstance(obj, type):
         raise TypeError(f"{cls_path!r} resolved to non-class {obj!r}")
