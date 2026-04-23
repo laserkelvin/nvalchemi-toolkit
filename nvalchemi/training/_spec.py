@@ -65,7 +65,7 @@ import inspect
 import warnings
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import torch
 from pydantic import (
@@ -327,7 +327,7 @@ class BaseSpec(BaseModel):
         ),
     ]
 
-    def build(self, *args: Any, **extra_kwargs: Any) -> object:
+    def build(self, *args: Any, strict: bool = False, **extra_kwargs: Any) -> object:
         """Instantiate the target class from the stored hyperparameters.
 
         Positional ``*args`` and ``**extra_kwargs`` inject runtime-only
@@ -336,17 +336,23 @@ class BaseSpec(BaseModel):
         for a learning-rate scheduler.
 
         Before instantiating, the target class's current ``__init__``
-        signature is re-hashed and compared to :attr:`init_hash`; a
-        mismatch emits a :class:`UserWarning` but does not stop the build.
-        Instantiation errors on a mismatched hash are re-raised as a
-        :class:`TypeError` annotated with the stored/current hashes and the
-        spec timestamp.
+        signature is re-hashed and compared to :attr:`init_hash`. By default
+        (``strict=False``) a mismatch emits a :class:`UserWarning` but does
+        not stop the build, and a subsequent :class:`TypeError` is re-raised
+        with the stored/current hashes and the spec timestamp. When
+        ``strict=True`` a mismatch raises :class:`ValueError` immediately
+        and instantiation is not attempted.
 
         Parameters
         ----------
         *args
             Positional arguments forwarded to the target class constructor
             (runtime-only, not stored in the spec).
+        strict
+            If ``True``, raise :class:`ValueError` when the current
+            ``__init__`` signature hash does not match :attr:`init_hash`,
+            before attempting instantiation. If ``False`` (default), emit
+            a :class:`UserWarning` on mismatch and proceed.
         **extra_kwargs
             Extra keyword arguments forwarded to the target class
             constructor, overriding any spec-stored kwargs of the same name.
@@ -358,6 +364,10 @@ class BaseSpec(BaseModel):
 
         Raises
         ------
+        ValueError
+            If ``strict=True`` and the current ``__init__`` signature hash
+            does not match :attr:`init_hash`. The message contains both
+            hashes, :attr:`cls_path`, and :attr:`timestamp`.
         TypeError
             If the target class cannot be instantiated with the resolved
             kwargs. If the ``init_hash`` does not match the current
@@ -367,17 +377,23 @@ class BaseSpec(BaseModel):
         Warns
         -----
         UserWarning
-            If :attr:`init_hash` does not match the hash of the current
-            ``__init__`` signature.
+            If ``strict=False`` (default) and :attr:`init_hash` does not
+            match the hash of the current ``__init__`` signature.
         """
         cls_ = _import_cls(self.cls_path)
         current_hash = _hash_init_signature(cls_)
-        if current_hash != self.init_hash:
-            warnings.warn(
+        hash_mismatch = current_hash != self.init_hash
+        if hash_mismatch:
+            mismatch_msg = (
                 f"init_hash mismatch for {self.cls_path}: "
                 f"stored={self.init_hash!r}, current={current_hash!r}. "
                 f"The class's __init__ signature has changed since this "
-                f"spec was saved (at {self.timestamp}). Proceeding anyway.",
+                f"spec was saved (at {self.timestamp})."
+            )
+            if strict:
+                raise ValueError(f"{mismatch_msg} Refusing to build under strict=True.")
+            warnings.warn(
+                f"{mismatch_msg} Proceeding anyway.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -387,8 +403,7 @@ class BaseSpec(BaseModel):
             if name in _META_FIELDS:
                 continue
             v = getattr(self, name)
-            # Recursively build nested specs unless the target signature
-            # explicitly annotates the parameter as a BaseSpec subclass.
+            # Nested spec: build unless target expects the spec itself.
             if isinstance(v, BaseSpec):
                 param = sig.parameters.get(name)
                 ann = param.annotation if param is not None else None
@@ -400,7 +415,7 @@ class BaseSpec(BaseModel):
         try:
             return cls_(*args, **resolved)
         except TypeError as e:
-            if current_hash != self.init_hash:
+            if hash_mismatch:
                 raise TypeError(
                     f"Failed to build {self.cls_path!r}. Signature hash "
                     f"mismatch: stored={self.init_hash!r}, "
@@ -604,3 +619,103 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
     object.__setattr__(rebuilt, "timestamp", stored_timestamp)
     object.__setattr__(rebuilt, "init_hash", stored_hash)
     return rebuilt
+
+
+# ---------------------------------------------------------------------------
+# FromSpecMixin
+# ---------------------------------------------------------------------------
+
+
+class FromSpecMixin:
+    """Opt-in mixin giving a class an idiomatic ``from_spec(...)`` constructor.
+
+    Subclass alongside your existing base (for example :class:`torch.nn.Module`)
+    to gain a class-method constructor that accepts either a :class:`BaseSpec`
+    instance or its JSON-dict representation (e.g. the output of
+    :meth:`pydantic.BaseModel.model_dump` / ``model_dump_json`` followed by
+    :func:`json.loads`). The mixin validates that the spec's ``cls_path``
+    resolves to this class (or a subclass) before returning the built instance.
+
+    Examples
+    --------
+    >>> import json
+    >>> import torch.nn as nn
+    >>> from nvalchemi.training._spec import create_model_spec, FromSpecMixin
+    >>> class MyModule(nn.Module, FromSpecMixin):
+    ...     def __init__(self, hidden: int) -> None:
+    ...         super().__init__()
+    ...         self.lin = nn.Linear(hidden, hidden)
+    ...
+    >>> spec = create_model_spec(MyModule, hidden=16)
+    >>> m = MyModule.from_spec(spec)
+    >>> # Or from JSON dict:
+    >>> m2 = MyModule.from_spec(json.loads(spec.model_dump_json()))
+    """
+
+    @classmethod
+    def from_spec(
+        cls,
+        spec: BaseSpec | dict[str, Any],
+        /,
+        *args: Any,
+        strict: bool = False,
+        **extra_kwargs: Any,
+    ) -> Self:
+        """Construct an instance from a :class:`BaseSpec` or its JSON dict.
+
+        Parameters
+        ----------
+        spec
+            Either a :class:`BaseSpec` instance or a JSON-dict representation
+            of one (the output of ``json.loads(spec.model_dump_json())``).
+            A dict is rehydrated via :func:`create_model_spec_from_json`.
+        *args
+            Positional arguments forwarded to :meth:`BaseSpec.build` and
+            ultimately to the target class constructor.
+        strict
+            Forwarded to :meth:`BaseSpec.build`; when ``True`` a signature
+            hash mismatch raises :class:`ValueError` before instantiation.
+        **extra_kwargs
+            Extra keyword arguments forwarded to :meth:`BaseSpec.build`,
+            overriding spec-stored kwargs of the same name.
+
+        Returns
+        -------
+        Self
+            A freshly constructed instance whose class is ``cls`` (or a
+            subclass thereof).
+
+        Raises
+        ------
+        TypeError
+            If ``spec`` is neither a :class:`BaseSpec` nor a :class:`dict`,
+            or if the spec's ``cls_path`` resolves to a class that is not
+            ``cls`` or a subclass of ``cls``.
+        ValueError
+            If ``strict=True`` and the spec's ``init_hash`` no longer matches
+            the target class's current ``__init__`` signature. Also raised
+            when rehydrating an invalid JSON dict (see
+            :func:`create_model_spec_from_json`).
+
+        Examples
+        --------
+        See the class-level docstring for a full usage example.
+        """
+        if isinstance(spec, dict):
+            spec = create_model_spec_from_json(spec)
+        elif not isinstance(spec, BaseSpec):
+            raise TypeError(
+                f"from_spec expected BaseSpec or dict, got "
+                f"{type(spec).__name__}. A dict must be the JSON-dump shape "
+                f"produced by ``json.loads(spec.model_dump_json())``."
+            )
+        built = spec.build(*args, strict=strict, **extra_kwargs)
+        if not isinstance(built, cls):
+            expected = f"{cls.__module__}.{cls.__qualname__}"
+            raise TypeError(
+                f"{cls.__name__}.from_spec resolved to "
+                f"{type(built).__name__!r} (spec.cls_path={spec.cls_path!r}), "
+                f"but expected an instance of {expected!r}. Load with the "
+                f"matching class or regenerate the spec."
+            )
+        return built  # type: ignore[return-value]
