@@ -15,21 +15,11 @@
 """Reproducible, no-pickle serialization of MLIP hyperparameters.
 
 This module provides :class:`BaseSpec`, a Pydantic model that captures the
-``__init__`` arguments of any target class — typically an MLIP, an optimizer,
-or a learning-rate scheduler — and serializes them to plain JSON. Spec
+``__init__`` arguments of any target class --- typically an MLIP, an optimizer,
+or a learning-rate scheduler --- and serializes them to plain JSON. Spec
 reconstruction imports the target class by its dotted path and instantiates
-it with the stored kwargs.
-
-Security rationale (FR-11, TRAINING_PRD.md)
--------------------------------------------
-Python's :mod:`pickle` module allows arbitrary code execution at load time
-through ``__reduce__``. A pickle produced by an untrusted source — a
-collaborator's checkpoint, a shared filesystem, a network transfer — is
-equivalent to granting ``exec`` on that source. For reproducibility
-artifacts that outlive a single machine and traverse trust boundaries, this
-is unacceptable.
-
-:class:`BaseSpec` avoids pickle entirely:
+it with the stored kwargs. This approach ensures that ``pickle`` is not needed
+to recreate objects at runtime:
 
 - Hyperparameters are stored as plain JSON (strings, numbers, lists, dicts).
 - :class:`torch.Tensor` is serialized as ``{dtype, shape, data}`` — a data
@@ -41,17 +31,6 @@ is unacceptable.
   ``torch.load(..., weights_only=True)`` — the only pickle-free code path
   that PyTorch offers for weight bundles.
 
-init_hash contract
-------------------
-Every spec carries an ``init_hash`` field: a truncated SHA-256 digest of the
-target class's ``__init__`` signature at spec-creation time. On
-reconstruction, :meth:`BaseSpec.build` recomputes the hash and emits a
-:class:`UserWarning` on mismatch, guaranteeing that a spec loaded against a
-drifted upstream version fails loudly instead of silently instantiating with
-the wrong semantics.
-
-Extensibility
--------------
 Custom (de)serializers for additional types are registered via
 :func:`register_type_serializer`. The module pre-registers handlers for
 :class:`torch.dtype`, :class:`torch.device`, and :class:`torch.Tensor`.
@@ -167,18 +146,6 @@ def _dtype_deserialize(s: Any) -> torch.dtype:
     return result
 
 
-register_type_serializer(
-    torch.dtype,
-    serialize=str,
-    deserialize=_dtype_deserialize,
-)
-register_type_serializer(
-    torch.device,
-    serialize=str,
-    deserialize=lambda s: s if isinstance(s, torch.device) else torch.device(s),
-)
-
-
 def _tensor_serialize(t: torch.Tensor) -> dict[str, Any]:
     """Serialize a :class:`torch.Tensor` as ``{data, dtype, shape}``."""
     return {
@@ -201,6 +168,18 @@ def _tensor_deserialize(v: Any) -> torch.Tensor:
         out = out.reshape(expected_shape)
     return out
 
+
+# register some serializers that will definitely be used
+register_type_serializer(
+    torch.dtype,
+    serialize=str,
+    deserialize=_dtype_deserialize,
+)
+register_type_serializer(
+    torch.device,
+    serialize=str,
+    deserialize=lambda s: s if isinstance(s, torch.device) else torch.device(s),
+)
 
 register_type_serializer(torch.Tensor, _tensor_serialize, _tensor_deserialize)
 
@@ -266,12 +245,6 @@ def _import_cls(cls_path: str) -> type:
     if not isinstance(obj, type):
         raise TypeError(f"{cls_path!r} resolved to non-class {obj!r}")
     return obj
-
-
-def _validate_cls_path(v: str) -> str:
-    """Pydantic :class:`~pydantic.BeforeValidator` for :attr:`BaseSpec.cls_path`."""
-    _import_cls(v)  # raises on failure
-    return v
 
 
 def _cls_path_of(cls_: type) -> str:
@@ -355,7 +328,7 @@ class BaseSpec(BaseModel):
 
     cls_path: Annotated[
         str,
-        BeforeValidator(_validate_cls_path),
+        BeforeValidator(_import_cls),
         Field(description="Dotted import path of the target class."),
     ]
     timestamp: Annotated[
@@ -373,7 +346,7 @@ class BaseSpec(BaseModel):
         """Instantiate the target class from the stored hyperparameters.
 
         Positional ``*args`` and ``**extra_kwargs`` inject runtime-only
-        values that cannot be serialized into the spec — for example,
+        values that cannot be serialized into the spec --- for example,
         ``model.parameters()`` for an optimizer or an ``optimizer`` instance
         for a learning-rate scheduler.
 
