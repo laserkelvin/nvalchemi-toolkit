@@ -48,6 +48,7 @@ from typing import Annotated, Any, Self
 
 import torch
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -252,6 +253,16 @@ def _cls_path_of(cls_: type) -> str:
     return f"{cls_.__module__}.{cls_.__qualname__}"
 
 
+def _ensure_importable(cls_path: str) -> str:
+    """Pydantic validator: ensure the class path is importable without modifying the string.
+
+    We cannot use `_import_cls` directly as a validator because it returns the
+    class object, but the `cls_path` field must store the raw string.
+    """
+    _import_cls(cls_path)
+    return cls_path
+
+
 # ---------------------------------------------------------------------------
 # Signature introspection + hashing
 # ---------------------------------------------------------------------------
@@ -328,7 +339,7 @@ class BaseSpec(BaseModel):
 
     cls_path: Annotated[
         str,
-        BeforeValidator(_import_cls),
+        AfterValidator(_ensure_importable),
         Field(description="Dotted import path of the target class."),
     ]
     timestamp: Annotated[

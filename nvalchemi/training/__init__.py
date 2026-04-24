@@ -19,7 +19,6 @@ from __future__ import annotations
 from nvalchemi.training._checkpoint import load_checkpoint, save_checkpoint
 from nvalchemi.training._spec import (
     BaseSpec,
-    FromSpecMixin,
     create_model_spec,
     create_model_spec_from_json,
     register_type_serializer,
@@ -28,7 +27,6 @@ from nvalchemi.training._stages import TrainingStage
 
 __all__ = [
     "BaseSpec",
-    "FromSpecMixin",
     "TrainingStage",
     "create_model_spec",
     "create_model_spec_from_json",

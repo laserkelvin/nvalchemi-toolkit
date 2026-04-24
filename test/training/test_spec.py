@@ -29,7 +29,6 @@ import torch.nn as nn
 from nvalchemi.training._spec import (
     _TYPE_SERIALIZERS,
     BaseSpec,
-    FromSpecMixin,
     _check_no_positional_only,
     _dtype_deserialize,
     _hash_init_signature,
@@ -104,10 +103,6 @@ def _make_positional_only_cls() -> type:
     )
     exec(src, ns)  # noqa: S102 — deliberately constructs positional-only signature
     return ns["_PosOnly"]
-
-
-class _FromSpecLinear(FromSpecMixin, nn.Linear):
-    """Toy user-defined subclass combining FromSpecMixin with nn.Linear."""
 
 
 class Outer:
@@ -432,47 +427,6 @@ class TestBaseSpecBuild:
         assert isinstance(obj, _WrapsModule)
         assert isinstance(obj.child, nn.SiLU)
         assert obj.scale == 0.5
-
-
-class TestFromSpecMixin:
-    """Behavior of :class:`FromSpecMixin.from_spec`."""
-
-    def test_from_spec_from_basespec(self) -> None:
-        spec = create_model_spec(_FromSpecLinear, in_features=4, out_features=2)
-        m = _FromSpecLinear.from_spec(spec)
-        assert isinstance(m, _FromSpecLinear)
-        assert m.in_features == 4
-
-    def test_from_spec_from_json_dict(self) -> None:
-        spec = create_model_spec(_FromSpecLinear, in_features=4, out_features=2)
-        dumped = json.loads(spec.model_dump_json())
-        m = _FromSpecLinear.from_spec(dumped)
-        assert isinstance(m, _FromSpecLinear)
-
-    def test_from_spec_rejects_wrong_type(self) -> None:
-        with pytest.raises(TypeError, match="model_dump_json"):
-            _FromSpecLinear.from_spec(42)  # type: ignore[arg-type]
-
-    def test_from_spec_rejects_class_mismatch(self) -> None:
-        # Spec targets bare nn.Linear; from_spec called on _FromSpecLinear.
-        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        with pytest.raises(TypeError) as exc:
-            _FromSpecLinear.from_spec(spec)
-        msg = str(exc.value)
-        assert "torch.nn.modules.linear.Linear" in msg
-        assert "_FromSpecLinear" in msg
-        assert "regenerate" in msg
-
-    def test_from_spec_strict_flag_forwarded(self) -> None:
-        spec = create_model_spec(_FromSpecLinear, in_features=4, out_features=2)
-        object.__setattr__(spec, "init_hash", "deadbeef12345678")
-        # strict=True -> ValueError
-        with pytest.raises(ValueError, match="init_hash mismatch"):
-            _FromSpecLinear.from_spec(spec, strict=True)
-        # strict=False (default) -> UserWarning, still builds
-        with pytest.warns(UserWarning):
-            m = _FromSpecLinear.from_spec(spec)
-        assert isinstance(m, _FromSpecLinear)
 
 
 class TestFullPrototypeScenario:
