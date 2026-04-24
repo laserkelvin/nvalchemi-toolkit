@@ -139,15 +139,17 @@ def save_checkpoint(
     spec_json = spec.model_dump_json(indent=2)
     if spec_path.exists():
         existing = json.loads(spec_path.read_text())
-        new = json.loads(spec_json)
+        new_spec = json.loads(spec_json)
         existing.pop("timestamp", None)
-        new.pop("timestamp", None)
-        if existing != new:
+        new_spec.pop("timestamp", None)
+        if existing != new_spec:
             diffs = sorted(
-                k for k in set(existing) | set(new) if existing.get(k) != new.get(k)
+                k
+                for k in set(existing) | set(new_spec)
+                if existing.get(k) != new_spec.get(k)
             )
             preview = ", ".join(
-                f"{k}: {existing.get(k)!r} -> {new.get(k)!r}" for k in diffs[:3]
+                f"{k}: {existing.get(k)!r} -> {new_spec.get(k)!r}" for k in diffs[:3]
             )
             suffix = f" (+{len(diffs) - 3} more)" if len(diffs) > 3 else ""
             raise ValueError(
@@ -207,35 +209,25 @@ def load_checkpoint(
     """
     root = Path(root_folder)
     spec_path = root / "spec.json"
-    try:
-        spec_json = json.loads(spec_path.read_text())
-    except FileNotFoundError:
-        candidates = (
-            [
-                child
-                for child in sorted(root.iterdir())
-                if child.is_dir() and (child / "spec.json").is_file()
-            ]
-            if root.is_dir()
-            else []
-        )
-        if len(candidates) == 1:
-            raise FileNotFoundError(
-                f"No spec.json at {spec_path}. load_checkpoint expects the "
-                f"qualname subdirectory directly (e.g. {candidates[0]}), but "
-                f"save_checkpoint writes to {{root_folder}}/{{qualname}}/. "
-                f"Did you mean to pass {candidates[0]}?"
-            ) from None
+    if not spec_path.exists():
         raise FileNotFoundError(
-            f"No spec.json at {spec_path}. Expected layout: <root>/spec.json "
-            f"and <root>/checkpoints/N.pt. load_checkpoint consumes the "
-            f"qualname subdirectory directly; save_checkpoint writes under "
-            f"{{root_folder}}/{{qualname}}/."
-        ) from None
+            f"Checkpoint directory {root} does not contain a `spec.json`"
+            " file which is required to reconstruct the model"
+            " architecture. Make sure this file exists and in"
+            " the future use the `save_checkpoint` method for serialization."
+        )
+    spec_json = json.loads(spec_path.read_text())
     spec = create_model_spec_from_json(spec_json)
     model = spec.build()
+    if not isinstance(model, nn.Module):
+        raise RuntimeError(
+            f"Specification at {spec_path} was expected to instantiate"
+            f" a subclass of `nn.Module`, but got {type(model)}."
+        )
 
     ckpt_dir = root / "checkpoints"
+    if not ckpt_dir.exists() and not ckpt_dir.is_dir():
+        raise RuntimeError(f"Expected {ckpt_dir} to exist and be a folder.")
     if checkpoint_index == -1:
         existing = _ckpt_indices(ckpt_dir)
         if not existing:
