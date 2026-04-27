@@ -16,7 +16,11 @@
 
 from __future__ import annotations
 
-from nvalchemi.training._checkpoint import load_checkpoint, save_checkpoint
+from nvalchemi.training._checkpoint import (
+    CheckpointManifest,
+    load_checkpoint,
+    save_checkpoint,
+)
 from nvalchemi.training._spec import (
     BaseSpec,
     create_model_spec,
@@ -27,6 +31,7 @@ from nvalchemi.training._stages import TrainingStage
 
 __all__ = [
     "BaseSpec",
+    "CheckpointManifest",
     "TrainingStage",
     "create_model_spec",
     "create_model_spec_from_json",

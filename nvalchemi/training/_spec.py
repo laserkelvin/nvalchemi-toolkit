@@ -44,7 +44,7 @@ import inspect
 import warnings
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Annotated, Any, Self
+from typing import Annotated, Any
 
 import torch
 from pydantic import (
@@ -645,103 +645,3 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
     object.__setattr__(rebuilt, "timestamp", stored_timestamp)
     object.__setattr__(rebuilt, "init_hash", stored_hash)
     return rebuilt
-
-
-# ---------------------------------------------------------------------------
-# FromSpecMixin
-# ---------------------------------------------------------------------------
-
-
-class FromSpecMixin:
-    """Opt-in mixin giving a class an idiomatic ``from_spec(...)`` constructor.
-
-    Subclass alongside your existing base (for example :class:`torch.nn.Module`)
-    to gain a class-method constructor that accepts either a :class:`BaseSpec`
-    instance or its JSON-dict representation (e.g. the output of
-    :meth:`pydantic.BaseModel.model_dump` / ``model_dump_json`` followed by
-    :func:`json.loads`). The mixin validates that the spec's ``cls_path``
-    resolves to this class (or a subclass) before returning the built instance.
-
-    Examples
-    --------
-    >>> import json
-    >>> import torch.nn as nn
-    >>> from nvalchemi.training._spec import create_model_spec, FromSpecMixin
-    >>> class MyModule(nn.Module, FromSpecMixin):
-    ...     def __init__(self, hidden: int) -> None:
-    ...         super().__init__()
-    ...         self.lin = nn.Linear(hidden, hidden)
-    ...
-    >>> spec = create_model_spec(MyModule, hidden=16)
-    >>> m = MyModule.from_spec(spec)
-    >>> # Or from JSON dict:
-    >>> m2 = MyModule.from_spec(json.loads(spec.model_dump_json()))
-    """
-
-    @classmethod
-    def from_spec(
-        cls,
-        spec: BaseSpec | dict[str, Any],
-        /,
-        *args: Any,
-        strict: bool = False,
-        **extra_kwargs: Any,
-    ) -> Self:
-        """Construct an instance from a :class:`BaseSpec` or its JSON dict.
-
-        Parameters
-        ----------
-        spec
-            Either a :class:`BaseSpec` instance or a JSON-dict representation
-            of one (the output of ``json.loads(spec.model_dump_json())``).
-            A dict is rehydrated via :func:`create_model_spec_from_json`.
-        *args
-            Positional arguments forwarded to :meth:`BaseSpec.build` and
-            ultimately to the target class constructor.
-        strict
-            Forwarded to :meth:`BaseSpec.build`; when ``True`` a signature
-            hash mismatch raises :class:`ValueError` before instantiation.
-        **extra_kwargs
-            Extra keyword arguments forwarded to :meth:`BaseSpec.build`,
-            overriding spec-stored kwargs of the same name.
-
-        Returns
-        -------
-        Self
-            A freshly constructed instance whose class is ``cls`` (or a
-            subclass thereof).
-
-        Raises
-        ------
-        TypeError
-            If ``spec`` is neither a :class:`BaseSpec` nor a :class:`dict`,
-            or if the spec's ``cls_path`` resolves to a class that is not
-            ``cls`` or a subclass of ``cls``.
-        ValueError
-            If ``strict=True`` and the spec's ``init_hash`` no longer matches
-            the target class's current ``__init__`` signature. Also raised
-            when rehydrating an invalid JSON dict (see
-            :func:`create_model_spec_from_json`).
-
-        Examples
-        --------
-        See the class-level docstring for a full usage example.
-        """
-        if isinstance(spec, dict):
-            spec = create_model_spec_from_json(spec)
-        elif not isinstance(spec, BaseSpec):
-            raise TypeError(
-                f"from_spec expected BaseSpec or dict, got "
-                f"{type(spec).__name__}. A dict must be the JSON-dump shape "
-                f"produced by ``json.loads(spec.model_dump_json())``."
-            )
-        built = spec.build(*args, strict=strict, **extra_kwargs)
-        if not isinstance(built, cls):
-            expected = f"{cls.__module__}.{cls.__qualname__}"
-            raise TypeError(
-                f"{cls.__name__}.from_spec resolved to "
-                f"{type(built).__name__!r} (spec.cls_path={spec.cls_path!r}), "
-                f"but expected an instance of {expected!r}. Load with the "
-                f"matching class or regenerate the spec."
-            )
-        return built  # type: ignore[return-value]

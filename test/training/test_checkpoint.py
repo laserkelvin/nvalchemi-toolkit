@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import ast
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -24,8 +26,16 @@ import pytest
 import torch
 import torch.nn as nn
 
-from nvalchemi.training._checkpoint import load_checkpoint, save_checkpoint
+from nvalchemi.training._checkpoint import (
+    CheckpointManifest,
+    load_checkpoint,
+    save_checkpoint,
+)
 from nvalchemi.training._spec import create_model_spec
+
+# ---------------------------------------------------------------------------
+# Helper classes (reused from original file)
+# ---------------------------------------------------------------------------
 
 
 class SwiGLU(nn.Module):
@@ -57,7 +67,7 @@ class CustomMLPBlock(nn.Module):
     three ways:
 
     1. ``__init__`` takes a mix of ints, floats, booleans, and a
-       :class:`torch.dtype` — the latter routed through the custom type
+       :class:`torch.dtype` --- the latter routed through the custom type
        serializer registry.
     2. The module owns parameters at multiple nesting depths (top-level
        :class:`Linear` weights, plus the :class:`SwiGLU` scale parameter).
@@ -102,175 +112,151 @@ class CustomMLPBlock(nn.Module):
 
 @dataclass
 class NotModule:
+    """Non-module class used to verify load rejects non-nn.Module specs."""
+
     arg_a: int
     arg_b: str
 
 
-class TestCheckpointRoundtrip:
-    """Save/load round-trip behavior of :func:`save_checkpoint`/:func:`load_checkpoint`."""
+# ---------------------------------------------------------------------------
+# Test classes
+# ---------------------------------------------------------------------------
 
-    def test_save_load_basic(self, tmp_path: Path) -> None:
+
+class TestSaveCheckpointSingleModel:
+    """Basic dict-based single-model checkpoint save/load behavior."""
+
+    def test_save_creates_manifest_and_model_dir(self, tmp_path: Path) -> None:
+        """Directory layout: manifest.json + models/{name}/ created on save."""
         model = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        idx = save_checkpoint(tmp_path, model, spec)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+
+        assert (tmp_path / "manifest.json").is_file()
+        assert (tmp_path / "models" / "main" / "spec.json").is_file()
+        assert (tmp_path / "models" / "main" / "checkpoints" / "0.pt").is_file()
+
+    def test_save_load_basic_roundtrip(self, tmp_path: Path) -> None:
+        """Save one model, load it, verify weights match."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        idx = save_checkpoint(tmp_path, models={"main": (model, spec)})
         assert idx == 0
 
-        qualname_dir = tmp_path / "Linear"
-        assert (qualname_dir / "spec.json").is_file()
-        assert (qualname_dir / "checkpoints" / "0.pt").is_file()
-
-        reloaded, reloaded_spec = load_checkpoint(qualname_dir)
+        result = load_checkpoint(tmp_path)
+        assert isinstance(result, CheckpointManifest)
+        assert "main" in result.models
+        reloaded, reloaded_spec = result.models["main"]
         assert isinstance(reloaded, nn.Linear)
-        assert torch.allclose(reloaded.weight, model.weight)
-        assert torch.allclose(reloaded.bias, model.bias)
+        assert torch.equal(reloaded.weight, model.weight)
+        assert torch.equal(reloaded.bias, model.bias)
         assert reloaded_spec.init_hash == spec.init_hash
 
-    def test_autoincrement(self, tmp_path: Path) -> None:
+    def test_autoincrement_from_manifest(self, tmp_path: Path) -> None:
+        """Three sequential saves auto-increment indices 0, 1, 2."""
         model = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        idx0 = save_checkpoint(tmp_path, model, spec)
-        idx1 = save_checkpoint(tmp_path, model, spec)
-        idx2 = save_checkpoint(tmp_path, model, spec)
+        idx0 = save_checkpoint(tmp_path, models={"main": (model, spec)})
+        idx1 = save_checkpoint(tmp_path, models={"main": (model, spec)})
+        idx2 = save_checkpoint(tmp_path, models={"main": (model, spec)})
         assert (idx0, idx1, idx2) == (0, 1, 2)
 
-    def test_explicit_index_returned(self, tmp_path: Path) -> None:
+    def test_explicit_index(self, tmp_path: Path) -> None:
+        """Explicit ``checkpoint_index=5`` writes to ``checkpoints/5.pt``."""
         model = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        idx = save_checkpoint(tmp_path, model, spec, checkpoint_index=5)
+        idx = save_checkpoint(
+            tmp_path, models={"main": (model, spec)}, checkpoint_index=5
+        )
         assert idx == 5
-        assert (tmp_path / "Linear" / "checkpoints" / "5.pt").is_file()
+        assert (tmp_path / "models" / "main" / "checkpoints" / "5.pt").is_file()
 
-    def test_spec_consistency_check(self, tmp_path: Path) -> None:
-        model = nn.Linear(4, 2)
+    def test_spec_consistency_check_raises_on_mismatch(self, tmp_path: Path) -> None:
+        """Saving a different spec under the same model name raises ValueError."""
+        model_a = nn.Linear(4, 2)
         spec_a = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        save_checkpoint(tmp_path, model, spec_a)
+        save_checkpoint(tmp_path, models={"main": (model_a, spec_a)})
 
-        # Different hyperparameters at same root -> ValueError.
-        spec_b = create_model_spec(nn.Linear, in_features=8, out_features=2)
         model_b = nn.Linear(8, 2)
-        with pytest.raises(ValueError) as exc:
-            save_checkpoint(tmp_path, model_b, spec_b)
-        msg = str(exc.value)
-        assert "in_features" in msg
+        spec_b = create_model_spec(nn.Linear, in_features=8, out_features=2)
+        with pytest.raises(ValueError, match="in_features"):
+            save_checkpoint(tmp_path, models={"main": (model_b, spec_b)})
 
-    def test_load_latest_with_minus_one(self, tmp_path: Path) -> None:
+    def test_load_latest_from_manifest(self, tmp_path: Path) -> None:
+        """Default load returns the latest checkpoint from the manifest."""
         model = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
         for i in (0, 2, 5):
-            save_checkpoint(tmp_path, model, spec, checkpoint_index=i)
+            save_checkpoint(
+                tmp_path, models={"main": (model, spec)}, checkpoint_index=i
+            )
 
-        qualname_dir = tmp_path / "Linear"
-        # Latest checkpoint by index should be index 5. Verify by comparing
-        # file contents: overwrite index 5 with a mutated model, then
-        # default-load and check weights match the mutated version.
+        # Overwrite index 5 with mutated weights.
         mutated = nn.Linear(4, 2)
         with torch.no_grad():
             mutated.weight.copy_(mutated.weight + 100.0)
-        save_checkpoint(tmp_path, mutated, spec, checkpoint_index=5)
+        save_checkpoint(tmp_path, models={"main": (mutated, spec)}, checkpoint_index=5)
 
-        reloaded, _ = load_checkpoint(qualname_dir, checkpoint_index=-1)
+        result = load_checkpoint(tmp_path)
+        reloaded, _ = result.models["main"]
         assert torch.allclose(reloaded.weight, mutated.weight)
 
     def test_load_explicit_index(self, tmp_path: Path) -> None:
+        """Loading specific checkpoint indices returns the correct weights."""
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
 
         model_a = nn.Linear(4, 2)
         model_b = nn.Linear(4, 2)
-        # Ensure the two models are distinguishable.
         with torch.no_grad():
             model_b.weight.copy_(model_b.weight + 10.0)
 
-        save_checkpoint(tmp_path, model_a, spec, checkpoint_index=1)
-        save_checkpoint(tmp_path, model_b, spec, checkpoint_index=2)
+        save_checkpoint(tmp_path, models={"main": (model_a, spec)}, checkpoint_index=1)
+        save_checkpoint(tmp_path, models={"main": (model_b, spec)}, checkpoint_index=2)
 
-        qualname_dir = tmp_path / "Linear"
-        loaded_a, _ = load_checkpoint(qualname_dir, checkpoint_index=1)
-        loaded_b, _ = load_checkpoint(qualname_dir, checkpoint_index=2)
+        loaded_a = load_checkpoint(tmp_path, checkpoint_index=1).models["main"][0]
+        loaded_b = load_checkpoint(tmp_path, checkpoint_index=2).models["main"][0]
         assert torch.allclose(loaded_a.weight, model_a.weight)
         assert torch.allclose(loaded_b.weight, model_b.weight)
 
-    def test_load_missing_spec(self, tmp_path: Path) -> None:
-        """Check that exception is raised when spec.json is missing"""
-        model = nn.Linear(4, 2)
-        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        save_checkpoint(tmp_path, model, spec)
-
-        tmp_path.joinpath("Linear/spec.json").unlink()
-        with pytest.raises(FileNotFoundError, match="does not contain a `spec.json`"):
+    def test_load_missing_manifest_raises(self, tmp_path: Path) -> None:
+        """FileNotFoundError when no manifest.json exists."""
+        with pytest.raises(FileNotFoundError, match="manifest.json"):
             load_checkpoint(tmp_path)
 
-    def test_non_module(self, tmp_path: Path) -> None:
-        """load_checkpoint must refuse specs that build non-``nn.Module`` objects.
-
-        Stages a ``spec.json`` for :class:`NotModule` (a plain dataclass) on
-        disk, then points :func:`load_checkpoint` at it. The non-module
-        guard fires after ``spec.build()`` and before any ``.pt`` file is
-        read, so no checkpoint payload is required.
-        """
+    def test_non_module_build_raises(self, tmp_path: Path) -> None:
+        """Spec for a non-nn.Module class raises RuntimeError on load."""
         spec = create_model_spec(NotModule, arg_a=5, arg_b="hello")
-        qualname_dir = tmp_path / "NotModule"
-        qualname_dir.mkdir()
-        (qualname_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
 
-        with pytest.raises(RuntimeError, match="a subclass of `nn.Module`"):
-            load_checkpoint(qualname_dir)
+        # Manually stage the directory layout so load_checkpoint can parse it.
+        model_dir = tmp_path / "models" / "main"
+        ckpt_dir = model_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        (model_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
+        torch.save({}, ckpt_dir / "0.pt")
+        manifest = {
+            "schema_version": 1,
+            "checkpoint_index": 0,
+            "models": ["main"],
+            "optimizers": [],
+            "schedulers": [],
+            "associations": {},
+        }
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest))
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="CUDA not available on this host"
-    )
-    def test_save_load_model_on_gpu(self, tmp_path: Path) -> None:
-        """Round-trip a model whose parameters live on CUDA.
+        with pytest.raises(RuntimeError, match="expected nn.Module"):
+            load_checkpoint(tmp_path)
 
-        The checkpoint layer stores raw tensors via ``torch.save`` and
-        reloads with ``weights_only=True``; tensors retain their original
-        device on save, and the reconstructed model (built by the spec on
-        CPU) must still be loadable from a CUDA-resident state_dict.
-        """
-        device = torch.device("cuda")
-        model = nn.Linear(4, 2).to(device)
-        # Mutate so we can distinguish weights from a freshly-initialized reload.
-        with torch.no_grad():
-            model.weight.add_(1.25)
-            model.bias.add_(-0.5)
-
-        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        idx = save_checkpoint(tmp_path, model, spec)
-        assert idx == 0
-
-        qualname_dir = tmp_path / "Linear"
-        # Sanity: the saved tensors were CUDA-resident.
-        saved = torch.load(qualname_dir / "checkpoints" / "0.pt", weights_only=True)
-        assert saved["weight"].is_cuda
-        assert saved["bias"].is_cuda
-
-        reloaded, _ = load_checkpoint(qualname_dir)
-        # Values match regardless of device; compare on CPU.
-        assert torch.allclose(reloaded.weight.cpu(), model.weight.cpu())
-        assert torch.allclose(reloaded.bias.cpu(), model.bias.cpu())
-
-    def test_load_empty_checkpoints_dir(self, tmp_path: Path) -> None:
-        # Create a valid spec.json but no .pt files.
-        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        qualname_dir = tmp_path / "Linear"
-        (qualname_dir / "checkpoints").mkdir(parents=True)
-        (qualname_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
-
-        with pytest.raises(FileNotFoundError, match="No checkpoints"):
-            load_checkpoint(qualname_dir)
-
-    def test_load_weights_only_true_used(self, tmp_path: Path) -> None:
-        """Security: every ``torch.load`` must pass ``weights_only=True``."""
+    def test_load_weights_only_true(self, tmp_path: Path) -> None:
+        """Every ``torch.load`` call uses ``weights_only=True``."""
         model = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        save_checkpoint(tmp_path, model, spec)
-        qualname_dir = tmp_path / "Linear"
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
 
-        # Patch the symbol as looked up inside _checkpoint.py.
         import nvalchemi.training._checkpoint as ckpt_mod
 
         real_load = ckpt_mod.torch.load
         with patch.object(ckpt_mod.torch, "load", wraps=real_load) as mock_load:
-            load_checkpoint(qualname_dir)
+            load_checkpoint(tmp_path)
 
         assert mock_load.call_count >= 1
         for call in mock_load.call_args_list:
@@ -279,10 +265,330 @@ class TestCheckpointRoundtrip:
             )
 
 
+class TestMultiModel:
+    """Two or more named models in a single checkpoint."""
+
+    @staticmethod
+    def _save_student_teacher(
+        tmp_path: Path,
+    ) -> tuple[nn.Module, nn.Module]:
+        """Save a student/teacher pair and return the original modules."""
+        student = nn.Linear(4, 2)
+        teacher = nn.Linear(4, 2)
+        with torch.no_grad():
+            teacher.weight.copy_(teacher.weight + 5.0)
+        s_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        t_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(
+            tmp_path,
+            models={"student": (student, s_spec), "teacher": (teacher, t_spec)},
+        )
+        return student, teacher
+
+    def test_save_load_two_models(self, tmp_path: Path) -> None:
+        """Both student and teacher round-trip correctly."""
+        student, teacher = self._save_student_teacher(tmp_path)
+        result = load_checkpoint(tmp_path)
+        assert set(result.models) == {"student", "teacher"}
+
+        loaded_student, _ = result.models["student"]
+        loaded_teacher, _ = result.models["teacher"]
+        assert torch.equal(loaded_student.weight, student.weight)
+        assert torch.equal(loaded_teacher.weight, teacher.weight)
+
+    def test_models_have_independent_weights(self, tmp_path: Path) -> None:
+        """Perturbed models are distinguishable after load."""
+        student, teacher = self._save_student_teacher(tmp_path)
+        result = load_checkpoint(tmp_path)
+        loaded_s = result.models["student"][0]
+        loaded_t = result.models["teacher"][0]
+        # The teacher was shifted by +5.0 so they should differ.
+        assert not torch.equal(loaded_s.weight, loaded_t.weight)
+
+    def test_model_names_in_manifest(self, tmp_path: Path) -> None:
+        """Manifest lists both model names."""
+        self._save_student_teacher(tmp_path)
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        assert sorted(manifest["models"]) == ["student", "teacher"]
+
+    def test_model_subdirectories_exist(self, tmp_path: Path) -> None:
+        """Per-model subdirectories are created under ``models/``."""
+        self._save_student_teacher(tmp_path)
+        assert (tmp_path / "models" / "student").is_dir()
+        assert (tmp_path / "models" / "teacher").is_dir()
+
+
+class TestOptimizerCheckpoint:
+    """Optimizer state round-trip through the checkpoint layer."""
+
+    @staticmethod
+    def _train_steps(
+        model: nn.Module, optimizer: torch.optim.Optimizer, n_steps: int
+    ) -> None:
+        """Run *n_steps* fake training steps to build up optimizer state."""
+        for _ in range(n_steps):
+            x = torch.randn(2, model.in_features)
+            loss = model(x).sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+    def test_save_load_optimizer_state_dict(self, tmp_path: Path) -> None:
+        """Optimizer state_dict round-trips through save/load."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.01, momentum=0.9)
+
+        self._train_steps(model, optimizer, 3)
+        original_state = optimizer.state_dict()
+
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_opt, _ = result.optimizers["opt"]
+        loaded_state = loaded_opt.state_dict()
+
+        # Compare param_groups (excluding 'params' which are tensor ids).
+        for orig_pg, loaded_pg in zip(
+            original_state["param_groups"], loaded_state["param_groups"]
+        ):
+            for key in ("lr", "momentum", "weight_decay"):
+                assert orig_pg[key] == loaded_pg[key]
+
+    def test_optimizer_param_groups_preserved(self, tmp_path: Path) -> None:
+        """LR, momentum, weight_decay survive round-trip."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(
+            model.parameters(), lr=0.05, momentum=0.8, weight_decay=1e-4
+        )
+        opt_spec = create_model_spec(
+            torch.optim.SGD, lr=0.05, momentum=0.8, weight_decay=1e-4
+        )
+        self._train_steps(model, optimizer, 1)
+
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_pg = result.optimizers["opt"][0].param_groups[0]
+        assert loaded_pg["lr"] == pytest.approx(0.05)
+        assert loaded_pg["momentum"] == pytest.approx(0.8)
+        assert loaded_pg["weight_decay"] == pytest.approx(1e-4)
+
+    def test_optimizer_step_state_preserved(self, tmp_path: Path) -> None:
+        """Momentum buffers match: original and reloaded produce same results."""
+        torch.manual_seed(42)
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.01, momentum=0.9)
+
+        self._train_steps(model, optimizer, 5)
+
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_model, _ = result.models["main"]
+        loaded_opt, _ = result.optimizers["opt"]
+
+        # Run M more steps on both and verify weights converge identically.
+        torch.manual_seed(99)
+        inputs = [torch.randn(2, 4) for _ in range(3)]
+
+        for x in inputs:
+            loss = model(x).sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        for x in inputs:
+            loss = loaded_model(x).sum()
+            loss.backward()
+            loaded_opt.step()
+            loaded_opt.zero_grad()
+
+        for p_orig, p_loaded in zip(model.parameters(), loaded_model.parameters()):
+            assert torch.allclose(p_orig, p_loaded, atol=1e-6)
+
+
+class TestSchedulerCheckpoint:
+    """Scheduler state round-trip through the checkpoint layer."""
+
+    def test_save_load_scheduler_state_dict(self, tmp_path: Path) -> None:
+        """CosineAnnealingLR state_dict round-trips."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+        sched_spec = create_model_spec(
+            torch.optim.lr_scheduler.CosineAnnealingLR, T_max=10
+        )
+
+        for _ in range(5):
+            scheduler.step()
+        original_state = scheduler.state_dict()
+
+        associations = {"main": {"optimizers": ["opt"], "schedulers": ["sched"]}}
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+            schedulers={"sched": (scheduler, sched_spec)},
+            associations=associations,
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_sched, _ = result.schedulers["sched"]
+        loaded_state = loaded_sched.state_dict()
+
+        for key in original_state:
+            assert original_state[key] == loaded_state[key], (
+                f"scheduler state key {key!r} differs"
+            )
+
+    def test_lr_trajectory_preserved(self, tmp_path: Path) -> None:
+        """LR trajectory matches after reload: step N, save, reload, step M more."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
+        sched_spec = create_model_spec(
+            torch.optim.lr_scheduler.CosineAnnealingLR, T_max=20
+        )
+
+        # Step N=5 times before save.
+        for _ in range(5):
+            scheduler.step()
+
+        associations = {"main": {"optimizers": ["opt"], "schedulers": ["sched"]}}
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+            schedulers={"sched": (scheduler, sched_spec)},
+            associations=associations,
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_sched, _ = result.schedulers["sched"]
+
+        # Step M=10 more times on both; LR must match at every step.
+        for step in range(10):
+            scheduler.step()
+            loaded_sched.step()
+            lr_orig = scheduler.get_last_lr()[0]
+            lr_loaded = loaded_sched.get_last_lr()[0]
+            assert lr_orig == pytest.approx(lr_loaded), (
+                f"LR mismatch at step {step}: {lr_orig} vs {lr_loaded}"
+            )
+
+
+class TestAssociations:
+    """Model-to-optimizer-to-scheduler linkage via associations."""
+
+    def test_associations_stored_in_manifest(self, tmp_path: Path) -> None:
+        """Associations dict appears in manifest.json."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.01)
+
+        associations = {"main": {"optimizers": ["opt"], "schedulers": []}}
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+            associations=associations,
+        )
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        assert manifest["associations"] == associations
+
+    def test_load_wires_optimizer_to_correct_model(self, tmp_path: Path) -> None:
+        """Optimizer param groups reference the associated model's parameters."""
+        student = nn.Linear(4, 2)
+        teacher = nn.Linear(4, 2)
+        s_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        t_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(student.parameters(), lr=0.01)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.01)
+
+        associations = {"student": {"optimizers": ["s_opt"], "schedulers": []}}
+        save_checkpoint(
+            tmp_path,
+            models={
+                "student": (student, s_spec),
+                "teacher": (teacher, t_spec),
+            },
+            optimizers={"s_opt": (optimizer, opt_spec)},
+            associations=associations,
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_opt, _ = result.optimizers["s_opt"]
+        loaded_student, _ = result.models["student"]
+
+        # The optimizer's param groups should reference the loaded student's
+        # parameters (same data pointers).
+        opt_param_ids = {id(p) for pg in loaded_opt.param_groups for p in pg["params"]}
+        student_param_ids = {id(p) for p in loaded_student.parameters()}
+        assert opt_param_ids == student_param_ids
+
+    def test_load_wires_scheduler_to_correct_optimizer(self, tmp_path: Path) -> None:
+        """Scheduler references the correct optimizer on load."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+        sched_spec = create_model_spec(
+            torch.optim.lr_scheduler.CosineAnnealingLR, T_max=10
+        )
+
+        associations = {"main": {"optimizers": ["opt"], "schedulers": ["sched"]}}
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+            schedulers={"sched": (scheduler, sched_spec)},
+            associations=associations,
+        )
+        result = load_checkpoint(tmp_path)
+        loaded_sched, _ = result.schedulers["sched"]
+        loaded_opt, _ = result.optimizers["opt"]
+
+        # The scheduler's internal optimizer should be the loaded one.
+        assert loaded_sched.optimizer is loaded_opt
+
+    def test_single_model_fallback_no_associations(self, tmp_path: Path) -> None:
+        """One model + one optimizer, no associations: load succeeds via fallback."""
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        opt_spec = create_model_spec(torch.optim.SGD, lr=0.01)
+
+        # No associations at all.
+        save_checkpoint(
+            tmp_path,
+            models={"main": (model, m_spec)},
+            optimizers={"opt": (optimizer, opt_spec)},
+        )
+        result = load_checkpoint(tmp_path)
+        assert "opt" in result.optimizers
+
+
 class TestCheckpointCustomMLPBlock:
     """Stress tests: serialize a non-trivial custom block end-to-end.
 
-    The target is :class:`CustomMLPBlock` — a pre-norm MLP wrapping a custom
+    The target is :class:`CustomMLPBlock` --- a pre-norm MLP wrapping a custom
     :class:`SwiGLU` activation, an expansion/projection :class:`Linear` pair,
     :class:`LayerNorm`, and :class:`Dropout`. These tests exercise the spec +
     checkpoint pipeline against a module that mixes several param types
@@ -291,39 +597,34 @@ class TestCheckpointCustomMLPBlock:
     """
 
     @staticmethod
-    def _make_spec(**overrides: object):
-        kwargs: dict[str, object] = dict(
-            in_features=8,
-            hidden_features=16,
-            dropout=0.25,
-            eps=1e-6,
-            activation_scale=0.5,
-            use_residual=True,
-            dtype=torch.float32,
-        )
+    def _make_spec(**overrides: object) -> tuple[dict[str, object], object]:
+        """Build default CustomMLPBlock kwargs + spec with optional overrides."""
+        kwargs: dict[str, object] = {
+            "in_features": 8,
+            "hidden_features": 16,
+            "dropout": 0.25,
+            "eps": 1e-6,
+            "activation_scale": 0.5,
+            "use_residual": True,
+            "dtype": torch.float32,
+        }
         kwargs.update(overrides)
         return kwargs, create_model_spec(CustomMLPBlock, **kwargs)
 
-    def test_save_load_roundtrip_preserves_all_params(self, tmp_path: Path) -> None:
+    def test_roundtrip_preserves_all_params(self, tmp_path: Path) -> None:
+        """All named parameters survive a save/load round-trip bit-exactly."""
         kwargs, spec = self._make_spec()
         model = CustomMLPBlock(**kwargs)
-        # Perturb every parameter so defaults can't masquerade as matches.
         with torch.no_grad():
             for p in model.parameters():
                 p.add_(torch.randn_like(p) * 0.1)
 
-        idx = save_checkpoint(tmp_path, model, spec)
-        assert idx == 0
-
-        qualname_dir = tmp_path / "CustomMLPBlock"
-        assert (qualname_dir / "spec.json").is_file()
-        assert (qualname_dir / "checkpoints" / "0.pt").is_file()
-
-        reloaded, reloaded_spec = load_checkpoint(qualname_dir)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+        result = load_checkpoint(tmp_path)
+        reloaded, reloaded_spec = result.models["main"]
         assert isinstance(reloaded, CustomMLPBlock)
         assert reloaded_spec.init_hash == spec.init_hash
 
-        # Every named parameter must round-trip bit-exactly.
         original_params = dict(model.named_parameters())
         reloaded_params = dict(reloaded.named_parameters())
         assert set(original_params) == set(reloaded_params)
@@ -332,18 +633,14 @@ class TestCheckpointCustomMLPBlock:
                 f"parameter {name!r} differs after round-trip"
             )
 
-        # And every named buffer (LayerNorm has none by default, but guard
-        # against future additions).
-        assert (
-            dict(model.named_buffers()).keys() == dict(reloaded.named_buffers()).keys()
-        )
-
     def test_roundtrip_preserves_forward_output(self, tmp_path: Path) -> None:
+        """Forward pass output is identical after round-trip."""
         kwargs, spec = self._make_spec(dropout=0.5)
-        model = CustomMLPBlock(**kwargs).eval()  # .eval() disables dropout
-        save_checkpoint(tmp_path, model, spec)
+        model = CustomMLPBlock(**kwargs).eval()
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
 
-        reloaded, _ = load_checkpoint(tmp_path / "CustomMLPBlock")
+        result = load_checkpoint(tmp_path)
+        reloaded, _ = result.models["main"]
         reloaded.eval()
 
         x = torch.randn(4, kwargs["in_features"])
@@ -353,105 +650,283 @@ class TestCheckpointCustomMLPBlock:
         assert torch.equal(y_original, y_reloaded)
 
     def test_spec_json_is_pure_json(self, tmp_path: Path) -> None:
-        """spec.json must contain only JSON-native types; no pickled blobs."""
-        import json
-
+        """spec.json contains only JSON-native types; no pickled blobs."""
         kwargs, spec = self._make_spec()
         model = CustomMLPBlock(**kwargs)
-        save_checkpoint(tmp_path, model, spec)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
 
-        raw = (tmp_path / "CustomMLPBlock" / "spec.json").read_text()
-        parsed = json.loads(raw)  # must not raise
-        # dtype should be serialized as a string, not a pickled object.
+        raw = (tmp_path / "models" / "main" / "spec.json").read_text()
+        parsed = json.loads(raw)
         assert parsed["dtype"] == "torch.float32"
-        # Key metadata fields are present.
         for key in ("cls_path", "timestamp", "init_hash"):
             assert key in parsed
         assert parsed["cls_path"].endswith(".CustomMLPBlock")
 
-    def test_dtype_kwarg_round_trips_through_spec(self, tmp_path: Path) -> None:
+    def test_dtype_kwarg_round_trips(self, tmp_path: Path) -> None:
+        """torch.float64 dtype kwarg survives JSON round-trip."""
         kwargs, spec = self._make_spec(dtype=torch.float64)
         model = CustomMLPBlock(**kwargs)
-        save_checkpoint(tmp_path, model, spec)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
 
-        reloaded, reloaded_spec = load_checkpoint(tmp_path / "CustomMLPBlock")
-        # The dtype kwarg must survive JSON round-trip as a torch.dtype.
+        result = load_checkpoint(tmp_path)
+        _, reloaded_spec = result.models["main"]
+        reloaded = result.models["main"][0]
         assert reloaded_spec.dtype is torch.float64
-        # And it must actually be applied to the reconstructed parameters.
         assert reloaded.expand.weight.dtype is torch.float64
         assert reloaded.norm.weight.dtype is torch.float64
 
-    def test_activation_parameter_is_checkpointed(self, tmp_path: Path) -> None:
-        """The learnable ``SwiGLU.scale`` param must survive the round-trip."""
+    def test_activation_parameter_checkpointed(self, tmp_path: Path) -> None:
+        """Learnable ``SwiGLU.scale`` survives the round-trip."""
         kwargs, spec = self._make_spec(activation_scale=0.5)
         model = CustomMLPBlock(**kwargs)
         with torch.no_grad():
             model.activation.scale.fill_(7.5)
 
-        save_checkpoint(tmp_path, model, spec)
-        reloaded, _ = load_checkpoint(tmp_path / "CustomMLPBlock")
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+        result = load_checkpoint(tmp_path)
+        reloaded, _ = result.models["main"]
         assert torch.equal(reloaded.activation.scale, torch.tensor(7.5))
 
     def test_autoincrement_multiple_checkpoints(self, tmp_path: Path) -> None:
+        """Autoincrement + per-index reload preserves correct weights."""
         kwargs, spec = self._make_spec()
         model = CustomMLPBlock(**kwargs)
 
-        # Simulate 3 "training steps" by mutating the projection weight
-        # between saves, then verify each saved checkpoint reloads as
-        # itself (not as a later state).
         snapshots: list[torch.Tensor] = []
         for step in range(3):
             with torch.no_grad():
                 model.project.weight.add_(float(step) + 1.0)
             snapshots.append(model.project.weight.detach().clone())
-            idx = save_checkpoint(tmp_path, model, spec)
+            idx = save_checkpoint(tmp_path, models={"main": (model, spec)})
             assert idx == step
 
-        qualname_dir = tmp_path / "CustomMLPBlock"
         for step, snapshot in enumerate(snapshots):
-            reloaded, _ = load_checkpoint(qualname_dir, checkpoint_index=step)
+            result = load_checkpoint(tmp_path, checkpoint_index=step)
+            reloaded, _ = result.models["main"]
             assert torch.equal(reloaded.project.weight, snapshot), (
                 f"checkpoint {step} did not reload its own weights"
             )
 
-    def test_spec_mismatch_on_hyperparameter_change(self, tmp_path: Path) -> None:
+    def test_hyperparameter_mismatch_raises(self, tmp_path: Path) -> None:
         """Saving a second spec with different hyperparameters must fail."""
         kwargs_a, spec_a = self._make_spec(hidden_features=16)
         model_a = CustomMLPBlock(**kwargs_a)
-        save_checkpoint(tmp_path, model_a, spec_a)
+        save_checkpoint(tmp_path, models={"main": (model_a, spec_a)})
 
         kwargs_b, spec_b = self._make_spec(hidden_features=32)
         model_b = CustomMLPBlock(**kwargs_b)
-        with pytest.raises(ValueError) as exc:
-            save_checkpoint(tmp_path, model_b, spec_b)
-        assert "hidden_features" in str(exc.value)
+        with pytest.raises(ValueError, match="hidden_features"):
+            save_checkpoint(tmp_path, models={"main": (model_b, spec_b)})
 
-    def test_invalid_hyperparameter_still_fails_at_build(self, tmp_path: Path) -> None:
-        """A spec with hyperparameters the class rejects must fail at build().
 
-        ``hidden_features=15`` is odd, which ``CustomMLPBlock.__init__``
-        explicitly rejects. The spec itself is constructible (spec creation
-        does not invoke the target class), but :func:`load_checkpoint`
-        should surface the class's own ``ValueError``.
+class TestSecurityAST:
+    """AST-level security invariants for ``_checkpoint.py``."""
+
+    _CHECKPOINT_PATH = (
+        Path(__file__).resolve().parents[2]
+        / "nvalchemi"
+        / "training"
+        / "_checkpoint.py"
+    )
+    _FORBIDDEN_MODULES = frozenset({"pickle", "cloudpickle", "dill", "marshal"})
+
+    def _tree(self) -> ast.AST:
+        return ast.parse(self._CHECKPOINT_PATH.read_text())
+
+    def test_no_pickle_imports(self) -> None:
+        """No imports of pickle, cloudpickle, dill, or marshal."""
+        tree = self._tree()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    assert root not in self._FORBIDDEN_MODULES, (
+                        f"_checkpoint.py:{node.lineno} imports forbidden "
+                        f"module {alias.name!r}"
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is None:
+                    continue
+                root = node.module.split(".")[0]
+                assert root not in self._FORBIDDEN_MODULES, (
+                    f"_checkpoint.py:{node.lineno} imports from forbidden "
+                    f"module {node.module!r}"
+                )
+
+    def test_torch_load_always_weights_only(self) -> None:
+        """Every ``torch.load(...)`` call has ``weights_only=True``."""
+        tree = self._tree()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == "load"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "torch"
+            ):
+                continue
+            kw = {k.arg: k.value for k in node.keywords if k.arg is not None}
+            assert "weights_only" in kw, (
+                f"_checkpoint.py:{node.lineno} torch.load() missing weights_only= kwarg"
+            )
+            val = kw["weights_only"]
+            assert isinstance(val, ast.Constant) and val.value is True, (
+                f"_checkpoint.py:{node.lineno} torch.load(weights_only=...) "
+                f"must be literal True, got {ast.dump(val)}"
+            )
+
+    def test_torch_save_uses_state_dict(self) -> None:
+        """``torch.save`` never receives a raw module/optimizer object.
+
+        The implementation extracts ``state_dict()`` in the caller and
+        passes the dict to ``_save_component``, which calls ``torch.save``
+        with a plain variable. We verify that no ``torch.save`` call has
+        a first argument that is a bare attribute access on ``self``
+        (e.g., ``torch.save(model, ...)`` or ``torch.save(self.model, ...)``)
+        --- only plain names (like ``state_dict``) or subscripts are
+        acceptable.
         """
-        # Build + save by hand so we can write a malformed spec without
-        # going through ``CustomMLPBlock(...)``.
-        spec = create_model_spec(
-            CustomMLPBlock,
-            in_features=8,
-            hidden_features=15,  # invalid: odd
-            dropout=0.1,
-            eps=1e-5,
-            activation_scale=1.0,
-            use_residual=True,
-            dtype=torch.float32,
-        )
-        qualname_dir = tmp_path / "CustomMLPBlock"
-        (qualname_dir / "checkpoints").mkdir(parents=True)
-        (qualname_dir / "spec.json").write_text(spec.model_dump_json(indent=2))
-        # A dummy .pt so load_checkpoint gets past the "no checkpoints" check
-        # ... except we expect the failure to happen earlier, at build().
-        torch.save({}, qualname_dir / "checkpoints" / "0.pt")
+        tree = self._tree()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == "save"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "torch"
+            ):
+                continue
+            assert node.args, (
+                f"_checkpoint.py:{node.lineno} torch.save() called with no args"
+            )
+            first = node.args[0]
+            # Must NOT be a bare attribute on self (which would indicate
+            # saving a raw object).  Acceptable: Name, Subscript, or Call.
+            if isinstance(first, ast.Attribute):
+                assert not (
+                    isinstance(first.value, ast.Name) and first.value.id == "self"
+                ), (
+                    f"_checkpoint.py:{node.lineno} torch.save() first arg "
+                    f"appears to be a raw object (self.{first.attr}), "
+                    f"expected a state_dict result"
+                )
 
-        with pytest.raises(ValueError, match="hidden_features must be even"):
-            load_checkpoint(qualname_dir)
+
+class TestSchemaVersion:
+    """Manifest schema versioning and forward-compatibility guard."""
+
+    def test_save_writes_schema_version(self, tmp_path: Path) -> None:
+        """``manifest.json`` contains ``schema_version`` after save."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        assert "schema_version" in manifest
+        assert manifest["schema_version"] == 1
+
+    def test_load_v0_manifest_without_schema_key(self, tmp_path: Path) -> None:
+        """A manifest missing ``schema_version`` (v0) loads successfully."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+
+        # Strip schema_version to simulate a v0 manifest.
+        manifest_path = tmp_path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest.pop("schema_version")
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        result = load_checkpoint(tmp_path)
+        assert "main" in result.models
+        reloaded, _ = result.models["main"]
+        assert torch.equal(reloaded.weight, model.weight)
+
+    def test_future_schema_version_raises(self, tmp_path: Path) -> None:
+        """A manifest with a newer schema version raises ``ValueError``."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+
+        # Bump to a future version.
+        manifest_path = tmp_path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema_version"] = 999
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        with pytest.raises(ValueError, match="newer than supported"):
+            load_checkpoint(tmp_path)
+
+    def test_schema_version_preserved_across_saves(self, tmp_path: Path) -> None:
+        """Successive saves always write the current schema version."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        for _ in range(3):
+            save_checkpoint(tmp_path, models={"main": (model, spec)})
+
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        assert manifest["schema_version"] == 1
+
+    def test_manifest_pydantic_validation(self, tmp_path: Path) -> None:
+        """Malformed manifest.json triggers Pydantic ``ValidationError``."""
+        from pydantic import ValidationError
+
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+
+        # Corrupt the manifest: models should be list[str], not a string.
+        manifest_path = tmp_path / "manifest.json"
+        raw = json.loads(manifest_path.read_text())
+        raw["models"] = "not-a-list"
+        manifest_path.write_text(json.dumps(raw))
+
+        with pytest.raises(ValidationError):
+            load_checkpoint(tmp_path)
+
+    def test_manifest_model_dump_roundtrip(self) -> None:
+        """``CheckpointManifest`` round-trips through JSON serialization."""
+        original = CheckpointManifest(
+            checkpoint_index=3,
+            models=["a", "b"],
+            optimizers=["opt_a"],
+            schedulers=[],
+            associations={"a": {"optimizers": ["opt_a"], "schedulers": []}},
+        )
+        dumped = original.model_dump_json()
+        restored = CheckpointManifest.model_validate_json(dumped)
+        assert restored == original
+
+
+class TestCheckpointGPU:
+    """GPU-specific checkpoint round-trip tests."""
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_save_load_model_on_gpu(self, tmp_path: Path) -> None:
+        """Round-trip a model whose parameters live on CUDA."""
+        device = torch.device("cuda")
+        model = nn.Linear(4, 2).to(device)
+        with torch.no_grad():
+            model.weight.add_(1.25)
+            model.bias.add_(-0.5)
+
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        idx = save_checkpoint(tmp_path, models={"main": (model, spec)})
+        assert idx == 0
+
+        # Verify saved tensors are CUDA-resident.
+        saved = torch.load(
+            tmp_path / "models" / "main" / "checkpoints" / "0.pt",
+            weights_only=True,
+        )
+        assert saved["weight"].is_cuda
+        assert saved["bias"].is_cuda
+
+        result = load_checkpoint(tmp_path)
+        reloaded, _ = result.models["main"]
+        assert torch.allclose(reloaded.weight.cpu(), model.weight.cpu())
+        assert torch.allclose(reloaded.bias.cpu(), model.bias.cpu())

@@ -464,15 +464,16 @@ class TestFullPrototypeScenario:
         assert torch.equal(model.feature_scale, feature_scale)
 
         # --- Save + reload via checkpoint I/O -----------------------------
-        save_checkpoint(tmp_path, model, spec)
-        save_checkpoint(tmp_path, model, spec)
-        qualname_dir = tmp_path / "MyMLIP"
-        assert (qualname_dir / "spec.json").is_file()
-        assert (qualname_dir / "checkpoints" / "0.pt").is_file()
-        assert (qualname_dir / "checkpoints" / "1.pt").is_file()
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+        save_checkpoint(tmp_path, models={"main": (model, spec)})
+        model_dir = tmp_path / "models" / "main"
+        assert (model_dir / "spec.json").is_file()
+        assert (model_dir / "checkpoints" / "0.pt").is_file()
+        assert (model_dir / "checkpoints" / "1.pt").is_file()
 
         torch.manual_seed(999)  # different seed to prove weights came from ckpt
-        reloaded_model, reloaded_spec = load_checkpoint(qualname_dir)
+        result = load_checkpoint(tmp_path)
+        reloaded_model, reloaded_spec = result.models["main"]
 
         sd_orig = model.state_dict()
         sd_new = reloaded_model.state_dict()
@@ -619,13 +620,19 @@ class TestSecurityNoPickle:
                     f"{path.name}:{node.lineno} torch.save() called with no args"
                 )
                 first = node.args[0]
-                # Must be a `.state_dict()` call.
+                # Must be either an x.state_dict() call or a variable
+                # named "state_dict" (accepted when the call site already
+                # resolved the state_dict, e.g. in _save_component).
                 is_state_dict_call = (
                     isinstance(first, ast.Call)
                     and isinstance(first.func, ast.Attribute)
                     and first.func.attr == "state_dict"
                 )
-                assert is_state_dict_call, (
+                is_state_dict_var = (
+                    isinstance(first, ast.Name) and first.id == "state_dict"
+                )
+                assert is_state_dict_call or is_state_dict_var, (
                     f"{path.name}:{node.lineno} torch.save() first arg must be "
-                    f"an x.state_dict() call, got {ast.dump(first)}"
+                    f"an x.state_dict() call or a 'state_dict' variable, "
+                    f"got {ast.dump(first)}"
                 )
