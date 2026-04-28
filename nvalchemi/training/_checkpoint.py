@@ -566,6 +566,8 @@ def save_checkpoint(
 def load_checkpoint(
     root_folder: Path | str,
     checkpoint_index: int = -1,
+    map_location: str | torch.device | None = None,
+    model_name: str | None = None,
 ) -> CheckpointManifest:
     """Load a multi-component checkpoint written by :func:`save_checkpoint`.
 
@@ -582,19 +584,35 @@ def load_checkpoint(
     checkpoint_index
         Index of the checkpoint to load. ``-1`` (default) loads the
         latest index recorded in the manifest.
+    map_location
+        Forwarded to every :func:`torch.load` call. When not ``None``,
+        each loaded model is additionally moved via
+        ``model.to(map_location)``. Optimizers and schedulers have their
+        state placed by ``torch.load`` alone (they lack a standard
+        ``.to()`` API).
+    model_name
+        If given, load only the model with this name together with the
+        optimizers and schedulers wired to it through
+        ``manifest.associations``. Other components on disk are skipped.
+        The returned manifest's ``associations`` still reflects the full
+        on-disk mapping, so callers can inspect what was not loaded.
 
     Returns
     -------
     CheckpointManifest
         Manifest with hydrated ``models``, ``optimizers``, ``schedulers``
         dicts containing live ``(object, spec)`` tuples, plus
-        ``associations`` and ``checkpoint_index``.
+        ``associations`` and ``checkpoint_index``. When ``model_name`` is
+        set, the hydrated dicts contain only the selected subset.
 
     Raises
     ------
     FileNotFoundError
         If ``manifest.json`` is missing or a checkpoint ``.pt`` file
         does not exist.
+    KeyError
+        If ``model_name`` is given but does not appear in
+        ``manifest.models``.
     RuntimeError
         If a model spec does not build an :class:`~torch.nn.Module`.
 
@@ -608,6 +626,16 @@ def load_checkpoint(
     ...     result = load_checkpoint(tmp)
     ...     isinstance(result.models["main"][0], nn.Linear)
     True
+
+    Loading onto CPU regardless of the original device::
+
+        result = load_checkpoint("runs/exp1", map_location="cpu")
+
+    Selecting a single model (e.g., just the teacher in a
+    knowledge-distillation checkpoint)::
+
+        result = load_checkpoint("runs/kd", model_name="teacher")
+        teacher, spec = result.models["teacher"]
     """
     root = Path(root_folder)
     manifest = CheckpointManifest.read(root)
@@ -617,9 +645,24 @@ def load_checkpoint(
 
     associations = manifest.associations
 
+    # Resolve which components to load.  With ``model_name`` set, restrict
+    # to the named model plus its associated optimizers and schedulers.
+    if model_name is not None:
+        if model_name not in manifest.models:
+            available = sorted(manifest.models)
+            raise KeyError(f"Unknown model {model_name!r}. Available: {available!r}")
+        assoc = associations.get(model_name, {})
+        models_to_load = [model_name]
+        optimizers_to_load = list(assoc.get("optimizers", []))
+        schedulers_to_load = list(assoc.get("schedulers", []))
+    else:
+        models_to_load = list(manifest.models)
+        optimizers_to_load = list(manifest.optimizers)
+        schedulers_to_load = list(manifest.schedulers)
+
     # --- Models ---
     loaded_models: dict[str, tuple[nn.Module, BaseSpec]] = {}
-    for name in manifest.models:
+    for name in models_to_load:
         spec = _load_spec(root / "models" / name / "spec.json")
         model = spec.build()
         if not isinstance(model, nn.Module):
@@ -629,19 +672,23 @@ def load_checkpoint(
         weights = torch.load(
             root / "models" / name / "checkpoints" / f"{checkpoint_index}.pt",
             weights_only=True,
+            map_location=map_location,
         )
         model.load_state_dict(weights)
+        if map_location is not None:
+            model.to(map_location)
         loaded_models[name] = (model, spec)
 
     # --- Optimizers ---
     loaded_optimizers: dict[str, tuple[torch.optim.Optimizer, BaseSpec]] = {}
-    for name in manifest.optimizers:
+    for name in optimizers_to_load:
         spec = _load_spec(root / "optimizers" / name / "spec.json")
         params = _find_associated_model_params(name, associations, loaded_models)
         optimizer = spec.build(params)
         state = torch.load(
             root / "optimizers" / name / "checkpoints" / f"{checkpoint_index}.pt",
             weights_only=True,
+            map_location=map_location,
         )
         optimizer.load_state_dict(state)
         loaded_optimizers[name] = (optimizer, spec)
@@ -650,7 +697,7 @@ def load_checkpoint(
     loaded_schedulers: dict[
         str, tuple[torch.optim.lr_scheduler.LRScheduler, BaseSpec]
     ] = {}
-    for name in manifest.schedulers:
+    for name in schedulers_to_load:
         spec = _load_spec(root / "schedulers" / name / "spec.json")
         assoc_optimizer = _find_associated_optimizer(
             name, associations, loaded_optimizers
@@ -659,6 +706,7 @@ def load_checkpoint(
         state = torch.load(
             root / "schedulers" / name / "checkpoints" / f"{checkpoint_index}.pt",
             weights_only=True,
+            map_location=map_location,
         )
         scheduler.load_state_dict(state)
         loaded_schedulers[name] = (scheduler, spec)
