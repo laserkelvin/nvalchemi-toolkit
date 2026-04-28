@@ -388,6 +388,30 @@ class BaseSpec(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _try_deserialize(value: Any) -> Any:
+    """Probe registered deserializers to rehydrate a raw JSON value.
+
+    Returns the first successfully deserialized typed instance, or the
+    original ``value`` unchanged if no deserializer accepts it. This covers
+    the case where ``__init__`` has no annotation for a parameter whose
+    stored value is a serialized custom type (e.g. ``torch.dtype`` as a
+    str) — without this probe, :func:`_resolve_annotation` would infer the
+    plain ``str`` / ``dict`` type and the registered BeforeValidator would
+    never fire.
+
+    Only primitives likely to match a custom serialized form are probed
+    (``str`` and ``dict``); all other values pass through unchanged.
+    """
+    if not isinstance(value, (str, dict)):
+        return value
+    for _, deser in _TYPE_SERIALIZERS.values():
+        try:
+            return deser(value)
+        except (TypeError, ValueError, KeyError, AttributeError, RuntimeError):
+            continue
+    return value
+
+
 def _resolve_annotation(name: str, value: Any, sig: inspect.Signature) -> Any:
     """Pick the Pydantic field annotation for ``(name, value)`` in ``sig``.
 
@@ -563,9 +587,13 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
         if isinstance(value, dict) and "cls_path" in value:
             kwargs[name] = create_model_spec_from_json(value)
         else:
-            # Pydantic BeforeValidators on registered types (dtype, device,
-            # Tensor) handle the raw value -> typed instance conversion.
-            kwargs[name] = value
+            # Eagerly deserialize strings/dicts that match a registered
+            # custom type's serialized form. This is required for classes
+            # whose ``__init__`` has no annotation for the parameter
+            # (e.g. ``nn.Linear(..., dtype=...)``), because
+            # :func:`_resolve_annotation` would otherwise infer ``type(value)
+            # == str`` and miss the registered ``torch.dtype`` serializer.
+            kwargs[name] = _try_deserialize(value)
 
     rebuilt = create_model_spec(cls_, **kwargs)
     # Preserve original provenance rather than stamping a fresh timestamp.

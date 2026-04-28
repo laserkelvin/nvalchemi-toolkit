@@ -343,24 +343,22 @@ class TestCreateModelSpecFromJson:
         with pytest.raises(ValueError, match="Could not resolve cls_path"):
             create_model_spec_from_json(dumped)
 
-    @pytest.mark.xfail(
-        reason=(
-            "unannotated params in target __init__ bypass BeforeValidator on "
-            "rehydrate; follow-up feature needs source_annotations threading"
-        ),
-        strict=True,
-        raises=TypeError,
-    )
-    def test_xfail_unannotated_param_dtype_not_rehydrated(self) -> None:
-        # nn.Linear.__init__'s device/dtype are unannotated -> str is stored
-        # in the spec field type, so round-tripped dtype stays a str and
-        # build() fails.
+    def test_unannotated_param_dtype_rehydrates_via_deserializer_probe(
+        self,
+    ) -> None:
+        # nn.Linear.__init__'s dtype parameter is unannotated. Without the
+        # eager deserializer probe in create_model_spec_from_json, the str
+        # "torch.float32" would pass through untyped and build() would hand
+        # a str to torch.empty. The probe rehydrates the string into a
+        # torch.dtype before create_model_spec sees it.
         spec = create_model_spec(
             nn.Linear, in_features=4, out_features=2, dtype=torch.float32
         )
         dumped = json.loads(spec.model_dump_json())
         rebuilt = create_model_spec_from_json(dumped)
-        rebuilt.build()
+        assert rebuilt.dtype == torch.float32  # type: ignore[attr-defined]
+        model = rebuilt.build()
+        assert model.weight.dtype == torch.float32
 
 
 class TestBaseSpecBuild:
