@@ -150,7 +150,7 @@ class TestSaveCheckpointSingleModel:
         assert isinstance(reloaded, nn.Linear)
         assert torch.equal(reloaded.weight, model.weight)
         assert torch.equal(reloaded.bias, model.bias)
-        assert reloaded_spec.init_hash == spec.init_hash
+        assert reloaded_spec.timestamp == spec.timestamp
 
     def test_autoincrement_from_manifest(self, tmp_path: Path) -> None:
         """Three sequential saves auto-increment indices 0, 1, 2."""
@@ -623,7 +623,7 @@ class TestCheckpointCustomMLPBlock:
         result = load_checkpoint(tmp_path)
         reloaded, reloaded_spec = result.models["main"]
         assert isinstance(reloaded, CustomMLPBlock)
-        assert reloaded_spec.init_hash == spec.init_hash
+        assert reloaded_spec.timestamp == spec.timestamp
 
         original_params = dict(model.named_parameters())
         reloaded_params = dict(reloaded.named_parameters())
@@ -658,7 +658,7 @@ class TestCheckpointCustomMLPBlock:
         raw = (tmp_path / "models" / "main" / "spec.json").read_text()
         parsed = json.loads(raw)
         assert parsed["dtype"] == "torch.float32"
-        for key in ("cls_path", "timestamp", "init_hash"):
+        for key in ("cls_path", "timestamp"):
             assert key in parsed
         assert parsed["cls_path"].endswith(".CustomMLPBlock")
 

@@ -38,10 +38,8 @@ Custom (de)serializers for additional types are registered via
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import inspect
-import warnings
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -58,7 +56,7 @@ from pydantic import (
     create_model,
 )
 
-_META_FIELDS: frozenset[str] = frozenset({"cls_path", "timestamp", "init_hash"})
+_META_FIELDS: frozenset[str] = frozenset({"cls_path", "timestamp"})
 """Field names reserved by :class:`BaseSpec` itself; never forwarded to ``build``."""
 
 
@@ -264,31 +262,13 @@ def _ensure_importable(cls_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Signature introspection + hashing
+# Signature introspection
 # ---------------------------------------------------------------------------
 
 
 def _signature(cls_: type) -> inspect.Signature:
     """Return the (string-annotation-resolved) signature of ``cls_.__init__``."""
     return inspect.signature(cls_, eval_str=True)
-
-
-def _hash_init_signature(cls_: type) -> str:
-    """Compute a 16-hex-char SHA-256 digest of ``cls_``'s ``__init__`` signature.
-
-    The hash incorporates each parameter's name, kind, annotation, and
-    default value, so any visible change to the signature produces a
-    different hash. Truncating to 16 hex characters (64 bits) keeps specs
-    readable while retaining a negligible collision probability for
-    realistic workloads.
-    """
-    sig = _signature(cls_)
-    parts = [
-        f"{name}|{p.kind}|{p.annotation!r}|{p.default!r}"
-        for name, p in sig.parameters.items()
-    ]
-    payload = "\n".join(parts)
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _check_no_positional_only(cls_: type) -> None:
@@ -311,7 +291,7 @@ class BaseSpec(BaseModel):
 
     Concrete spec classes are built dynamically by :func:`create_model_spec`
     via :func:`pydantic.create_model`; each carries one field per
-    ``__init__`` kwarg of its target class plus the three metadata fields
+    ``__init__`` kwarg of its target class plus the two metadata fields
     defined here.
 
     Attributes
@@ -321,15 +301,13 @@ class BaseSpec(BaseModel):
         class. Validated at assignment time by :func:`_import_cls`.
     timestamp
         ISO-8601 UTC timestamp recording when the spec was created.
-    init_hash
-        Truncated SHA-256 digest of the target class's ``__init__``
-        signature at spec-creation time; see :func:`_hash_init_signature`.
 
     Notes
     -----
     ``revalidate_instances="never"`` is deliberate: specs are immutable
-    records of past state, and revalidating on access would defeat the
-    ``init_hash`` provenance guarantee.
+    records of past state; revalidating on access would reject any
+    already-typed field values (e.g. rehydrated :class:`torch.Tensor`
+    objects) that were stored through a :class:`~pydantic.BeforeValidator`.
     """
 
     model_config = ConfigDict(
@@ -346,12 +324,6 @@ class BaseSpec(BaseModel):
         str,
         Field(description="ISO-8601 UTC timestamp of spec creation."),
     ]
-    init_hash: Annotated[
-        str,
-        Field(
-            description=("Truncated SHA-256 of the target class's __init__ signature."),
-        ),
-    ]
 
     def build(self, *args: Any, strict: bool = False, **extra_kwargs: Any) -> object:
         """Instantiate the target class from the stored hyperparameters.
@@ -361,24 +333,14 @@ class BaseSpec(BaseModel):
         ``model.parameters()`` for an optimizer or an ``optimizer`` instance
         for a learning-rate scheduler.
 
-        Before instantiating, the target class's current ``__init__``
-        signature is re-hashed and compared to :attr:`init_hash`. By default
-        (``strict=False``) a mismatch emits a :class:`UserWarning` but does
-        not stop the build, and a subsequent :class:`TypeError` is re-raised
-        with the stored/current hashes and the spec timestamp. When
-        ``strict=True`` a mismatch raises :class:`ValueError` immediately
-        and instantiation is not attempted.
-
         Parameters
         ----------
         *args
             Positional arguments forwarded to the target class constructor
             (runtime-only, not stored in the spec).
         strict
-            If ``True``, raise :class:`ValueError` when the current
-            ``__init__`` signature hash does not match :attr:`init_hash`,
-            before attempting instantiation. If ``False`` (default), emit
-            a :class:`UserWarning` on mismatch and proceed.
+            Reserved for future use; currently a no-op retained to preserve
+            the public API. Accepts any value without effect.
         **extra_kwargs
             Extra keyword arguments forwarded to the target class
             constructor, overriding any spec-stored kwargs of the same name.
@@ -390,39 +352,12 @@ class BaseSpec(BaseModel):
 
         Raises
         ------
-        ValueError
-            If ``strict=True`` and the current ``__init__`` signature hash
-            does not match :attr:`init_hash`. The message contains both
-            hashes, :attr:`cls_path`, and :attr:`timestamp`.
         TypeError
             If the target class cannot be instantiated with the resolved
-            kwargs. If the ``init_hash`` does not match the current
-            signature, the error message is augmented with the stored and
-            current hash values and the spec timestamp.
-
-        Warns
-        -----
-        UserWarning
-            If ``strict=False`` (default) and :attr:`init_hash` does not
-            match the hash of the current ``__init__`` signature.
+            kwargs.
         """
+        del strict  # reserved for future use
         cls_ = _import_cls(self.cls_path)
-        current_hash = _hash_init_signature(cls_)
-        hash_mismatch = current_hash != self.init_hash
-        if hash_mismatch:
-            mismatch_msg = (
-                f"init_hash mismatch for {self.cls_path}: "
-                f"stored={self.init_hash!r}, current={current_hash!r}. "
-                f"The class's __init__ signature has changed since this "
-                f"spec was saved (at {self.timestamp})."
-            )
-            if strict:
-                raise ValueError(f"{mismatch_msg} Refusing to build under strict=True.")
-            warnings.warn(
-                f"{mismatch_msg} Proceeding anyway.",
-                UserWarning,
-                stacklevel=2,
-            )
         sig = _signature(cls_)
         resolved: dict[str, Any] = {}
         for name in type(self).model_fields:
@@ -441,15 +376,11 @@ class BaseSpec(BaseModel):
         try:
             return cls_(*args, **resolved)
         except TypeError as e:
-            if hash_mismatch:
-                raise TypeError(
-                    f"Failed to build {self.cls_path!r}. Signature hash "
-                    f"mismatch: stored={self.init_hash!r}, "
-                    f"current={current_hash!r}. The class's __init__ "
-                    f"signature has changed since this spec was saved "
-                    f"(at {self.timestamp}). Original error: {e}"
-                ) from e
-            raise
+            raise TypeError(
+                f"Failed to build {self.cls_path} from spec "
+                f"(saved at {self.timestamp}): {e}. The class signature "
+                "may have changed since the spec was created."
+            ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +450,7 @@ def create_model_spec(cls_: type, **kwargs: Any) -> BaseSpec:
     -------
     BaseSpec
         A dynamically subclassed :class:`BaseSpec` instance named
-        ``"{cls_.__name__}Spec"`` with one field per kwarg plus the three
+        ``"{cls_.__name__}Spec"`` with one field per kwarg plus the two
         metadata fields.
 
     Raises
@@ -563,7 +494,6 @@ def create_model_spec(cls_: type, **kwargs: Any) -> BaseSpec:
     return model_cls(
         cls_path=_cls_path_of(cls_),
         timestamp=datetime.now(timezone.utc).isoformat(),
-        init_hash=_hash_init_signature(cls_),
         **kwargs,
     )
 
@@ -577,10 +507,9 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
     str → :class:`torch.dtype` / :class:`torch.device` / dict →
     :class:`torch.Tensor` conversions transparently.
 
-    The original ``timestamp`` and ``init_hash`` are preserved via
-    :func:`object.__setattr__` rather than stamped fresh, so that a
-    round-tripped spec remains byte-identical (up to JSON-whitespace)
-    with its source.
+    The original ``timestamp`` is preserved via :func:`object.__setattr__`
+    rather than stamped fresh, so that a round-tripped spec remains
+    byte-identical (up to JSON-whitespace) with its source.
 
     Parameters
     ----------
@@ -594,15 +523,14 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
     -------
     BaseSpec
         A spec instance equivalent to the source, with the original
-        ``timestamp`` and ``init_hash`` preserved.
+        ``timestamp`` preserved.
 
     Raises
     ------
     ValueError
-        If ``spec`` is missing any of ``cls_path``, ``init_hash``, or
-        ``timestamp``, or if ``cls_path`` cannot be imported / resolves to
-        a non-class. The underlying exception is preserved as
-        ``__cause__``.
+        If ``spec`` is missing ``cls_path`` or ``timestamp``, or if
+        ``cls_path`` cannot be imported / resolves to a non-class. The
+        underlying exception is preserved as ``__cause__``.
 
     Examples
     --------
@@ -610,13 +538,12 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
     >>> s = create_model_spec(nn.Linear, in_features=4, out_features=2)
     >>> dumped = json.loads(s.model_dump_json())
     >>> s2 = create_model_spec_from_json(dumped)
-    >>> s2.init_hash == s.init_hash
+    >>> s2.timestamp == s.timestamp
     True
     """
     schema = dict(spec)
     try:
         cls_path = schema.pop("cls_path")
-        stored_hash = schema.pop("init_hash")
         stored_timestamp = schema.pop("timestamp")
     except KeyError as e:
         raise ValueError(
@@ -641,7 +568,6 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
             kwargs[name] = value
 
     rebuilt = create_model_spec(cls_, **kwargs)
-    # Preserve original provenance rather than stamping a fresh hash/timestamp.
+    # Preserve original provenance rather than stamping a fresh timestamp.
     object.__setattr__(rebuilt, "timestamp", stored_timestamp)
-    object.__setattr__(rebuilt, "init_hash", stored_hash)
     return rebuilt

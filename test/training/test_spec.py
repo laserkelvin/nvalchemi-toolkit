@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +30,6 @@ from nvalchemi.training._spec import (
     BaseSpec,
     _check_no_positional_only,
     _dtype_deserialize,
-    _hash_init_signature,
     _import_cls,
     create_model_spec,
     create_model_spec_from_json,
@@ -267,18 +265,8 @@ class TestTypeSerializerRegistry:
         assert torch.equal(rebuilt.weights, t)
 
 
-class TestSchemaHash:
-    """Stability and discrimination of ``_hash_init_signature``."""
-
-    def test_same_class_same_hash(self) -> None:
-        h1 = _hash_init_signature(nn.Linear)
-        h2 = _hash_init_signature(nn.Linear)
-        assert h1 == h2
-        assert len(h1) == 16
-        assert re.fullmatch(r"[0-9a-f]{16}", h1) is not None
-
-    def test_different_classes_different_hashes(self) -> None:
-        assert _hash_init_signature(nn.Linear) != _hash_init_signature(nn.Conv2d)
+class TestSignatureIntrospection:
+    """Signature-level validation helpers."""
 
     def test_positional_only_rejected(self) -> None:
         cls_ = _make_positional_only_cls()
@@ -289,11 +277,9 @@ class TestSchemaHash:
 class TestCreateModelSpec:
     """Construction of a :class:`BaseSpec` via :func:`create_model_spec`."""
 
-    def test_creates_spec_with_cls_path_timestamp_init_hash(self) -> None:
+    def test_creates_spec_with_cls_path_and_timestamp(self) -> None:
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
         assert spec.cls_path == "torch.nn.modules.linear.Linear"
-        # init_hash: 16 hex chars
-        assert re.fullmatch(r"[0-9a-f]{16}", spec.init_hash) is not None
         # timestamp: ISO-8601, parses
         from datetime import datetime
 
@@ -329,11 +315,10 @@ class TestCreateModelSpec:
 class TestCreateModelSpecFromJson:
     """JSON-dict rehydration via :func:`create_model_spec_from_json`."""
 
-    def test_roundtrip_preserves_timestamp_and_init_hash(self) -> None:
+    def test_roundtrip_preserves_timestamp(self) -> None:
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
         rebuilt = create_model_spec_from_json(json.loads(spec.model_dump_json()))
         assert rebuilt.timestamp == spec.timestamp
-        assert rebuilt.init_hash == spec.init_hash
 
     def test_recursive_nested_spec_rehydrated(self) -> None:
         act_spec = create_model_spec(nn.SiLU)
@@ -341,9 +326,9 @@ class TestCreateModelSpecFromJson:
         rebuilt = create_model_spec_from_json(json.loads(spec.model_dump_json()))
         assert isinstance(rebuilt.child, BaseSpec)
         assert rebuilt.child.cls_path.endswith(".SiLU")
-        assert rebuilt.child.init_hash == act_spec.init_hash
+        assert rebuilt.child.timestamp == act_spec.timestamp
 
-    @pytest.mark.parametrize("missing", ["cls_path", "timestamp", "init_hash"])
+    @pytest.mark.parametrize("missing", ["cls_path", "timestamp"])
     def test_missing_required_field_raises_valueerror(self, missing: str) -> None:
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
         dumped = json.loads(spec.model_dump_json())
@@ -388,27 +373,7 @@ class TestBaseSpecBuild:
         out = m(torch.randn(3, 4))
         assert out.shape == (3, 2)
 
-    def test_build_warns_on_hash_mismatch(self) -> None:
-        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        object.__setattr__(spec, "init_hash", "deadbeef12345678")
-        with pytest.warns(UserWarning) as caught:
-            m = spec.build()
-        assert isinstance(m, nn.Linear)
-        msg = str(caught[0].message)
-        assert "deadbeef12345678" in msg
-        assert "torch.nn.modules.linear.Linear" in msg
-
-    def test_build_strict_raises_on_mismatch(self) -> None:
-        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
-        original_hash = spec.init_hash
-        object.__setattr__(spec, "init_hash", "deadbeef12345678")
-        with pytest.raises(ValueError) as exc:
-            spec.build(strict=True)
-        msg = str(exc.value)
-        assert "deadbeef12345678" in msg
-        assert original_hash in msg
-
-    def test_build_strict_on_match_passes(self) -> None:
+    def test_build_strict_is_noop(self) -> None:
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
         m = spec.build(strict=True)
         assert isinstance(m, nn.Linear)
@@ -480,7 +445,7 @@ class TestFullPrototypeScenario:
         assert sd_orig.keys() == sd_new.keys()
         for k in sd_orig:
             assert torch.equal(sd_orig[k], sd_new[k])
-        assert reloaded_spec.init_hash == spec.init_hash
+        assert reloaded_spec.timestamp == spec.timestamp
         assert torch.equal(reloaded_spec.feature_scale, feature_scale)
 
         # Forward pass under eval() must be bit-identical.
