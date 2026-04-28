@@ -584,6 +584,57 @@ class TestAssociations:
         result = load_checkpoint(tmp_path)
         assert "opt" in result.optimizers
 
+    def test_scheduler_attaches_to_second_optimizer(self, tmp_path: Path) -> None:
+        """Regression: scheduler must wrap the optimizer it was saved with.
+
+        With multiple optimizers on the same model, the scheduler must attach
+        to the specific optimizer it was constructed with, not simply the
+        first optimizer in the manifest's association list. Auto-inference
+        cannot disambiguate two optimizers sharing parameters, so explicit
+        associations are required to pin the scheduler to the SGD optimizer.
+        """
+        model = nn.Linear(4, 2)
+        m_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+
+        # Two optimizers with different classes to make identity unambiguous.
+        opt_adam = torch.optim.Adam(model.parameters(), lr=0.01)
+        opt_sgd = torch.optim.SGD(model.parameters(), lr=0.1)
+        adam_spec = create_model_spec(torch.optim.Adam, lr=0.01)
+        sgd_spec = create_model_spec(torch.optim.SGD, lr=0.1)
+
+        # Scheduler on the SGD optimizer (NOT Adam).
+        scheduler = torch.optim.lr_scheduler.StepLR(opt_sgd, step_size=10, gamma=0.5)
+        sched_spec = create_model_spec(
+            torch.optim.lr_scheduler.StepLR, step_size=10, gamma=0.5
+        )
+
+        # Explicit associations: the scheduler must wrap ``sgd``. Listing
+        # ``sgd`` first among optimizers ensures the load-time wiring logic
+        # picks it as the scheduler's optimizer.
+        associations = {
+            "m": {"optimizers": ["sgd", "adam"], "schedulers": ["step"]},
+        }
+        save_checkpoint(
+            tmp_path,
+            models={"m": (model, m_spec)},
+            optimizers={"adam": (opt_adam, adam_spec), "sgd": (opt_sgd, sgd_spec)},
+            schedulers={"step": (scheduler, sched_spec)},
+            associations=associations,
+        )
+
+        result = load_checkpoint(tmp_path)
+        loaded_scheduler, _ = result.schedulers["step"]
+        loaded_sgd, _ = result.optimizers["sgd"]
+        loaded_adam, _ = result.optimizers["adam"]
+
+        assert loaded_scheduler.optimizer is loaded_sgd, (
+            "scheduler should wrap the SGD optimizer it was saved with"
+        )
+        assert loaded_scheduler.optimizer is not loaded_adam
+
+        # Verify the manifest recorded the association correctly.
+        assert "step" in result.associations.get("m", {}).get("schedulers", [])
+
 
 class TestCheckpointCustomMLPBlock:
     """Stress tests: serialize a non-trivial custom block end-to-end.
@@ -930,3 +981,174 @@ class TestCheckpointGPU:
         reloaded, _ = result.models["main"]
         assert torch.allclose(reloaded.weight.cpu(), model.weight.cpu())
         assert torch.allclose(reloaded.bias.cpu(), model.bias.cpu())
+
+
+class TestDtypeRoundtrip:
+    """Regression: ``torch.dtype`` kwargs rehydrate as real dtype objects."""
+
+    def test_dtype_kwarg_roundtrip(self, tmp_path: Path) -> None:
+        """A spec with a ``torch.dtype`` kwarg round-trips bit-exactly.
+
+        Atul's concern A3: when a spec carries a ``torch.dtype`` (e.g.
+        ``torch.float32``), the saved ``spec.json`` uses a string
+        representation, but on load the field must rehydrate to the
+        actual :class:`torch.dtype` so that ``spec.build()`` can hand it
+        to modules expecting a dtype (not a string).
+        """
+        spec = create_model_spec(
+            nn.Linear, in_features=4, out_features=2, dtype=torch.float32
+        )
+        model = spec.build()
+        assert model.weight.dtype == torch.float32
+
+        save_checkpoint(tmp_path, models={"m": (model, spec)})
+        result = load_checkpoint(tmp_path)
+        loaded_model, loaded_spec = result.models["m"]
+
+        assert loaded_model.weight.dtype == torch.float32
+        # The spec's dtype field must rehydrate as a torch.dtype (not a string).
+        assert loaded_spec.dtype == torch.float32
+        assert isinstance(loaded_spec.dtype, torch.dtype)
+
+
+class TestEMACheckpoint:
+    """Tests for round-tripping EMA (``AveragedModel``) wrappers.
+
+    ``torch.optim.swa_utils.AveragedModel`` takes the base model as a
+    positional ``__init__`` argument; :func:`create_model_spec` only
+    accepts kwargs. The supported workflow is therefore to save the base
+    model (and optionally the inner averaged module) as ordinary
+    :class:`nn.Module`\\ s, then reconstruct the ``AveragedModel`` wrapper
+    in user code after loading.
+    """
+
+    def test_ema_base_model_roundtrip(self, tmp_path: Path) -> None:
+        """Save base + EMA inner module, reconstruct EMA wrapper on load."""
+        from torch.optim.swa_utils import AveragedModel
+
+        base = nn.Linear(4, 2)
+        ema = AveragedModel(base)
+        # Simulate training: perturb base weights, then update EMA.
+        for _ in range(3):
+            with torch.no_grad():
+                base.weight.add_(torch.randn_like(base.weight) * 0.1)
+            ema.update_parameters(base)
+
+        base_spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+
+        # Save both the base and the EMA's inner module. ``ema.module`` is
+        # a plain ``nn.Linear`` with the averaged state_dict.
+        save_checkpoint(
+            tmp_path,
+            models={
+                "base": (base, base_spec),
+                "ema_inner": (ema.module, base_spec),
+            },
+        )
+
+        result = load_checkpoint(tmp_path)
+        loaded_base, _ = result.models["base"]
+        loaded_ema_inner, _ = result.models["ema_inner"]
+
+        # Base and EMA inner weights round-trip.
+        assert torch.allclose(loaded_base.weight, base.weight)
+        assert torch.allclose(loaded_ema_inner.weight, ema.module.weight)
+
+        # Reconstruct the EMA wrapper: copy averaged weights into the new
+        # ``AveragedModel``'s inner module so forward-pass output matches.
+        reconstructed_ema = AveragedModel(loaded_base)
+        reconstructed_ema.module.load_state_dict(loaded_ema_inner.state_dict())
+        x = torch.randn(1, 4)
+        with torch.no_grad():
+            assert torch.allclose(reconstructed_ema(x), ema(x))
+
+
+class TestLoadCheckpointKwargs:
+    """Tests for the ``map_location`` and ``model_name`` kwargs."""
+
+    def test_map_location_cpu(self, tmp_path: Path) -> None:
+        """``map_location='cpu'`` places the loaded model on CPU."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(tmp_path, models={"m": (model, spec)})
+
+        result = load_checkpoint(tmp_path, map_location="cpu")
+        loaded, _ = result.models["m"]
+        assert loaded.weight.device.type == "cpu"
+        # State-dict tensors must also be on CPU.
+        for v in loaded.state_dict().values():
+            assert v.device.type == "cpu"
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_map_location_cuda(self, tmp_path: Path) -> None:
+        """``map_location='cuda'`` places the loaded model on CUDA."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(tmp_path, models={"m": (model, spec)})
+
+        result = load_checkpoint(tmp_path, map_location="cuda")
+        loaded, _ = result.models["m"]
+        assert loaded.weight.device.type == "cuda"
+
+    def test_model_name_loads_only_specified_model(self, tmp_path: Path) -> None:
+        """``model_name`` restricts loading to that model only."""
+        m1 = nn.Linear(4, 2)
+        m2 = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(
+            tmp_path,
+            models={"student": (m1, spec), "teacher": (m2, spec)},
+        )
+
+        result = load_checkpoint(tmp_path, model_name="teacher")
+        assert list(result.models.keys()) == ["teacher"]
+        assert result.optimizers == {}
+        assert result.schedulers == {}
+        # Associations on the result remain informational (reflect on-disk state).
+        assert isinstance(result.associations, dict)
+
+    def test_model_name_includes_associated_components(self, tmp_path: Path) -> None:
+        """``model_name`` also loads the associated optimizers/schedulers."""
+        m1 = nn.Linear(4, 2)
+        m2 = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+
+        # Give the student an optimizer; teacher gets nothing.
+        opt1 = torch.optim.Adam(m1.parameters(), lr=0.01)
+        opt_spec = create_model_spec(torch.optim.Adam, lr=0.01)
+
+        save_checkpoint(
+            tmp_path,
+            models={"student": (m1, spec), "teacher": (m2, spec)},
+            optimizers={"s_opt": (opt1, opt_spec)},
+        )
+
+        # Loading student pulls in its associated optimizer.
+        result = load_checkpoint(tmp_path, model_name="student")
+        assert list(result.models.keys()) == ["student"]
+        assert "s_opt" in result.optimizers
+
+        # Loading teacher picks up no optimizer (none associated).
+        result = load_checkpoint(tmp_path, model_name="teacher")
+        assert list(result.models.keys()) == ["teacher"]
+        assert result.optimizers == {}
+
+    def test_model_name_unknown_raises_keyerror(self, tmp_path: Path) -> None:
+        """Unknown ``model_name`` raises :class:`KeyError` listing available names."""
+        model = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+        save_checkpoint(
+            tmp_path,
+            models={"student": (model, spec), "teacher": (model, spec)},
+        )
+
+        with pytest.raises(KeyError, match="nonexistent"):
+            load_checkpoint(tmp_path, model_name="nonexistent")
+
+        # The error message must list the available model names.
+        try:
+            load_checkpoint(tmp_path, model_name="nonexistent")
+        except KeyError as e:
+            msg = str(e)
+            assert "student" in msg
+            assert "teacher" in msg
