@@ -1064,7 +1064,7 @@ class TestEMACheckpoint:
 
 
 class TestLoadCheckpointKwargs:
-    """Tests for the ``map_location`` and ``model_name`` kwargs."""
+    """Tests for the ``map_location`` and ``model_names`` kwargs."""
 
     def test_map_location_cpu(self, tmp_path: Path) -> None:
         """``map_location='cpu'`` places the loaded model on CPU."""
@@ -1090,8 +1090,8 @@ class TestLoadCheckpointKwargs:
         loaded, _ = result.models["m"]
         assert loaded.weight.device.type == "cuda"
 
-    def test_model_name_loads_only_specified_model(self, tmp_path: Path) -> None:
-        """``model_name`` restricts loading to that model only."""
+    def test_model_names_loads_only_specified_model(self, tmp_path: Path) -> None:
+        """``model_names`` restricts loading to the selected models only."""
         m1 = nn.Linear(4, 2)
         m2 = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
@@ -1100,15 +1100,40 @@ class TestLoadCheckpointKwargs:
             models={"student": (m1, spec), "teacher": (m2, spec)},
         )
 
-        result = load_checkpoint(tmp_path, model_name="teacher")
+        result = load_checkpoint(tmp_path, model_names={"teacher"})
         assert list(result.models.keys()) == ["teacher"]
         assert result.optimizers == {}
         assert result.schedulers == {}
         # Associations on the result remain informational (reflect on-disk state).
         assert isinstance(result.associations, dict)
 
-    def test_model_name_includes_associated_components(self, tmp_path: Path) -> None:
-        """``model_name`` also loads the associated optimizers/schedulers."""
+    def test_model_names_multi_select(self, tmp_path: Path) -> None:
+        """``model_names`` with multiple names loads all of them and their
+        associated optimizers/schedulers (union)."""
+        m1 = nn.Linear(4, 2)
+        m2 = nn.Linear(4, 2)
+        m3 = nn.Linear(4, 2)
+        spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
+
+        opt1 = torch.optim.Adam(m1.parameters(), lr=0.01)
+        opt2 = torch.optim.Adam(m2.parameters(), lr=0.02)
+        opt_spec_1 = create_model_spec(torch.optim.Adam, lr=0.01)
+        opt_spec_2 = create_model_spec(torch.optim.Adam, lr=0.02)
+
+        save_checkpoint(
+            tmp_path,
+            models={"a": (m1, spec), "b": (m2, spec), "c": (m3, spec)},
+            optimizers={"a_opt": (opt1, opt_spec_1), "b_opt": (opt2, opt_spec_2)},
+        )
+
+        result = load_checkpoint(tmp_path, model_names={"a", "b"})
+        assert set(result.models.keys()) == {"a", "b"}
+        assert "c" not in result.models
+        # Both associated optimizers come along, c's (nonexistent) does not.
+        assert set(result.optimizers.keys()) == {"a_opt", "b_opt"}
+
+    def test_model_names_includes_associated_components(self, tmp_path: Path) -> None:
+        """``model_names`` also loads the associated optimizers/schedulers."""
         m1 = nn.Linear(4, 2)
         m2 = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
@@ -1124,17 +1149,17 @@ class TestLoadCheckpointKwargs:
         )
 
         # Loading student pulls in its associated optimizer.
-        result = load_checkpoint(tmp_path, model_name="student")
+        result = load_checkpoint(tmp_path, model_names={"student"})
         assert list(result.models.keys()) == ["student"]
         assert "s_opt" in result.optimizers
 
         # Loading teacher picks up no optimizer (none associated).
-        result = load_checkpoint(tmp_path, model_name="teacher")
+        result = load_checkpoint(tmp_path, model_names={"teacher"})
         assert list(result.models.keys()) == ["teacher"]
         assert result.optimizers == {}
 
-    def test_model_name_unknown_raises_keyerror(self, tmp_path: Path) -> None:
-        """Unknown ``model_name`` raises :class:`KeyError` listing available names."""
+    def test_model_names_unknown_raises_keyerror(self, tmp_path: Path) -> None:
+        """Unknown names in ``model_names`` raise :class:`KeyError` listing them."""
         model = nn.Linear(4, 2)
         spec = create_model_spec(nn.Linear, in_features=4, out_features=2)
         save_checkpoint(
@@ -1143,12 +1168,14 @@ class TestLoadCheckpointKwargs:
         )
 
         with pytest.raises(KeyError, match="nonexistent"):
-            load_checkpoint(tmp_path, model_name="nonexistent")
+            load_checkpoint(tmp_path, model_names={"nonexistent"})
 
+        # Multiple unknowns — both should be reported.
+        with pytest.raises(KeyError) as excinfo:
+            load_checkpoint(tmp_path, model_names={"nonexistent", "ghost"})
+        msg = str(excinfo.value)
+        assert "nonexistent" in msg
+        assert "ghost" in msg
         # The error message must list the available model names.
-        try:
-            load_checkpoint(tmp_path, model_name="nonexistent")
-        except KeyError as e:
-            msg = str(e)
-            assert "student" in msg
-            assert "teacher" in msg
+        assert "student" in msg
+        assert "teacher" in msg

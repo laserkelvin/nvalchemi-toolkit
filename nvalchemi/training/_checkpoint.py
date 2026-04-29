@@ -81,7 +81,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -567,7 +567,7 @@ def load_checkpoint(
     root_folder: Path | str,
     checkpoint_index: int = -1,
     map_location: str | torch.device | None = None,
-    model_name: str | None = None,
+    model_names: Iterable[str] | None = None,
 ) -> CheckpointManifest:
     """Load a multi-component checkpoint written by :func:`save_checkpoint`.
 
@@ -590,20 +590,21 @@ def load_checkpoint(
         ``model.to(map_location)``. Optimizers and schedulers have their
         state placed by ``torch.load`` alone (they lack a standard
         ``.to()`` API).
-    model_name
-        If given, load only the model with this name together with the
-        optimizers and schedulers wired to it through
-        ``manifest.associations``. Other components on disk are skipped.
-        The returned manifest's ``associations`` still reflects the full
-        on-disk mapping, so callers can inspect what was not loaded.
+    model_names
+        If given, load only the models with these names together with the
+        optimizers and schedulers wired to them through
+        ``manifest.associations``. Accepts any iterable of strings
+        (typically a set). ``None`` (default) loads every component on
+        disk. The returned manifest's ``associations`` still reflects the
+        full on-disk mapping, so callers can inspect what was not loaded.
 
     Returns
     -------
     CheckpointManifest
         Manifest with hydrated ``models``, ``optimizers``, ``schedulers``
         dicts containing live ``(object, spec)`` tuples, plus
-        ``associations`` and ``checkpoint_index``. When ``model_name`` is
-        set, the hydrated dicts contain only the selected subset.
+        ``associations`` and ``checkpoint_index``. When ``model_names``
+        is set, the hydrated dicts contain only the selected subset.
 
     Raises
     ------
@@ -611,7 +612,7 @@ def load_checkpoint(
         If ``manifest.json`` is missing or a checkpoint ``.pt`` file
         does not exist.
     KeyError
-        If ``model_name`` is given but does not appear in
+        If any name in ``model_names`` does not appear in
         ``manifest.models``.
     RuntimeError
         If a model spec does not build an :class:`~torch.nn.Module`.
@@ -631,11 +632,10 @@ def load_checkpoint(
 
         result = load_checkpoint("runs/exp1", map_location="cpu")
 
-    Selecting a single model (e.g., just the teacher in a
-    knowledge-distillation checkpoint)::
+    Selecting a subset of models (e.g., teacher and student but not the
+    third auxiliary model)::
 
-        result = load_checkpoint("runs/kd", model_name="teacher")
-        teacher, spec = result.models["teacher"]
+        result = load_checkpoint("runs/kd", model_names={"teacher", "student"})
     """
     root = Path(root_folder)
     manifest = CheckpointManifest.read(root)
@@ -645,20 +645,31 @@ def load_checkpoint(
 
     associations = manifest.associations
 
-    # Resolve which components to load.  With ``model_name`` set, restrict
-    # to the named model plus its associated optimizers and schedulers.
-    if model_name is not None:
-        if model_name not in manifest.models:
-            available = sorted(manifest.models)
-            raise KeyError(f"Unknown model {model_name!r}. Available: {available!r}")
-        assoc = associations.get(model_name, {})
-        models_to_load = [model_name]
-        optimizers_to_load = list(assoc.get("optimizers", []))
-        schedulers_to_load = list(assoc.get("schedulers", []))
-    else:
-        models_to_load = list(manifest.models)
+    # determine what models to load
+    selected_models = set(manifest.models) if model_names is None else set(model_names)
+    unknown = selected_models - set(manifest.models)
+    if unknown:
+        raise KeyError(
+            f"Unknown model(s) {sorted(unknown)!r}. "
+            f"Available: {sorted(manifest.models)!r}"
+        )
+
+    # Build the load set as the union of each selected model's associations.
+    # When ``model_names is None`` this is equivalent to loading every
+    # component listed in the manifest.
+    models_to_load = [n for n in manifest.models if n in selected_models]
+    if model_names is None:
         optimizers_to_load = list(manifest.optimizers)
         schedulers_to_load = list(manifest.schedulers)
+    else:
+        wanted_optimizers: set[str] = set()
+        wanted_schedulers: set[str] = set()
+        for n in selected_models:
+            assoc = associations.get(n, {})
+            wanted_optimizers.update(assoc.get("optimizers", []))
+            wanted_schedulers.update(assoc.get("schedulers", []))
+        optimizers_to_load = [n for n in manifest.optimizers if n in wanted_optimizers]
+        schedulers_to_load = [n for n in manifest.schedulers if n in wanted_schedulers]
 
     # --- Models ---
     loaded_models: dict[str, tuple[nn.Module, BaseSpec]] = {}
@@ -669,14 +680,17 @@ def load_checkpoint(
             raise RuntimeError(
                 f"Model spec for {name!r} built {type(model)!r}, expected nn.Module."
             )
+        # Move the freshly-built (uninitialized) module to the target device
+        # before loading weights so that ``load_state_dict`` is a
+        # device-local copy and we avoid a double transfer.
+        if map_location is not None:
+            model.to(map_location)
         weights = torch.load(
             root / "models" / name / "checkpoints" / f"{checkpoint_index}.pt",
             weights_only=True,
             map_location=map_location,
         )
         model.load_state_dict(weights)
-        if map_location is not None:
-            model.to(map_location)
         loaded_models[name] = (model, spec)
 
     # --- Optimizers ---
