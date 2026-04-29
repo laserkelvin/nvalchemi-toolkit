@@ -27,7 +27,10 @@ from nvalchemi.training import (
     BaseLossFunction,
     ComposedLossFunction,
     ConstantWeight,
+    EnergyLoss,
+    ForceLoss,
     LinearWeight,
+    StressLoss,
     create_model_spec,
     create_model_spec_from_json,
 )
@@ -509,3 +512,201 @@ class TestComposedLossFunction:
         else:
             with pytest.raises(TypeError):
                 _ = self.loss_a * "hello"  # type: ignore[operator]
+
+
+class TestConcreteLosses:
+    """Tests for :class:`EnergyLoss`, :class:`ForceLoss`, :class:`StressLoss`."""
+
+    def setup_method(self) -> None:
+        # Mixed-size batch: 3 graphs with 3, 5, 2 atoms respectively.
+        self.nodes_per_graph = [3, 5, 2]
+        self.num_graphs = 3
+        self.num_nodes = sum(self.nodes_per_graph)
+        self.batch_idx = torch.tensor([0, 0, 0, 1, 1, 1, 1, 1, 2, 2], dtype=torch.int32)
+        self.num_nodes_per_graph = torch.tensor(self.nodes_per_graph, dtype=torch.long)
+
+    def _batch(self, **extra: torch.Tensor) -> SimpleNamespace:
+        """Build a ``SimpleNamespace`` batch carrying ``extra`` attributes."""
+        return SimpleNamespace(
+            batch_idx=self.batch_idx,
+            num_graphs=self.num_graphs,
+            num_nodes_per_graph=self.num_nodes_per_graph,
+            **extra,
+        )
+
+    def test_energy_loss_gradient_matches_analytic(
+        self, fixed_torch_seed: None
+    ) -> None:
+        target = torch.randn(self.num_graphs, 1)
+        pred = (target + torch.randn_like(target) * 0.1).detach().requires_grad_()
+        batch = self._batch(energy=target, predicted_energy=pred)
+        EnergyLoss()(batch).backward()
+        # MSE over (B, 1): d/d pred = 2*(pred - target) / B.
+        expected_grad = 2.0 * (pred.detach() - target) / self.num_graphs
+        assert pred.grad is not None
+        assert torch.allclose(pred.grad, expected_grad, atol=1e-6)
+
+    def test_energy_loss_per_atom_divides_both(self) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]])  # per-graph energies
+        pred = torch.tensor([[6.0], [15.0], [8.0]])
+        batch = self._batch(energy=target, predicted_energy=pred)
+        got = EnergyLoss(per_atom=True)(batch)
+        # Per-atom pred: [2, 3, 4]; target: [1, 2, 2]; diffs: [1, 1, 2].
+        # Mean of squared diffs over B=3: (1 + 1 + 4) / 3 = 2.0.
+        assert torch.allclose(got, torch.tensor(2.0), atol=1e-6)
+
+    def test_energy_loss_per_atom_accepts_cpu_counts_on_cuda(
+        self, gpu_device: str
+    ) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]], device=gpu_device)
+        pred = torch.tensor([[6.0], [15.0], [8.0]], device=gpu_device)
+        batch = self._batch(energy=target, predicted_energy=pred)
+
+        got = EnergyLoss(per_atom=True)(batch)
+
+        assert got.device.type == "cuda"
+        assert torch.allclose(got, torch.tensor(2.0, device=gpu_device), atol=1e-6)
+
+    def test_force_loss_matches_hand_computed(self) -> None:
+        # 2 graphs with 3 and 2 atoms for a small hand-traceable case.
+        batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
+        num_nodes_per_graph = torch.tensor([3, 2], dtype=torch.long)
+        target = torch.zeros(5, 3)
+        pred = torch.tensor(
+            [
+                [1.0, 0.0, 0.0],  # graph 0 atom 0: |f|^2 = 1
+                [0.0, 2.0, 0.0],  # graph 0 atom 1: |f|^2 = 4
+                [0.0, 0.0, 3.0],  # graph 0 atom 2: |f|^2 = 9
+                [1.0, 1.0, 1.0],  # graph 1 atom 0: |f|^2 = 3
+                [2.0, 0.0, 0.0],  # graph 1 atom 1: |f|^2 = 4
+            ]
+        )
+        batch = SimpleNamespace(
+            batch_idx=batch_idx,
+            num_graphs=2,
+            num_nodes_per_graph=num_nodes_per_graph,
+            forces=target,
+            predicted_forces=pred,
+        )
+
+        # normalize_by_atom_count=True: per-graph mean of |f|^2 then mean
+        # over graphs, then / 3 for per-component.
+        # graph 0 mean |f|^2 = (1+4+9)/3 = 14/3
+        # graph 1 mean |f|^2 = (3+4)/2 = 7/2
+        # mean over graphs = (14/3 + 7/2) / 2 = (28/6 + 21/6) / 2 = 49/12
+        # divided by 3 components = 49/36
+        got_norm = ForceLoss(normalize_by_atom_count=True)(batch)
+        assert torch.allclose(got_norm, torch.tensor(49.0 / 36.0), atol=1e-6)
+
+        # normalize=False: elementwise mean over the (V, 3) tensor.
+        # sum of squares = 1+4+9+3+4 = 21 across 5*3 = 15 entries -> 21/15 = 1.4.
+        got_global = ForceLoss(normalize_by_atom_count=False)(batch)
+        assert torch.allclose(got_global, torch.tensor(21.0 / 15.0), atol=1e-6)
+
+    def test_force_loss_gradient_flows(self) -> None:
+        pred = torch.randn(self.num_nodes, 3, requires_grad=True)
+        target = torch.randn(self.num_nodes, 3)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        ForceLoss()(batch).backward()
+        assert pred.grad is not None
+        assert pred.grad.shape == pred.shape
+
+    def test_stress_loss_matches_elementwise_mse(self, fixed_torch_seed: None) -> None:
+        pred = torch.randn(self.num_graphs, 3, 3, requires_grad=True)
+        target = torch.randn(self.num_graphs, 3, 3)
+        batch = self._batch(stress=target, predicted_stress=pred)
+        got = StressLoss()(batch)
+        # Frobenius MSE averaged over graphs == elementwise MSE.
+        expected = torch.nn.functional.mse_loss(pred, target)
+        assert torch.allclose(got, expected, atol=1e-6)
+        got.backward()
+        assert pred.grad is not None
+
+    # Missing-attribute errors: parametrize across losses.
+    @pytest.mark.parametrize(
+        ("loss_factory", "batch_kwargs", "match"),
+        [
+            pytest.param(
+                lambda: EnergyLoss(),
+                {"energy": torch.zeros(3, 1)},  # predicted_energy omitted
+                r"EnergyLoss expected batch\.predicted_energy.*missing",
+                id="energy_missing_prediction",
+            ),
+            pytest.param(
+                lambda: ForceLoss(),
+                {"predicted_forces": torch.zeros(10, 3)},  # forces omitted
+                r"ForceLoss expected batch\.forces.*missing",
+                id="force_missing_target",
+            ),
+            pytest.param(
+                lambda: StressLoss(),
+                {"stress": torch.zeros(3, 3, 3)},  # predicted_stress omitted
+                r"StressLoss expected batch\.predicted_stress.*missing",
+                id="stress_missing_prediction",
+            ),
+        ],
+    )
+    def test_missing_attribute_raises_actionable_error(
+        self,
+        loss_factory: Any,
+        batch_kwargs: dict[str, torch.Tensor],
+        match: str,
+    ) -> None:
+        loss = loss_factory()
+        batch = self._batch(**batch_kwargs)
+        with pytest.raises(ValueError, match=match):
+            loss(batch)
+
+    def test_attribute_present_but_none_raises_distinct_message(self) -> None:
+        # Explicit None is distinct from missing — error mentions that.
+        batch = self._batch(energy=torch.zeros(3, 1), predicted_energy=None)
+        with pytest.raises(
+            ValueError,
+            match=r"exists on batch and is None",
+        ):
+            EnergyLoss()(batch)
+
+    def test_composed_losses_backprop_to_all_inputs(self) -> None:
+        pred_energy = torch.randn(self.num_graphs, 1, requires_grad=True)
+        pred_forces = torch.randn(self.num_nodes, 3, requires_grad=True)
+        pred_stress = torch.randn(self.num_graphs, 3, 3, requires_grad=True)
+        batch = self._batch(
+            energy=torch.randn(self.num_graphs, 1),
+            forces=torch.randn(self.num_nodes, 3),
+            stress=torch.randn(self.num_graphs, 3, 3),
+            predicted_energy=pred_energy,
+            predicted_forces=pred_forces,
+            predicted_stress=pred_stress,
+        )
+        composed = 1.0 * EnergyLoss() + 10.0 * ForceLoss() + 0.1 * StressLoss()
+        assert isinstance(composed, ComposedLossFunction)
+        assert len(composed.components) == 3
+        composed(batch).backward()
+        # Each branch must contribute a non-zero gradient to its input.
+        for grad in (pred_energy.grad, pred_forces.grad, pred_stress.grad):
+            assert grad is not None
+            assert not torch.all(grad == 0)
+
+    def test_energy_loss_basespec_roundtrip(self) -> None:
+        # Only body fields round-trip; schedules are rebuilt elsewhere.
+        spec = create_model_spec(EnergyLoss, per_atom=True)
+        dumped = spec.model_dump_json()
+        rebuilt = create_model_spec_from_json(json.loads(dumped)).build()
+        assert isinstance(rebuilt, EnergyLoss)
+        assert rebuilt.per_atom is True
+        assert rebuilt.target_key == "energy"
+        assert rebuilt.prediction_key == "predicted_energy"
+
+        target = torch.tensor([[3.0], [10.0], [4.0]])
+        pred = torch.tensor([[6.0], [15.0], [8.0]])
+        batch = self._batch(energy=target, predicted_energy=pred)
+        assert torch.allclose(EnergyLoss(per_atom=True)(batch), rebuilt(batch))
+
+    def test_force_loss_reads_from_configured_prediction_key(self) -> None:
+        target = torch.zeros(self.num_nodes, 3)
+        renamed_pred = torch.ones(self.num_nodes, 3)
+        batch = self._batch(forces=target, my_model_forces=renamed_pred)
+        got = ForceLoss(prediction_key="my_model_forces")(batch)
+        # |pred - target|^2 sum over 3 components = 3 per atom.
+        # per-graph mean = 3; mean over graphs = 3; / 3 = 1.0.
+        assert torch.allclose(got, torch.tensor(1.0), atol=1e-6)

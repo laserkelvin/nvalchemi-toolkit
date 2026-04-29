@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Training framework for ALCHEMI — stages, specs, and checkpoint I/O."""
+"""Training framework for ALCHEMI — stages, specs, losses, and checkpoint I/O."""
 
 from __future__ import annotations
 
@@ -33,9 +33,12 @@ from nvalchemi.training.losses import (
     ComposedLossFunction,
     ConstantWeight,
     CosineWeight,
+    EnergyLoss,
+    ForceLoss,
     LinearWeight,
     LossWeightSchedule,
     PiecewiseWeight,
+    StressLoss,
 )
 
 __all__ = [
@@ -45,9 +48,12 @@ __all__ = [
     "ComposedLossFunction",
     "ConstantWeight",
     "CosineWeight",
+    "EnergyLoss",
+    "ForceLoss",
     "LinearWeight",
     "LossWeightSchedule",
     "PiecewiseWeight",
+    "StressLoss",
     "TrainingStage",
     "create_model_spec",
     "create_model_spec_from_json",

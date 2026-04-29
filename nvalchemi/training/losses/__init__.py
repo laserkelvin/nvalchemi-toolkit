@@ -43,15 +43,23 @@ from nvalchemi.training.losses.schedules import (
     LinearWeight,
     PiecewiseWeight,
 )
+from nvalchemi.training.losses.terms import (
+    EnergyLoss,
+    ForceLoss,
+    StressLoss,
+)
 
 __all__ = [
     "BaseLossFunction",
     "ComposedLossFunction",
     "ConstantWeight",
     "CosineWeight",
+    "EnergyLoss",
+    "ForceLoss",
     "LinearWeight",
     "LossWeightSchedule",
     "PiecewiseWeight",
+    "StressLoss",
     "frobenius_mse",
     "per_graph_mean",
     "per_graph_mse",
