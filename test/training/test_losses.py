@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -39,21 +39,14 @@ from nvalchemi.training.losses import (
 )
 
 
-@dataclass
-class _StubCtx:
-    """Minimal HookContext-compatible stub carrying only fields losses read."""
-
-    step_count: int = 0
-    epoch: int | None = 0
-    batch: Any = None
-
-
 class _ToyLoss(BaseLossFunction):
     """Concrete subclass returning a constant tensor — used for __call__ tests."""
 
     value: float = 1.0
 
-    def compute(self, ctx: Any) -> torch.Tensor:  # noqa: ARG002
+    def compute(
+        self, batch: Any, *, step: int = 0, epoch: int | None = None
+    ) -> torch.Tensor:  # noqa: ARG002
         return torch.tensor(self.value)
 
 
@@ -229,17 +222,17 @@ class TestBaseLossFunction:
 
     def test_concrete_subclass_calls_compute_and_weight(self) -> None:
         loss = _ToyLoss(value=4.0, weight=ConstantWeight(value=2.5))
-        ctx = _StubCtx(step_count=0, epoch=0)
-        out = loss(ctx)
+        out = loss(SimpleNamespace(), step=0, epoch=0)
         assert torch.allclose(out, torch.tensor(10.0))
 
     def test_compute_and_weight_with_linear_schedule(self) -> None:
         loss = _ToyLoss(
             value=1.0, weight=LinearWeight(start=0.0, end=1.0, num_steps=10)
         )
-        assert torch.allclose(loss(_StubCtx(step_count=0)), torch.tensor(0.0))
-        assert torch.allclose(loss(_StubCtx(step_count=10)), torch.tensor(1.0))
-        assert torch.allclose(loss(_StubCtx(step_count=5)), torch.tensor(0.5))
+        batch = SimpleNamespace()
+        assert torch.allclose(loss(batch, step=0), torch.tensor(0.0))
+        assert torch.allclose(loss(batch, step=10), torch.tensor(1.0))
+        assert torch.allclose(loss(batch, step=5), torch.tensor(0.5))
 
     def test_compute_and_weight_with_per_epoch_schedule(self) -> None:
         loss = _ToyLoss(
@@ -251,18 +244,19 @@ class TestBaseLossFunction:
                 per_epoch=True,
             ),
         )
+        batch = SimpleNamespace()
         assert torch.allclose(
-            loss(_StubCtx(step_count=10, epoch=0)),
+            loss(batch, step=10, epoch=0),
             torch.tensor(0.0),
         )
         assert torch.allclose(
-            loss(_StubCtx(step_count=0, epoch=10)),
+            loss(batch, step=0, epoch=10),
             torch.tensor(1.0),
         )
 
     def test_epoch_none_treated_as_zero(self) -> None:
         loss = _ToyLoss(value=2.0, weight=ConstantWeight(value=1.0))
-        out = loss(_StubCtx(step_count=3, epoch=None))
+        out = loss(SimpleNamespace(), step=3, epoch=None)
         assert torch.allclose(out, torch.tensor(2.0))
 
     def test_baseloss_frozen(self) -> None:
@@ -274,7 +268,7 @@ class TestBaseLossFunction:
         loss = _ToyLoss(value=3.0)
         assert isinstance(loss.weight, ConstantWeight)
         assert loss.weight.value == 1.0
-        assert torch.allclose(loss(_StubCtx(step_count=0)), torch.tensor(3.0))
+        assert torch.allclose(loss(SimpleNamespace(), step=0), torch.tensor(3.0))
 
     def test_baseloss_basespec_roundtrip_without_weight(self) -> None:
         # ``BaseLossFunction.weight`` is typed as the
@@ -294,7 +288,7 @@ class TestBaseLossFunction:
         # Default weight is identity, so __call__ returns compute() as-is.
         assert isinstance(built.weight, ConstantWeight)
         assert built.weight.value == 1.0
-        out = built(_StubCtx(step_count=2, epoch=0))
+        out = built(SimpleNamespace(), step=2, epoch=0)
         assert torch.allclose(out, torch.tensor(7.0))
 
     def test_per_epoch_schedule_with_none_epoch_raises(self) -> None:
@@ -303,23 +297,33 @@ class TestBaseLossFunction:
             weight=LinearWeight(start=0.0, end=1.0, num_steps=10, per_epoch=True),
         )
         with pytest.raises(ValueError, match="per_epoch=True"):
-            loss(_StubCtx(step_count=3, epoch=None))
+            loss(SimpleNamespace(), step=3, epoch=None)
 
+    def test_non_numeric_schedule_return_raises_actionable_typeerror(self) -> None:
+        class _BadReturnSchedule:
+            per_epoch: bool = False
 
-class _PositionsBatch:
-    """Minimal batch stub exposing just ``positions`` for gradient tests."""
+            def __call__(self, step: int, epoch: int) -> str:  # noqa: ARG002
+                return "oops"
 
-    def __init__(self, positions: torch.Tensor) -> None:
-        self.positions = positions
+        loss = _ToyLoss(value=1.0, weight=_BadReturnSchedule())
+        with pytest.raises(
+            TypeError,
+            match=r"_BadReturnSchedule returned str; "
+            r"LossWeightSchedule\.__call__ must return float",
+        ):
+            loss(SimpleNamespace(), step=0, epoch=0)
 
 
 class _PositionsLoss(BaseLossFunction):
-    """Toy loss whose compute() sums ``ctx.batch.positions`` (gradient-bearing)."""
+    """Toy loss whose compute() sums ``batch.positions`` (gradient-bearing)."""
 
     scale: float = 1.0
 
-    def compute(self, ctx: Any) -> torch.Tensor:
-        return self.scale * ctx.batch.positions.sum()
+    def compute(
+        self, batch: Any, *, step: int = 0, epoch: int | None = None
+    ) -> torch.Tensor:  # noqa: ARG002
+        return self.scale * batch.positions.sum()
 
 
 class TestComposedLossFunction:
@@ -329,7 +333,7 @@ class TestComposedLossFunction:
         self.loss_a = _ToyLoss(value=1.0, weight=ConstantWeight(value=1.0))
         self.loss_b = _ToyLoss(value=1.0, weight=ConstantWeight(value=1.0))
         self.loss_c = _ToyLoss(value=1.0, weight=ConstantWeight(value=1.0))
-        self.ctx = _StubCtx(step_count=0, epoch=0)
+        self.batch = SimpleNamespace()
 
     def test_add_two_losses(self) -> None:
         composed = self.loss_a + self.loss_b
@@ -379,7 +383,7 @@ class TestComposedLossFunction:
 
     def test_weighted_sum_numerically_correct(self) -> None:
         composed = 2.0 * self.loss_a + 3.0 * self.loss_b
-        out = composed(self.ctx)
+        out = composed(self.batch, step=0, epoch=0)
         assert torch.allclose(out, torch.tensor(5.0), atol=1e-6)
 
     def test_component_weights_length_mismatch_raises(self) -> None:
@@ -400,11 +404,11 @@ class TestComposedLossFunction:
 
     def test_gradient_flows_through_all_components(self) -> None:
         positions = torch.randn(4, 3, requires_grad=True)
-        ctx = _StubCtx(step_count=0, epoch=0, batch=_PositionsBatch(positions))
+        batch = SimpleNamespace(positions=positions)
         loss_a = _PositionsLoss(scale=2.0, weight=ConstantWeight(value=1.0))
         loss_b = _PositionsLoss(scale=3.0, weight=ConstantWeight(value=1.0))
         composed = loss_a + loss_b
-        out = composed(ctx)
+        out = composed(batch, step=0, epoch=0)
         out.backward()
         # d/dx sum(x) = 1 per element; composed multiplier = 2 + 3 = 5.
         expected_grad = torch.full_like(positions, 5.0)
@@ -437,7 +441,7 @@ class TestComposedLossFunction:
         # Outer schedule is identity after round-trip; re-scale manually
         # to emulate what ``TrainingStrategy`` will do.
         scaled = 0.5 * rebuilt
-        out = scaled(_StubCtx(step_count=0, epoch=0))
+        out = scaled(SimpleNamespace(), step=0, epoch=0)
         # 0.5 * (1*1.0 + 2*2.0) = 2.5
         assert torch.allclose(out, torch.tensor(2.5), atol=1e-6)
 
@@ -449,7 +453,7 @@ class TestComposedLossFunction:
             weights=(1.0, 1.0),
             weight=ConstantWeight(value=0.5),
         )
-        out = composed(self.ctx)
+        out = composed(self.batch, step=0, epoch=0)
         # Correct: 0.5 * (1.0*1.0 + 1.0*1.0) = 1.0
         # Double-weight bug would yield 0.5 * 0.5 * 2.0 = 0.5.
         assert torch.allclose(out, torch.tensor(1.0), atol=1e-6)

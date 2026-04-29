@@ -45,7 +45,7 @@ from nvalchemi.training.losses.base import LossWeightSchedule
 from nvalchemi.training.losses.schedules import ConstantWeight
 
 if TYPE_CHECKING:
-    from nvalchemi.hooks._context import HookContext
+    from nvalchemi.data.batch import Batch
 
 
 class BaseLossFunction(BaseModel, abc.ABC):
@@ -53,12 +53,11 @@ class BaseLossFunction(BaseModel, abc.ABC):
 
     Subclasses override :meth:`compute`, which produces the raw
     (unweighted) loss tensor from a
-    :class:`~nvalchemi.hooks._context.HookContext`. The concrete
-    :meth:`__call__` returns
-    ``weight(ctx.step_count, ctx.epoch or 0) * compute(ctx)`` so
-    subclasses need not handle weight scheduling directly. The schedule
-    receives both counters; its ``per_epoch`` flag determines whether it
-    advances by global step or by epoch.
+    :class:`~nvalchemi.data.batch.Batch`. The concrete :meth:`__call__`
+    returns ``weight(step, epoch or 0) * compute(batch, step=step,
+    epoch=epoch)`` so subclasses need not handle weight scheduling
+    directly. The schedule receives both counters; its ``per_epoch``
+    flag determines whether it advances by global step or by epoch.
 
     ``weight`` is typed as the
     :class:`~nvalchemi.training.losses.base.LossWeightSchedule` protocol,
@@ -86,23 +85,33 @@ class BaseLossFunction(BaseModel, abc.ABC):
         Field(
             default_factory=lambda: ConstantWeight(value=1.0),
             description=(
-                "Per-step or per-epoch scalar schedule multiplied into compute(ctx)."
+                "Per-step or per-epoch scalar schedule multiplied into "
+                "compute(batch, step=step, epoch=epoch)."
             ),
         ),
     ]
 
     @abc.abstractmethod
-    def compute(self, ctx: HookContext) -> torch.Tensor:
-        """Compute the unweighted loss tensor for ``ctx``.
+    def compute(
+        self, batch: Batch, *, step: int = 0, epoch: int | None = None
+    ) -> torch.Tensor:
+        """Compute the unweighted loss tensor for ``batch``.
 
-        Concrete subclasses read predictions and targets from
-        ``ctx.batch`` and must preserve autograd.
+        Concrete subclasses read predictions and targets from ``batch``
+        and must preserve autograd. ``step`` and ``epoch`` are available
+        for subclasses that need them but are otherwise unused; the
+        inherited :meth:`__call__` is responsible for multiplying by the
+        scheduled weight.
 
         Parameters
         ----------
-        ctx
-            Hook context carrying ``batch``, ``step_count``, ``epoch``,
-            and other training state.
+        batch
+            Batched graph state carrying predictions and targets.
+        step
+            Current global training step (keyword-only).
+        epoch
+            Current training epoch, or ``None`` if unused
+            (keyword-only).
 
         Returns
         -------
@@ -110,48 +119,37 @@ class BaseLossFunction(BaseModel, abc.ABC):
             Unweighted loss value.
         """
 
-    def __call__(self, ctx: HookContext) -> torch.Tensor:
-        """Evaluate :meth:`compute` and multiply by the scheduled weight.
+    def __call__(
+        self, batch: Batch, *, step: int = 0, epoch: int | None = None
+    ) -> torch.Tensor:
+        """Multiply :meth:`compute` by the scheduled weight.
 
-        For step-based schedules (``weight.per_epoch is False``), a
-        ``None`` ``ctx.epoch`` is coerced to ``0``. For epoch-based
-        schedules (``weight.per_epoch is True``), ``ctx.epoch`` must be
-        provided; a ``None`` value raises :class:`ValueError`.
-
-        Parameters
-        ----------
-        ctx
-            Hook context with ``step_count`` and optional ``epoch``.
-
-        Returns
-        -------
-        torch.Tensor
-            ``weight(step, epoch) * compute(ctx)``.
-
-        Raises
-        ------
-        ValueError
-            If ``self.weight.per_epoch is True`` and ``ctx.epoch is None``.
-        TypeError
-            If ``self.weight`` does not satisfy the
-            :class:`LossWeightSchedule` contract (must accept
-            ``(step: int, epoch: int)`` and return a ``float``).
+        Raises ``ValueError`` when ``self.weight.per_epoch is True`` and
+        ``epoch is None``; raises ``TypeError`` when ``self.weight``
+        violates the :class:`LossWeightSchedule` contract (its
+        ``__call__`` must accept ``(step, epoch)`` and return a
+        numeric scalar).
         """
-        if self.weight.per_epoch and ctx.epoch is None:
+        if self.weight.per_epoch and epoch is None:
             raise ValueError(
-                "Loss weight schedule is configured with per_epoch=True, "
-                "but ctx.epoch is None. Populate ctx.epoch in the training "
-                "loop or set per_epoch=False on the schedule."
+                "epoch must be provided when the loss weight schedule has "
+                "per_epoch=True. Pass epoch=<current_epoch> to the loss, "
+                "or set per_epoch=False on the schedule."
             )
         try:
-            w = self.weight(ctx.step_count, ctx.epoch or 0)
+            w = self.weight(step, epoch or 0)
         except TypeError as exc:
             raise TypeError(
                 f"{type(self.weight).__name__} does not satisfy the "
                 "LossWeightSchedule contract: __call__ must accept "
                 "(step: int, epoch: int) and return a float."
             ) from exc
-        return w * self.compute(ctx)
+        if not isinstance(w, (int, float)):
+            raise TypeError(
+                f"{type(self.weight).__name__} returned {type(w).__name__}; "
+                "LossWeightSchedule.__call__ must return float."
+            )
+        return w * self.compute(batch, step=step, epoch=epoch)
 
     # -----------------------------------------------------------------
     # Arithmetic: build / flatten ComposedLossFunction. See the
@@ -219,14 +217,15 @@ class ComposedLossFunction(BaseLossFunction):
 
     .. math::
 
-        L(\\mathrm{ctx}) = w_{\\mathrm{outer}}(\\mathrm{step}, \\mathrm{epoch})
-                          \\cdot \\sum_i c_i \\cdot L_i(\\mathrm{ctx})
+        L(\\mathrm{batch}) = w_{\\mathrm{outer}}(\\mathrm{step},
+                             \\mathrm{epoch}) \\cdot \\sum_i c_i \\cdot
+                             L_i(\\mathrm{batch})
 
     where :math:`w_{\\mathrm{outer}}` is the inherited ``weight``
     schedule, :math:`c_i` is ``weights[i]``, and :math:`L_i` is
-    ``components[i](ctx)``. Each :math:`L_i` call already incorporates
-    the component's own ``weight`` schedule, so the outer schedule is
-    applied exactly once.
+    ``components[i](batch, step=step, epoch=epoch)``. Each :math:`L_i`
+    call already incorporates the component's own ``weight`` schedule,
+    so the outer schedule is applied exactly once.
 
     See the module-level docstring for composition semantics governing
     :meth:`BaseLossFunction.__add__` and :meth:`BaseLossFunction.__mul__`.
@@ -263,26 +262,11 @@ class ComposedLossFunction(BaseLossFunction):
             )
         return self
 
-    def compute(self, ctx: HookContext) -> torch.Tensor:
-        """Return the weighted sum of component outputs.
-
-        Accumulates into a single running tensor rather than building
-        an intermediate list, so only one autograd node per term is
-        added and no stack/concat allocation is needed.
-
-        Parameters
-        ----------
-        ctx
-            Hook context forwarded to each component.
-
-        Returns
-        -------
-        torch.Tensor
-            Scalar loss ``sum(weights[i] * components[i](ctx))``. Does
-            NOT multiply by the outer ``weight`` schedule — that is
-            applied once by the inherited :meth:`__call__`.
-        """
-        total = self.weights[0] * self.components[0](ctx)
+    def compute(
+        self, batch: Batch, *, step: int = 0, epoch: int | None = None
+    ) -> torch.Tensor:
+        """Forward ``(batch, step, epoch)`` unchanged to each component and return the weighted sum (accumulated in-place to avoid a list allocation)."""
+        total = self.weights[0] * self.components[0](batch, step=step, epoch=epoch)
         for w, comp in zip(self.weights[1:], self.components[1:], strict=True):
-            total = total + w * comp(ctx)
+            total = total + w * comp(batch, step=step, epoch=epoch)
         return total
