@@ -12,10 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Training lifecycle stage definitions."""
+"""Training framework for ALCHEMI — stages, specs, and checkpoint I/O."""
 
 from __future__ import annotations
 
+from nvalchemi.training._checkpoint import (
+    CheckpointManifest,
+    load_checkpoint,
+    save_checkpoint,
+)
+from nvalchemi.training._spec import (
+    BaseSpec,
+    create_model_spec,
+    create_model_spec_from_json,
+    register_type_serializer,
+)
 from nvalchemi.training._stages import TrainingStage
 
-__all__ = ["TrainingStage"]
+__all__ = [
+    "BaseSpec",
+    "CheckpointManifest",
+    "TrainingStage",
+    "create_model_spec",
+    "create_model_spec_from_json",
+    "load_checkpoint",
+    "register_type_serializer",
+    "save_checkpoint",
+]
