@@ -126,7 +126,11 @@ class TestReductions:
             )
 
     def test_per_graph_mse_num_graphs_too_small(self) -> None:
-        with pytest.raises(ValueError, match="but num_graphs=2"):
+        # When ``num_graphs`` is supplied, reductions trust it without
+        # scanning ``batch_idx`` (to avoid GPU syncs in the training hot
+        # path). An overflowing index is caught downstream by
+        # ``scatter_add_`` itself, which raises ``RuntimeError``.
+        with pytest.raises(RuntimeError, match="out of bounds"):
             per_graph_mse(
                 torch.zeros(6),
                 torch.zeros(6),

@@ -16,17 +16,38 @@
 
 All helpers operate on flat per-node tensors with a ``batch_idx`` mapping
 each node to its graph and reduce via :func:`torch.Tensor.scatter_add_`
-into a pre-allocated output tensor: no Python-level iteration over graphs,
-and autograd flows through the scatter.
+into a pre-allocated output tensor: no Python-level iteration over
+graphs, and autograd flows through the scatter. Per-graph denominators
+are counted with :func:`torch.bincount` (single kernel, no auxiliary
+allocation).
 
-Per-graph denominators (node counts) are derived from ``batch_idx``. Callers
-only need to pass ``num_graphs`` when ``batch_idx`` cannot encode the full
-batch shape, such as trailing empty graphs or an entirely empty batch.
+Common parameters
+-----------------
+
+All public reductions share the following signature:
+
+- ``values`` (or ``pred`` / ``target``): per-node tensor whose leading
+  dim indexes nodes; trailing dims are reduced or preserved depending on
+  the specific helper.
+- ``batch_idx``: 1-D ``BatchIndices`` mapping each node to its graph.
+  For the GPU hot path, callers should ensure ``batch_idx`` is already a
+  CUDA ``long`` tensor; the defensive ``.to(device=..., dtype=long)``
+  cast below is a no-op for well-formed inputs.
+- ``num_graphs`` (optional): when supplied, the helpers trust it and
+  perform no validation scan of ``batch_idx``. This is the
+  recommended hot-path calling convention because it avoids any
+  GPU→CPU synchronization. When omitted, ``num_graphs`` is inferred
+  as ``batch_idx.max().item() + 1``, which forces a device sync and
+  should be avoided inside per-step training loops. Empty
+  ``batch_idx`` always requires ``num_graphs`` to be supplied.
+
+All public reductions raise :class:`ValueError` on shape mismatch, on
+non-positive ``num_graphs``, or on inability to infer ``num_graphs``.
 
 Note
----------------
-Currently the methods use `torch.scatter_*` - the goal is to use
-`nvalchemiops` segment operations once they support backwards.
+----
+Currently the methods use ``torch.scatter_*``; the goal is to use
+``nvalchemiops`` segment operations once they support backwards.
 """
 
 from __future__ import annotations
@@ -49,28 +70,28 @@ def _resolve_batch_indices(
     num_graphs: int | None,
     device: torch.device,
 ) -> tuple[BatchIndices, _NumGraphs]:
-    """Return ``batch_idx`` on ``device`` and the graph count it implies."""
+    """Return ``batch_idx`` on ``device`` and the graph count it implies.
+
+    When ``num_graphs`` is supplied, trust it and skip any scan of
+    ``batch_idx`` — this is the hot path. When omitted, infer via
+    ``batch_idx.max()``; under ``torch.compile`` the max stays a tensor,
+    otherwise it is materialized on the host (forcing a device sync).
+    """
     batch_idx = batch_idx.to(device=device, dtype=torch.long)
     if batch_idx.ndim != 1:
         raise ValueError(f"batch_idx must be 1D, got shape {tuple(batch_idx.shape)}")
-    if num_graphs is not None and num_graphs <= 0:
-        raise ValueError(f"num_graphs must be positive, got {num_graphs}")
-    if batch_idx.numel() == 0:
-        if num_graphs is None:
-            raise ValueError("Cannot infer num_graphs from empty batch_idx")
+    if num_graphs is not None:
+        if num_graphs <= 0:
+            raise ValueError(f"num_graphs must be positive, got {num_graphs}")
         return batch_idx, num_graphs
-    if torch.compiler.is_compiling():
-        return batch_idx, batch_idx.max() + 1 if num_graphs is None else num_graphs
-    min_idx = int(batch_idx.min().item())
-    if min_idx < 0:
-        raise ValueError(f"batch_idx values must be non-negative, got {min_idx}")
-    inferred_num_graphs = int(batch_idx.max().item()) + 1
-    if num_graphs is not None and inferred_num_graphs > num_graphs:
+    if batch_idx.numel() == 0:
         raise ValueError(
-            f"batch_idx contains graph index {inferred_num_graphs - 1}, "
-            f"but num_graphs={num_graphs}"
+            "Cannot infer num_graphs from empty batch_idx; "
+            "pass num_graphs explicitly when reducing an empty batch."
         )
-    return batch_idx, inferred_num_graphs if num_graphs is None else num_graphs
+    if torch.compiler.is_compiling():
+        return batch_idx, batch_idx.max() + 1
+    return batch_idx, int(batch_idx.max().item()) + 1
 
 
 def _check_leading_dim(
@@ -85,6 +106,18 @@ def _check_leading_dim(
             f"{name} leading dim ({values.shape[0]}) must match "
             f"batch_idx length ({batch_idx.shape[0]})"
         )
+
+
+def _prep_reduction(
+    values: torch.Tensor,
+    batch_idx: BatchIndices,
+    num_graphs: int | None,
+    *,
+    name: str,
+) -> tuple[BatchIndices, _NumGraphs]:
+    """Validate leading dim and resolve ``(batch_idx, num_graphs)`` on values' device."""
+    _check_leading_dim(values, batch_idx, name=name)
+    return _resolve_batch_indices(batch_idx, num_graphs, values.device)
 
 
 def _per_graph_sum_resolved(
@@ -107,9 +140,10 @@ def _num_nodes_per_graph(
     dtype: torch.dtype,
     device: torch.device,
 ) -> torch.Tensor:
-    """Count nodes per graph from ``batch_idx``."""
-    ones = torch.ones(batch_idx.shape[0], dtype=dtype, device=device)
-    return _per_graph_sum_resolved(ones, batch_idx, num_graphs)
+    """Count nodes per graph via :func:`torch.bincount` (single kernel, no scratch)."""
+    minlength = int(num_graphs) if isinstance(num_graphs, int) else num_graphs
+    counts = torch.bincount(batch_idx, minlength=minlength)
+    return counts.to(device=device, dtype=dtype)
 
 
 def per_graph_sum(
@@ -119,37 +153,17 @@ def per_graph_sum(
 ) -> Float[torch.Tensor, "B ..."]:  # noqa: F722
     """Sum per-node values into per-graph values via ``scatter_add_``.
 
-    Trailing dims of ``values`` are preserved in the output.
-
-    Parameters
-    ----------
-    values
-        Per-node values; leading dim indexes nodes.
-    batch_idx
-        Graph index for each node.
-    num_graphs
-        Optional positive number of graphs. When omitted, inferred as
-        ``batch_idx.max() + 1``. Pass explicitly to preserve trailing empty
-        graphs or to reduce an empty ``batch_idx``.
+    Trailing dims of ``values`` are preserved in the output. See the
+    module docstring for ``batch_idx`` / ``num_graphs`` semantics and
+    error conditions.
 
     Returns
     -------
     Float[torch.Tensor, "B ..."]
         Per-graph sums of shape ``(num_graphs, *values.shape[1:])``.
-
-    Raises
-    ------
-    ValueError
-        If ``values`` and ``batch_idx`` disagree on their leading dim, if
-        ``num_graphs`` is invalid, or if ``num_graphs`` cannot be inferred.
     """
-    _check_leading_dim(values, batch_idx, name="values")
-    batch_idx, resolved_num_graphs = _resolve_batch_indices(
-        batch_idx,
-        num_graphs,
-        values.device,
-    )
-    return _per_graph_sum_resolved(values, batch_idx, resolved_num_graphs)
+    batch_idx, resolved = _prep_reduction(values, batch_idx, num_graphs, name="values")
+    return _per_graph_sum_resolved(values, batch_idx, resolved)
 
 
 def per_graph_mean(
@@ -159,41 +173,20 @@ def per_graph_mean(
 ) -> Float[torch.Tensor, "B ..."]:  # noqa: F722
     """Mean of per-node values across each graph.
 
-    Empty graphs (zero nodes) are safe: their sum is zero and their count
-    is clamped to ``1`` before the division, so they yield zero.
-
-    Parameters
-    ----------
-    values
-        Per-node values.
-    batch_idx
-        Graph index for each node.
-    num_graphs
-        Optional positive number of graphs. When omitted, inferred as
-        ``batch_idx.max() + 1``. Pass explicitly to preserve trailing empty
-        graphs or to reduce an empty ``batch_idx``.
+    Empty graphs (zero nodes) are safe: their sum is zero and their
+    count is clamped to ``1`` before the division, so they yield zero.
+    See the module docstring for shared parameter / error semantics.
 
     Returns
     -------
     Float[torch.Tensor, "B ..."]
         Per-graph means.
-
-    Raises
-    ------
-    ValueError
-        If ``values`` and ``batch_idx`` disagree on their leading dim, if
-        ``num_graphs`` is invalid, or if ``num_graphs`` cannot be inferred.
     """
-    _check_leading_dim(values, batch_idx, name="values")
-    batch_idx, resolved_num_graphs = _resolve_batch_indices(
-        batch_idx,
-        num_graphs,
-        values.device,
-    )
-    totals = _per_graph_sum_resolved(values, batch_idx, resolved_num_graphs)
+    batch_idx, resolved = _prep_reduction(values, batch_idx, num_graphs, name="values")
+    totals = _per_graph_sum_resolved(values, batch_idx, resolved)
     counts = _num_nodes_per_graph(
         batch_idx,
-        resolved_num_graphs,
+        resolved,
         dtype=totals.dtype,
         device=totals.device,
     ).clamp_min(1.0)
@@ -212,54 +205,33 @@ def per_graph_mse(
 
     Computes ``sum squared error per graph / element count per graph``,
     where the denominator is ``nodes_in_graph * prod(trailing_dims)``.
-
-    Parameters
-    ----------
-    pred, target
-        Same-shape per-node tensors.
-    batch_idx
-        Graph index for each node.
-    num_graphs
-        Optional positive number of graphs. When omitted, inferred as
-        ``batch_idx.max() + 1``. Pass explicitly to preserve trailing empty
-        graphs or to reduce an empty ``batch_idx``.
+    See the module docstring for shared parameter / error semantics;
+    additionally raises :class:`ValueError` if ``pred.shape != target.shape``.
 
     Returns
     -------
     Float[torch.Tensor, "B"]
         Per-graph MSE values.
-
-    Raises
-    ------
-    ValueError
-        If ``pred.shape != target.shape``, if ``pred`` and ``batch_idx``
-        disagree on their leading dim, if ``num_graphs`` is invalid, or
-        if ``num_graphs`` cannot be inferred.
     """
     if pred.shape != target.shape:
         raise ValueError(
             f"pred shape {tuple(pred.shape)} must equal target shape "
             f"{tuple(target.shape)}"
         )
-    _check_leading_dim(pred, batch_idx, name="pred")
-    batch_idx, resolved_num_graphs = _resolve_batch_indices(
-        batch_idx,
-        num_graphs,
-        pred.device,
-    )
+    batch_idx, resolved = _prep_reduction(pred, batch_idx, num_graphs, name="pred")
     squared_error = (pred - target).pow(2)
     # Collapse trailing dims to one scalar per node, then scatter.
     squared_error_per_node = (
         squared_error.flatten(1).sum(dim=1) if squared_error.ndim > 1 else squared_error
     )
     squared_error_per_graph = _per_graph_sum_resolved(
-        squared_error_per_node, batch_idx, resolved_num_graphs
+        squared_error_per_node, batch_idx, resolved
     )
     trailing = math.prod(pred.shape[1:]) if pred.ndim > 1 else 1
     num_entries_per_graph = (
         _num_nodes_per_graph(
             batch_idx,
-            resolved_num_graphs,
+            resolved,
             dtype=squared_error_per_graph.dtype,
             device=squared_error_per_graph.device,
         )
