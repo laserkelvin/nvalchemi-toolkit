@@ -340,7 +340,10 @@ class BaseSpec(BaseModel):
         empty collections are passed through unchanged. Nested
         collections (e.g. ``list[list[BaseSpec]]``) are not traversed;
         wrap them in a serializable spec object or flatten the
-        collection.
+        collection. A JSON round-trip preserves the order of items in
+        such sequences but not the ``list`` vs. ``tuple`` container
+        type (tuple fields come back as lists); the annotated container
+        type is rebuilt here when each item is ``.build()``-ed.
 
         Parameters
         ----------
@@ -380,7 +383,7 @@ class BaseSpec(BaseModel):
                 wants_spec = isinstance(ann, type) and issubclass(ann, BaseSpec)
                 resolved[name] = v if wants_spec else v.build()
             elif _is_basespec_sequence(v):
-                resolved[name] = type(v)(item.build() for item in v)
+                resolved[name] = _build_sequence_of_specs(v)
             else:
                 resolved[name] = v
         resolved.update(extra_kwargs)
@@ -430,6 +433,25 @@ def _is_basespec_sequence(value: Any) -> bool:
         and len(value) > 0
         and all(isinstance(v, BaseSpec) for v in value)
     )
+
+
+def _is_spec_dict(value: Any) -> bool:
+    """Return whether value is a JSON-dict representation of a BaseSpec."""
+    return isinstance(value, dict) and "cls_path" in value
+
+
+def _is_spec_dict_sequence(value: Any) -> bool:
+    """Return whether value is a non-empty list of spec-dicts (as in JSON)."""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(_is_spec_dict(v) for v in value)
+    )
+
+
+def _build_sequence_of_specs(value: Any) -> Any:
+    """Rebuild each :class:`BaseSpec` item in a list/tuple, preserving container type."""
+    return type(value)(item.build() for item in value)
 
 
 def _resolve_annotation(name: str, value: Any, sig: inspect.Signature) -> Any:
@@ -496,7 +518,10 @@ def create_model_spec(cls_: type, **kwargs: Any) -> BaseSpec:
     rebuilds each item. Mixed or empty collections are stored as-is and
     are not specially rehydrated. Nested collections (e.g.
     ``list[list[BaseSpec]]``) are not traversed; wrap them in a
-    serializable spec object or flatten the collection.
+    serializable spec object or flatten the collection. A JSON round-trip
+    preserves the order of items in tuple-valued fields but not the
+    container type (tuple fields come back as lists); the annotated
+    container type is rebuilt by :meth:`BaseSpec.build`.
 
     Parameters
     ----------
@@ -625,13 +650,9 @@ def create_model_spec_from_json(spec: dict[str, Any]) -> BaseSpec:
 
     kwargs: dict[str, Any] = {}
     for name, value in schema.items():
-        if isinstance(value, dict) and "cls_path" in value:
+        if _is_spec_dict(value):
             kwargs[name] = create_model_spec_from_json(value)
-        elif (
-            isinstance(value, list)
-            and value
-            and all(isinstance(v, dict) and "cls_path" in v for v in value)
-        ):
+        elif _is_spec_dict_sequence(value):
             kwargs[name] = [create_model_spec_from_json(v) for v in value]
         else:
             # Eagerly deserialize strings/dicts that match a registered

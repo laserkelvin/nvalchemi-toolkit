@@ -16,8 +16,12 @@
 
 Loss terms are Pydantic-serializable :class:`BaseLossFunction` instances
 combinable via arithmetic (``2.0 * energy_loss + 10.0 * force_loss``).
-:class:`ComposedLossFunction` represents the resulting weighted sum and
-round-trips through :class:`~nvalchemi.training.BaseSpec`.
+:class:`ComposedLossFunction` represents the resulting weighted sum. The
+structural fields of a composition (``components``, static ``weights``)
+round-trip through :class:`~nvalchemi.training.BaseSpec`; schedule
+instances attached to the ``weight`` field are not serialized and are
+reconstructed by ``TrainingStrategy`` from their ``(instance, spec)``
+pair, mirroring the pattern used for models and optimizers.
 """
 
 from __future__ import annotations
@@ -38,7 +42,6 @@ from nvalchemi.training.losses.schedules import (
     CosineWeight,
     LinearWeight,
     PiecewiseWeight,
-    WeightScheduleField,
 )
 
 __all__ = [
@@ -49,7 +52,6 @@ __all__ = [
     "LinearWeight",
     "LossWeightSchedule",
     "PiecewiseWeight",
-    "WeightScheduleField",
     "frobenius_mse",
     "per_graph_mean",
     "per_graph_mse",

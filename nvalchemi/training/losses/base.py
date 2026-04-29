@@ -12,7 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Base protocols and models for loss-function schedules."""
+"""Base protocols and models for loss-function schedules.
+
+This module also re-exports :class:`BaseLossFunction` and
+:class:`ComposedLossFunction` from :mod:`.composition` for discoverability:
+subclass authors can do ``from nvalchemi.training.losses.base import
+BaseLossFunction`` without tracking the internal module layout. The
+canonical home of the two classes remains :mod:`.composition`.
+"""
 
 from __future__ import annotations
 
@@ -25,14 +32,12 @@ from pydantic import BaseModel, Field
 class LossWeightSchedule(Protocol):
     """Runtime-checkable protocol for loss-weight schedules.
 
-    Callable objects with signature ``(step: int, epoch: int) -> float``
-    and a ``per_epoch`` attribute satisfy this protocol at runtime. For
-    serialization-aware storage on
-    :class:`~nvalchemi.training.losses.BaseLossFunction.weight`, however,
-    only the concrete classes in
-    :data:`~nvalchemi.training.losses.WeightScheduleField` are accepted;
-    arbitrary callables cannot round-trip through
-    :class:`~nvalchemi.training.BaseSpec`.
+    Any object callable with signature ``(step: int, epoch: int) -> float``
+    and exposing a ``per_epoch`` attribute satisfies this protocol, and is
+    therefore accepted by
+    :attr:`~nvalchemi.training.losses.BaseLossFunction.weight`. Concrete
+    Pydantic schedules live in
+    :mod:`~nvalchemi.training.losses.schedules`.
 
     Attributes
     ----------
@@ -69,9 +74,6 @@ class _BaseWeightSchedule(BaseModel):
 
     Attributes
     ----------
-    schedule_type
-        Discriminator field used for loss-schedule deserialization. Concrete
-        subclasses set this to a fixed :class:`typing.Literal` value.
     per_epoch
         If ``False``, schedule windows advance by global step. If
         ``True``, they advance by epoch.
@@ -79,16 +81,6 @@ class _BaseWeightSchedule(BaseModel):
 
     model_config = {"frozen": True}
 
-    schedule_type: Annotated[
-        str,
-        Field(
-            description=(
-                "Discriminator used to select the concrete schedule class during "
-                "(de)serialization."
-            ),
-            frozen=True,
-        ),
-    ]
     per_epoch: Annotated[
         bool,
         Field(
@@ -107,3 +99,18 @@ class _BaseWeightSchedule(BaseModel):
         you do not need to use this function as it's only for routing.
         """
         return epoch if self.per_epoch else step
+
+
+# Re-exports for discoverability. Import at the bottom to avoid a circular
+# import: ``composition`` imports ``_BaseWeightSchedule`` indirectly through
+# ``schedules``, which imports this module.
+from nvalchemi.training.losses.composition import (  # noqa: E402
+    BaseLossFunction,
+    ComposedLossFunction,
+)
+
+__all__ = [
+    "BaseLossFunction",
+    "ComposedLossFunction",
+    "LossWeightSchedule",
+]

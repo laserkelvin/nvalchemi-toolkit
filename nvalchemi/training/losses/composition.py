@@ -12,7 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Composable Pydantic-serializable loss-function abstractions."""
+"""Composable Pydantic-serializable loss-function abstractions.
+
+Composition semantics (for both :class:`BaseLossFunction.__add__`,
+:class:`BaseLossFunction.__mul__`, and :class:`ComposedLossFunction`):
+
+- ``loss_a + loss_b`` produces a :class:`ComposedLossFunction` with two
+  components and outer weight ``ConstantWeight(value=1.0)``.
+- ``+`` flattens a composition operand **only when** its outer ``weight``
+  is the identity ``ConstantWeight(value=1.0)``. A composition with a
+  non-identity schedule is treated as an atomic component (with weight
+  ``1.0``) so its outer schedule is preserved rather than silently
+  dropped.
+- ``float * loss`` and ``loss * float`` rescale component weights. If
+  the operand is already a :class:`ComposedLossFunction`, the scalar is
+  broadcast into each component weight and the outer schedule is
+  preserved; otherwise the result is a single-component composition
+  with weight ``float(scalar)`` and identity outer weight.
+- ``sum([...])`` works because ``__radd__`` returns ``self`` when the
+  left operand is integer ``0``.
+"""
 
 from __future__ import annotations
 
@@ -20,12 +39,10 @@ import abc
 from typing import TYPE_CHECKING, Annotated, Any
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
-from nvalchemi.training.losses.schedules import (
-    ConstantWeight,
-    WeightScheduleField,
-)
+from nvalchemi.training.losses.base import LossWeightSchedule
+from nvalchemi.training.losses.schedules import ConstantWeight
 
 if TYPE_CHECKING:
     from nvalchemi.hooks._context import HookContext
@@ -43,18 +60,17 @@ class BaseLossFunction(BaseModel, abc.ABC):
     receives both counters; its ``per_epoch`` flag determines whether it
     advances by global step or by epoch.
 
-    ``weight`` is typed as the discriminated union
-    :data:`~nvalchemi.training.losses.WeightScheduleField` (tagged on the
-    ``schedule_type`` literal of each concrete schedule) so that
-    subclasses round-trip cleanly through
-    :class:`~nvalchemi.training.BaseSpec`.
+    ``weight`` is typed as the
+    :class:`~nvalchemi.training.losses.base.LossWeightSchedule` protocol,
+    so any callable with the right signature and ``per_epoch`` attribute
+    is accepted. Schedules are not round-tripped through a discriminated
+    union; upstream ``TrainingStrategy`` reconstructs the schedule
+    manually from its ``(instance, spec)`` pair when rebuilding a loss
+    from its :class:`~nvalchemi.training.BaseSpec`.
 
     Arithmetic operators (``+``, ``*``) build a
-    :class:`ComposedLossFunction` that evaluates a weighted sum of
-    component losses. ``+`` flattens a composition operand only when
-    its outer ``weight`` is the identity ``ConstantWeight(value=1.0)``;
-    scheduled compositions are treated as atomic components to preserve
-    their schedules.
+    :class:`ComposedLossFunction`; see the module-level docstring for
+    the precise composition semantics.
 
     Parameters
     ----------
@@ -66,7 +82,7 @@ class BaseLossFunction(BaseModel, abc.ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     weight: Annotated[
-        WeightScheduleField,
+        SerializeAsAny[LossWeightSchedule],
         Field(
             default_factory=lambda: ConstantWeight(value=1.0),
             description=(
@@ -97,8 +113,10 @@ class BaseLossFunction(BaseModel, abc.ABC):
     def __call__(self, ctx: HookContext) -> torch.Tensor:
         """Evaluate :meth:`compute` and multiply by the scheduled weight.
 
-        ``ctx.epoch`` is coerced from ``None`` to ``0``. The schedule's
-        ``per_epoch`` flag determines which counter advances it.
+        For step-based schedules (``weight.per_epoch is False``), a
+        ``None`` ``ctx.epoch`` is coerced to ``0``. For epoch-based
+        schedules (``weight.per_epoch is True``), ``ctx.epoch`` must be
+        provided; a ``None`` value raises :class:`ValueError`.
 
         Parameters
         ----------
@@ -109,29 +127,39 @@ class BaseLossFunction(BaseModel, abc.ABC):
         -------
         torch.Tensor
             ``weight(step, epoch) * compute(ctx)``.
+
+        Raises
+        ------
+        ValueError
+            If ``self.weight.per_epoch is True`` and ``ctx.epoch is None``.
+        TypeError
+            If ``self.weight`` does not satisfy the
+            :class:`LossWeightSchedule` contract (must accept
+            ``(step: int, epoch: int)`` and return a ``float``).
         """
-        w = self.weight(ctx.step_count, ctx.epoch or 0)
+        if self.weight.per_epoch and ctx.epoch is None:
+            raise ValueError(
+                "Loss weight schedule is configured with per_epoch=True, "
+                "but ctx.epoch is None. Populate ctx.epoch in the training "
+                "loop or set per_epoch=False on the schedule."
+            )
+        try:
+            w = self.weight(ctx.step_count, ctx.epoch or 0)
+        except TypeError as exc:
+            raise TypeError(
+                f"{type(self.weight).__name__} does not satisfy the "
+                "LossWeightSchedule contract: __call__ must accept "
+                "(step: int, epoch: int) and return a float."
+            ) from exc
         return w * self.compute(ctx)
 
     # -----------------------------------------------------------------
-    # Arithmetic: build / flatten ComposedLossFunction
+    # Arithmetic: build / flatten ComposedLossFunction. See the
+    # module-level docstring for the full semantics.
     # -----------------------------------------------------------------
 
     def __add__(self, other: Any) -> ComposedLossFunction:
-        """Return ``self + other``, flattening only identity-weight compositions.
-
-        Both operands must be :class:`BaseLossFunction` instances; any
-        other type yields :data:`NotImplemented` so Python falls through
-        to the reflected operator or raises :class:`TypeError`.
-
-        A :class:`ComposedLossFunction` operand is unpacked into its
-        components and weights **only if** its outer ``weight`` schedule
-        is the identity ``ConstantWeight(value=1.0)``. A composition
-        with a non-identity schedule is treated as an atomic component
-        (with weight ``1.0``) so its outer schedule is preserved rather
-        than silently dropped. The resulting composition always has
-        outer weight ``ConstantWeight(value=1.0)``.
-        """
+        """Return ``self + other`` (see module docstring for semantics)."""
         if not isinstance(other, BaseLossFunction):
             return NotImplemented
         left_components, left_weights = _composition_terms(self)
@@ -143,26 +171,13 @@ class BaseLossFunction(BaseModel, abc.ABC):
         )
 
     def __radd__(self, other: Any) -> BaseLossFunction:
-        """Support ``sum([...])`` by treating an integer-zero seed as identity.
-
-        Python's :func:`sum` seeds the accumulator with ``0``; returning
-        ``self`` unchanged for that case keeps the final composition
-        flat. Any other left operand yields :data:`NotImplemented`.
-        """
+        """Return ``self`` when seeded with integer ``0`` (for :func:`sum`)."""
         if other == 0:
             return self
         return NotImplemented
 
     def __mul__(self, scalar: Any) -> ComposedLossFunction:
-        """Return a composition with this loss scaled by ``scalar``.
-
-        If ``self`` is already a :class:`ComposedLossFunction`, the
-        scalar is broadcast into each component weight while the outer
-        schedule is preserved; otherwise the result is a single-component
-        composition with weight ``float(scalar)`` and outer
-        ``ConstantWeight(value=1.0)``. Non-numeric ``scalar`` values
-        yield :data:`NotImplemented`.
-        """
+        """Return ``self * scalar`` (see module docstring for semantics)."""
         if not isinstance(scalar, (int, float)) or isinstance(scalar, bool):
             return NotImplemented
         factor = float(scalar)
@@ -179,11 +194,11 @@ class BaseLossFunction(BaseModel, abc.ABC):
         )
 
     def __rmul__(self, scalar: Any) -> ComposedLossFunction:
-        """Scalar multiplication is commutative; delegate to :meth:`__mul__`."""
+        """Delegate to :meth:`__mul__` (scalar multiplication is commutative)."""
         return self.__mul__(scalar)
 
 
-def _is_identity_weight(schedule: WeightScheduleField) -> bool:
+def _is_identity_weight(schedule: LossWeightSchedule) -> bool:
     """Return ``True`` if ``schedule`` is ``ConstantWeight(value=1.0)``."""
     return isinstance(schedule, ConstantWeight) and schedule.value == 1.0
 
@@ -213,6 +228,9 @@ class ComposedLossFunction(BaseLossFunction):
     the component's own ``weight`` schedule, so the outer schedule is
     applied exactly once.
 
+    See the module-level docstring for composition semantics governing
+    :meth:`BaseLossFunction.__add__` and :meth:`BaseLossFunction.__mul__`.
+
     Parameters
     ----------
     components
@@ -222,16 +240,6 @@ class ComposedLossFunction(BaseLossFunction):
         must equal ``len(components)``.
     weight
         Outer schedule applied once to the weighted sum (inherited).
-
-    Notes
-    -----
-    Compositions with an identity outer weight are flattened by
-    :meth:`__add__`, so ``(a + b) + c`` stores three components rather
-    than a tree. A composition with a non-identity outer schedule is
-    treated as an atomic component by ``+`` so its schedule survives.
-    Scalar multiplication (``float * composed``) rescales every
-    component weight in place into a new instance, preserving the
-    outer schedule.
     """
 
     components: Annotated[
