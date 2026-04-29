@@ -12,35 +12,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Loss-function package: base class, schedules, and reduction helpers.
+"""Loss-function abstractions, schedules, terms, and reductions.
 
-Step 1 exposes only the abstract :class:`BaseLossFunction`, the four
-concrete weight schedules, the :class:`LossWeightSchedule` protocol, and
-the graph-aware reduction primitives. The composition class
-(``ComposedLossFunction``) and the concrete losses (``EnergyLoss``,
-``ForceLoss``, ``StressLoss``) are added in later steps.
+Loss terms are Pydantic-serializable :class:`BaseLossFunction` instances
+combinable via arithmetic (``2.0 * energy_loss + 10.0 * force_loss``).
+:class:`ComposedLossFunction` represents the resulting weighted sum and
+round-trips through :class:`~nvalchemi.training.BaseSpec`.
 """
 
 from __future__ import annotations
 
-from nvalchemi.training.losses._base import BaseLossFunction
-from nvalchemi.training.losses._reductions import (
+from nvalchemi.training.losses.base import LossWeightSchedule
+from nvalchemi.training.losses.composition import (
+    BaseLossFunction,
+    ComposedLossFunction,
+)
+from nvalchemi.training.losses.reductions import (
     frobenius_mse,
     per_graph_mean,
     per_graph_mse,
     per_graph_sum,
 )
-from nvalchemi.training.losses._schedules import (
+from nvalchemi.training.losses.schedules import (
     ConstantWeight,
     CosineWeight,
     LinearWeight,
-    LossWeightSchedule,
     PiecewiseWeight,
     WeightScheduleField,
 )
 
 __all__ = [
     "BaseLossFunction",
+    "ComposedLossFunction",
     "ConstantWeight",
     "CosineWeight",
     "LinearWeight",

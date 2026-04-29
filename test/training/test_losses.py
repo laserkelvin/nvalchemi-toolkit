@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Step 1 tests for :mod:`nvalchemi.training.losses`."""
 
 from __future__ import annotations
 
@@ -26,11 +25,9 @@ from pydantic import ValidationError
 
 from nvalchemi.training import (
     BaseLossFunction,
+    ComposedLossFunction,
     ConstantWeight,
-    CosineWeight,
     LinearWeight,
-    LossWeightSchedule,
-    PiecewiseWeight,
     create_model_spec,
     create_model_spec_from_json,
 )
@@ -65,26 +62,28 @@ class TestReductions:
 
     def setup_method(self) -> None:
         # 3 graphs with 2, 3, 1 atoms respectively.
-        self.batch_idx = torch.tensor([0, 0, 1, 1, 1, 2], dtype=torch.long)
-        self.num_graphs = 3
-        self.num_nodes_per_graph = torch.tensor([2, 3, 1], dtype=torch.long)
+        self.batch_idx = torch.tensor([0, 0, 1, 1, 1, 2], dtype=torch.int32)
 
     def test_per_graph_sum_matches_manual(self) -> None:
         vals = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-        got = per_graph_sum(vals, self.batch_idx, self.num_graphs)
+        got = per_graph_sum(vals, self.batch_idx)
         assert torch.allclose(got, torch.tensor([3.0, 12.0, 6.0]))
 
     def test_per_graph_sum_preserves_shape(self) -> None:
         vals = torch.randn(6, 3, requires_grad=True)
-        got = per_graph_sum(vals, self.batch_idx, self.num_graphs)
+        got = per_graph_sum(vals, self.batch_idx)
         assert got.shape == (3, 3)
         assert got.grad_fn is not None
 
+    def test_per_graph_sum_explicit_num_graphs_keeps_trailing_empty(self) -> None:
+        vals = torch.tensor([1.0, 2.0])
+        batch_idx = torch.tensor([0, 0], dtype=torch.int32)
+        got = per_graph_sum(vals, batch_idx, num_graphs=3)
+        assert torch.allclose(got, torch.tensor([3.0, 0.0, 0.0]))
+
     def test_per_graph_mean_matches_manual(self) -> None:
         vals = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-        got = per_graph_mean(
-            vals, self.batch_idx, self.num_graphs, self.num_nodes_per_graph
-        )
+        got = per_graph_mean(vals, self.batch_idx)
         assert torch.allclose(got, torch.tensor([1.5, 4.0, 6.0]))
 
     def test_per_graph_mse_matches_manual(self) -> None:
@@ -92,19 +91,14 @@ class TestReductions:
         target = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
         # squared diffs per node: [0, 1, 4, 9, 16, 25]
         # per-graph sums: [1, 29, 25]; per-graph counts: [2, 3, 1]
-        got = per_graph_mse(
-            pred, target, self.batch_idx, self.num_graphs, self.num_nodes_per_graph
-        )
+        got = per_graph_mse(pred, target, self.batch_idx)
         expected = torch.tensor([0.5, 29.0 / 3.0, 25.0])
         assert torch.allclose(got, expected)
 
-    def test_per_graph_mse_3d_matches_reference(self) -> None:
-        torch.manual_seed(0)
+    def test_per_graph_mse_3d_matches_reference(self, fixed_torch_seed: None) -> None:
         pred = torch.randn(6, 3)
         target = torch.randn(6, 3)
-        got = per_graph_mse(
-            pred, target, self.batch_idx, self.num_graphs, self.num_nodes_per_graph
-        )
+        got = per_graph_mse(pred, target, self.batch_idx)
         ref = torch.stack(
             [
                 ((pred[:2] - target[:2]) ** 2).mean(),
@@ -117,9 +111,7 @@ class TestReductions:
     def test_per_graph_mse_preserves_grad(self) -> None:
         pred = torch.randn(6, 3, requires_grad=True)
         target = torch.randn(6, 3)
-        got = per_graph_mse(
-            pred, target, self.batch_idx, self.num_graphs, self.num_nodes_per_graph
-        )
+        got = per_graph_mse(pred, target, self.batch_idx)
         assert got.grad_fn is not None
         got.sum().backward()
         assert pred.grad is not None
@@ -131,18 +123,15 @@ class TestReductions:
                 torch.zeros(6, 3),
                 torch.zeros(6, 2),
                 self.batch_idx,
-                self.num_graphs,
-                self.num_nodes_per_graph,
             )
 
-    def test_per_graph_mse_num_nodes_length_mismatch(self) -> None:
-        with pytest.raises(ValueError, match="must equal num_graphs"):
+    def test_per_graph_mse_num_graphs_too_small(self) -> None:
+        with pytest.raises(ValueError, match="but num_graphs=2"):
             per_graph_mse(
                 torch.zeros(6),
                 torch.zeros(6),
                 self.batch_idx,
-                self.num_graphs,
-                torch.tensor([2, 3], dtype=torch.long),
+                num_graphs=2,
             )
 
     def test_frobenius_mse_matches_manual(self) -> None:
@@ -168,122 +157,63 @@ class TestReductions:
 
     def test_per_graph_sum_bad_num_graphs(self) -> None:
         with pytest.raises(ValueError, match="num_graphs must be positive"):
-            per_graph_sum(torch.zeros(3), torch.zeros(3, dtype=torch.long), 0)
+            per_graph_sum(torch.zeros(3), torch.zeros(3, dtype=torch.int32), 0)
 
 
-class TestSchedules:
-    """Tests for the 4 weight schedules + protocol + round-trip."""
+class TestReductionsCompile:
+    """Tests for reduction compatibility with ``torch.compile``."""
 
-    def test_protocol_runtime_check(self) -> None:
-        w = ConstantWeight(value=1.0)
-        assert isinstance(w, LossWeightSchedule)
+    @staticmethod
+    def _compile_kwargs(device: str) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"fullgraph": True}
+        if device == "cuda":
+            kwargs["backend"] = "cudagraphs"
+        return kwargs
 
-    def test_constant_weight(self) -> None:
-        w = ConstantWeight(value=2.5)
-        assert w(0, 0) == 2.5
-        assert w(100, 3) == 2.5
-        assert w(100_000, 99) == 2.5
+    @staticmethod
+    def _batch_idx(device: str) -> torch.Tensor:
+        return torch.tensor([0, 0, 1, 1, 1, 2], dtype=torch.int32, device=device)
 
-    @pytest.mark.parametrize("cls", [LinearWeight, CosineWeight])
-    def test_ramp_endpoints_and_clamp(
-        self, cls: type[LinearWeight | CosineWeight]
-    ) -> None:
-        w = cls(start=0.0, end=1.0, num_steps=10)
-        assert w(0, 0) == 0.0
-        assert abs(w(10, 0) - 1.0) < 1e-6
-        assert w(100, 0) == 1.0  # clamped above
-        assert w(-5, 0) == 0.0  # clamped below
+    def test_per_graph_sum_compiles(self, device: str) -> None:
+        values = torch.arange(18, dtype=torch.float32, device=device).reshape(6, 3)
+        batch_idx = self._batch_idx(device)
+        compiled = torch.compile(per_graph_sum, **self._compile_kwargs(device))
 
-    def test_linear_midpoint(self) -> None:
-        w = LinearWeight(start=0.0, end=1.0, num_steps=10)
-        assert abs(w(5, 0) - 0.5) < 1e-6
+        got = compiled(values, batch_idx, 3)
+        expected = per_graph_sum(values, batch_idx, num_graphs=3)
 
-    def test_cosine_midpoint(self) -> None:
-        # Half-cosine midpoint is (start+end)/2 because cos(pi/2) = 0,
-        # so frac = 0.5 * (1 - 0) = 0.5. This happens to match the linear
-        # midpoint numerically for the 0->1 interval.
-        w = CosineWeight(start=0.0, end=1.0, num_steps=10)
-        assert abs(w(5, 0) - 0.5) < 1e-6
+        assert torch.allclose(got, expected)
 
-    @pytest.mark.parametrize(
-        "boundaries,values,step,expected",
-        [
-            ((100,), (0.1, 0.9), 0, 0.1),
-            ((100,), (0.1, 0.9), 99, 0.1),
-            ((100,), (0.1, 0.9), 100, 0.9),
-            ((100,), (0.1, 0.9), 500, 0.9),
-            ((10, 20, 30), (0.0, 0.25, 0.5, 1.0), 5, 0.0),
-            ((10, 20, 30), (0.0, 0.25, 0.5, 1.0), 10, 0.25),
-            ((10, 20, 30), (0.0, 0.25, 0.5, 1.0), 20, 0.5),
-            ((10, 20, 30), (0.0, 0.25, 0.5, 1.0), 30, 1.0),
-        ],
-    )
-    def test_piecewise_weight(
-        self,
-        boundaries: tuple[int, ...],
-        values: tuple[float, ...],
-        step: int,
-        expected: float,
-    ) -> None:
-        w = PiecewiseWeight(boundaries=boundaries, values=values)
-        assert w(step, 0) == expected
+    def test_per_graph_mean_compiles(self, device: str) -> None:
+        values = torch.arange(18, dtype=torch.float32, device=device).reshape(6, 3)
+        batch_idx = self._batch_idx(device)
+        compiled = torch.compile(per_graph_mean, **self._compile_kwargs(device))
 
-    @pytest.mark.parametrize(
-        "cls,kwargs",
-        [
-            (LinearWeight, {"start": 0.0, "end": 1.0, "num_steps": 0}),
-            (LinearWeight, {"start": 0.0, "end": 1.0, "num_steps": -3}),
-            (CosineWeight, {"start": 0.0, "end": 1.0, "num_steps": 0}),
-            (
-                PiecewiseWeight,
-                {"boundaries": (10, 20), "values": (0.1, 0.5)},
-            ),
-            (
-                PiecewiseWeight,
-                {"boundaries": (10, 5), "values": (0.1, 0.5, 0.9)},
-            ),
-            (PiecewiseWeight, {"boundaries": (-1,), "values": (0.1, 0.5)}),
-        ],
-    )
-    def test_schedule_validators_reject_bad_input(
-        self, cls: type, kwargs: dict[str, Any]
-    ) -> None:
-        with pytest.raises(ValidationError):
-            cls(**kwargs)
+        got = compiled(values, batch_idx, 3)
+        expected = per_graph_mean(values, batch_idx, num_graphs=3)
 
-    def test_schedule_frozen(self) -> None:
-        w = ConstantWeight(value=1.0)
-        with pytest.raises(ValidationError):
-            w.value = 2.0  # type: ignore[misc]
+        assert torch.allclose(got, expected)
 
-    def test_piecewise_hashable(self) -> None:
-        # Tuple-backed fields keep frozen instances hashable.
-        w = PiecewiseWeight(boundaries=(10, 20), values=(0.1, 0.5, 0.9))
-        assert hash(w) == hash(w)
+    def test_per_graph_mse_compiles(self, device: str) -> None:
+        pred = torch.arange(18, dtype=torch.float32, device=device).reshape(6, 3)
+        target = pred.flip(0)
+        batch_idx = self._batch_idx(device)
+        compiled = torch.compile(per_graph_mse, **self._compile_kwargs(device))
 
-    @pytest.mark.parametrize(
-        "cls,kwargs",
-        [
-            (ConstantWeight, {"value": 0.5}),
-            (LinearWeight, {"start": 0.1, "end": 0.9, "num_steps": 100}),
-            (CosineWeight, {"start": 1.0, "end": 0.0, "num_steps": 50}),
-            (
-                PiecewiseWeight,
-                {"boundaries": (10, 20), "values": (0.1, 0.5, 0.9)},
-            ),
-        ],
-    )
-    def test_schedule_basespec_roundtrip(
-        self, cls: type, kwargs: dict[str, Any]
-    ) -> None:
-        spec = create_model_spec(cls, **kwargs)
-        dumped = spec.model_dump_json()
-        rebuilt_spec = create_model_spec_from_json(json.loads(dumped))
-        built = rebuilt_spec.build()
-        assert isinstance(built, cls)
-        for k, v in kwargs.items():
-            assert getattr(built, k) == v
-        assert isinstance(built(5, 0), float)
+        got = compiled(pred, target, batch_idx, 3)
+        expected = per_graph_mse(pred, target, batch_idx, num_graphs=3)
+
+        assert torch.allclose(got, expected)
+
+    def test_frobenius_mse_compiles(self, device: str) -> None:
+        pred = torch.arange(18, dtype=torch.float32, device=device).reshape(2, 3, 3)
+        target = pred.flip(0)
+        compiled = torch.compile(frobenius_mse, **self._compile_kwargs(device))
+
+        got = compiled(pred, target)
+        expected = frobenius_mse(pred, target)
+
+        assert torch.allclose(got, expected)
 
 
 class TestBaseLossFunction:
@@ -306,6 +236,25 @@ class TestBaseLossFunction:
         assert torch.allclose(loss(_StubCtx(step_count=0)), torch.tensor(0.0))
         assert torch.allclose(loss(_StubCtx(step_count=10)), torch.tensor(1.0))
         assert torch.allclose(loss(_StubCtx(step_count=5)), torch.tensor(0.5))
+
+    def test_compute_and_weight_with_per_epoch_schedule(self) -> None:
+        loss = _ToyLoss(
+            value=1.0,
+            weight=LinearWeight(
+                start=0.0,
+                end=1.0,
+                num_steps=10,
+                per_epoch=True,
+            ),
+        )
+        assert torch.allclose(
+            loss(_StubCtx(step_count=10, epoch=0)),
+            torch.tensor(0.0),
+        )
+        assert torch.allclose(
+            loss(_StubCtx(step_count=0, epoch=10)),
+            torch.tensor(1.0),
+        )
 
     def test_epoch_none_treated_as_zero(self) -> None:
         loss = _ToyLoss(value=2.0, weight=ConstantWeight(value=1.0))
@@ -338,3 +287,200 @@ class TestBaseLossFunction:
         assert built.weight.num_steps == 4
         out = built(_StubCtx(step_count=2, epoch=0))
         assert torch.allclose(out, torch.tensor(0.5 * 7.0))
+
+
+class _PositionsBatch:
+    """Minimal batch stub exposing just ``positions`` for gradient tests."""
+
+    def __init__(self, positions: torch.Tensor) -> None:
+        self.positions = positions
+
+
+class _PositionsLoss(BaseLossFunction):
+    """Toy loss whose compute() sums ``ctx.batch.positions`` (gradient-bearing)."""
+
+    scale: float = 1.0
+
+    def compute(self, ctx: Any) -> torch.Tensor:
+        return self.scale * ctx.batch.positions.sum()
+
+
+class TestComposedLossFunction:
+    """Tests for composition arithmetic and the resulting loss object."""
+
+    def setup_method(self) -> None:
+        self.loss_a = _ToyLoss(value=1.0, weight=ConstantWeight(value=1.0))
+        self.loss_b = _ToyLoss(value=1.0, weight=ConstantWeight(value=1.0))
+        self.loss_c = _ToyLoss(value=1.0, weight=ConstantWeight(value=1.0))
+        self.ctx = _StubCtx(step_count=0, epoch=0)
+
+    def test_add_two_losses(self) -> None:
+        composed = self.loss_a + self.loss_b
+        assert isinstance(composed, ComposedLossFunction)
+        assert composed.components == (self.loss_a, self.loss_b)
+        assert composed.weights == (1.0, 1.0)
+        assert isinstance(composed.weight, ConstantWeight)
+        assert composed.weight.value == 1.0
+
+    @pytest.mark.parametrize(
+        "op",
+        [lambda loss: 2.0 * loss, lambda loss: loss * 2.0],
+        ids=["left", "right"],
+    )
+    def test_scalar_multiply_left_and_right(self, op: Any) -> None:
+        composed = op(self.loss_a)
+        assert isinstance(composed, ComposedLossFunction)
+        assert composed.components == (self.loss_a,)
+        assert composed.weights == (2.0,)
+
+    def test_scalar_multiply_of_composition_scales_all_weights(self) -> None:
+        composed = 2.0 * (self.loss_a + 3.0 * self.loss_b)
+        assert composed.weights == (2.0, 6.0)
+        # Outer weight is preserved (constant-1.0 here).
+        assert isinstance(composed.weight, ConstantWeight)
+        assert composed.weight.value == 1.0
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda a, b, c: (a + b) + c,
+            lambda a, b, c: a + (b + c),
+        ],
+        ids=["left_assoc", "right_assoc"],
+    )
+    def test_nested_addition_flattens(self, build: Any) -> None:
+        composed = build(self.loss_a, self.loss_b, self.loss_c)
+        assert isinstance(composed, ComposedLossFunction)
+        assert len(composed.components) == 3
+        assert all(not isinstance(c, ComposedLossFunction) for c in composed.components)
+
+    def test_sum_over_list(self) -> None:
+        # sum() seeds with 0 → exercises __radd__.
+        composed = sum([self.loss_a, self.loss_b, self.loss_c])
+        assert isinstance(composed, ComposedLossFunction)
+        assert len(composed.components) == 3
+
+    def test_weighted_sum_numerically_correct(self) -> None:
+        composed = 2.0 * self.loss_a + 3.0 * self.loss_b
+        out = composed(self.ctx)
+        assert torch.allclose(out, torch.tensor(5.0), atol=1e-6)
+
+    def test_component_weights_length_mismatch_raises(self) -> None:
+        with pytest.raises(ValidationError, match="weights length"):
+            ComposedLossFunction(
+                components=(self.loss_a, self.loss_b),
+                weights=(1.0,),
+                weight=ConstantWeight(value=1.0),
+            )
+
+    def test_empty_components_raises(self) -> None:
+        with pytest.raises(ValidationError, match="at least one"):
+            ComposedLossFunction(
+                components=(),
+                weights=(),
+                weight=ConstantWeight(value=1.0),
+            )
+
+    def test_gradient_flows_through_all_components(self) -> None:
+        positions = torch.randn(4, 3, requires_grad=True)
+        ctx = _StubCtx(step_count=0, epoch=0, batch=_PositionsBatch(positions))
+        loss_a = _PositionsLoss(scale=2.0, weight=ConstantWeight(value=1.0))
+        loss_b = _PositionsLoss(scale=3.0, weight=ConstantWeight(value=1.0))
+        composed = loss_a + loss_b
+        out = composed(ctx)
+        out.backward()
+        # d/dx sum(x) = 1 per element; composed multiplier = 2 + 3 = 5.
+        expected_grad = torch.full_like(positions, 5.0)
+        assert positions.grad is not None
+        assert torch.allclose(positions.grad, expected_grad, atol=1e-6)
+
+    def test_composed_basespec_roundtrip(self) -> None:
+        spec_a = create_model_spec(
+            _ToyLoss, value=1.0, weight=ConstantWeight(value=1.0)
+        )
+        spec_b = create_model_spec(
+            _ToyLoss, value=2.0, weight=ConstantWeight(value=1.0)
+        )
+        spec = create_model_spec(
+            ComposedLossFunction,
+            components=[spec_a, spec_b],
+            weights=[1.0, 2.0],
+            weight=ConstantWeight(value=0.5),
+        )
+        dumped = spec.model_dump_json()
+        rebuilt = create_model_spec_from_json(json.loads(dumped)).build()
+        assert isinstance(rebuilt, ComposedLossFunction)
+        assert rebuilt.weights == (1.0, 2.0)
+        assert isinstance(rebuilt.weight, ConstantWeight)
+        assert rebuilt.weight.value == 0.5
+        assert len(rebuilt.components) == 2
+        assert all(isinstance(c, _ToyLoss) for c in rebuilt.components)
+        assert [c.value for c in rebuilt.components] == [1.0, 2.0]
+        # Eval matches: 0.5 * (1 * 1.0 + 2 * 2.0) = 2.5
+        out = rebuilt(_StubCtx(step_count=0, epoch=0))
+        assert torch.allclose(out, torch.tensor(2.5), atol=1e-6)
+
+    def test_outer_schedule_applied_once(self) -> None:
+        # Regression guard: ComposedLossFunction.compute() must NOT
+        # multiply by self.weight — the inherited __call__ does.
+        composed = ComposedLossFunction(
+            components=(self.loss_a, self.loss_b),
+            weights=(1.0, 1.0),
+            weight=ConstantWeight(value=0.5),
+        )
+        out = composed(self.ctx)
+        # Correct: 0.5 * (1.0*1.0 + 1.0*1.0) = 1.0
+        # Double-weight bug would yield 0.5 * 0.5 * 2.0 = 0.5.
+        assert torch.allclose(out, torch.tensor(1.0), atol=1e-6)
+
+    def test_add_preserves_non_identity_schedule(self) -> None:
+        # A scheduled composition must NOT be flattened by `+`; its
+        # outer schedule would be silently dropped otherwise.
+        scheduled = ComposedLossFunction(
+            components=(self.loss_b, self.loss_c),
+            weights=(1.0, 1.0),
+            weight=LinearWeight(start=0.0, end=1.0, num_steps=10),
+        )
+        composed = self.loss_a + scheduled
+        assert len(composed.components) == 2
+        # Second term is the whole scheduled composition, nested intact.
+        assert composed.components[1] is scheduled
+        assert composed.weights == (1.0, 1.0)
+        # Symmetric on the left: scheduled + atomic.
+        composed_sym = scheduled + self.loss_a
+        assert len(composed_sym.components) == 2
+        assert composed_sym.components[0] is scheduled
+
+    def test_add_flattens_identity_schedule(self) -> None:
+        # Identity outer weight → flatten as before.
+        identity = ComposedLossFunction(
+            components=(self.loss_b, self.loss_c),
+            weights=(1.0, 1.0),
+            weight=ConstantWeight(value=1.0),
+        )
+        composed = self.loss_a + identity
+        assert len(composed.components) == 3
+        assert composed.components == (self.loss_a, self.loss_b, self.loss_c)
+        assert composed.weights == (1.0, 1.0, 1.0)
+
+    def test_scalar_mul_preserves_non_identity_outer_schedule(self) -> None:
+        scheduled = ComposedLossFunction(
+            components=(self.loss_a, self.loss_b),
+            weights=(1.0, 3.0),
+            weight=LinearWeight(start=0.0, end=1.0, num_steps=10),
+        )
+        scaled = 2.0 * scheduled
+        assert scaled.weights == (2.0, 6.0)
+        assert isinstance(scaled.weight, LinearWeight)
+        assert scaled.weight.start == 0.0
+        assert scaled.weight.end == 1.0
+        assert scaled.weight.num_steps == 10
+
+    @pytest.mark.parametrize("op", ["add", "mul"], ids=["add", "mul"])
+    def test_not_implemented_for_bad_type(self, op: str) -> None:
+        if op == "add":
+            with pytest.raises(TypeError):
+                _ = self.loss_a + "hello"  # type: ignore[operator]
+        else:
+            with pytest.raises(TypeError):
+                _ = self.loss_a * "hello"  # type: ignore[operator]

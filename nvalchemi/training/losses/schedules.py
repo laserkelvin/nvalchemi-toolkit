@@ -12,15 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Weight schedules for loss functions.
+"""Concrete weight schedules for loss functions.
 
-A :class:`LossWeightSchedule` is any callable object that maps
-``(step, epoch) -> float`` and exposes a ``per_epoch`` flag. Four
-concrete Pydantic-validated schedules are provided:
+Four Pydantic-validated schedules are provided:
 :class:`ConstantWeight`, :class:`LinearWeight`, :class:`CosineWeight`,
-and :class:`PiecewiseWeight`, each tagged with a ``type`` literal so
-they form a discriminated union (:data:`WeightScheduleField`) that
-round-trips through :class:`nvalchemi.training.BaseSpec`.
+and :class:`PiecewiseWeight`. Each schedule fixes ``schedule_type`` to a
+literal value so the closed discriminated union
+(:data:`WeightScheduleField`) round-trips through
+:class:`nvalchemi.training.BaseSpec`.
 
 The concrete schedules always receive both the global step and epoch.
 When ``per_epoch=False`` (the default), schedule windows and boundaries
@@ -34,86 +33,33 @@ Adding a new schedule
 You can choose to write your own arbitrary function, providing that
 the object is callable with the ``step`` and ``epoch`` integer signature.
 
-Alternatively, you can subclass the :class:`_BaseWeightSchedule` through
-the following:
+Alternatively, you can subclass :class:`~nvalchemi.training.losses.base._BaseWeightSchedule`:
 
-1. Subclass :class:`_BaseWeightSchedule` to inherit ``per_epoch`` and
-   the frozen Pydantic config.
-2. Add ``type: Literal["<your_tag>"] = "<your_tag>"`` as the discriminator.
+1. Subclass :class:`~nvalchemi.training.losses.base._BaseWeightSchedule`
+   to inherit ``per_epoch`` and the frozen Pydantic config.
+2. Add ``schedule_type: Literal["<your_tag>"] = Field(default="<your_tag>", frozen=True)``
+   as the discriminator.
 3. Implement ``__call__(step: int, epoch: int) -> float``; use
    ``self._schedule_index(step, epoch)`` for schedules that advance over
    a training counter.
 4. Extend :data:`WeightScheduleField` with the new class in the union so
    that :class:`BaseLossFunction.weight` accepts it.
 
-Arbitrary Python callable objects may satisfy :class:`LossWeightSchedule`
-at runtime but are **not** accepted by :class:`BaseLossFunction.weight`,
-which is typed as the closed discriminated union for serialization
-purposes.
+Arbitrary Python callable objects may satisfy
+:class:`~nvalchemi.training.losses.LossWeightSchedule` at runtime but are
+**not** accepted by :class:`BaseLossFunction.weight`, which is typed as
+the closed discriminated union for serialization purposes.
 """
 
 from __future__ import annotations
 
 import bisect
 import math
-from typing import (
-    Annotated,
-    Literal,
-    Protocol,
-    TypeAlias,
-    runtime_checkable,
-)
+from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
-
-@runtime_checkable
-class LossWeightSchedule(Protocol):
-    """Runtime-checkable protocol for loss-weight schedules.
-
-    Callable objects with signature ``(step: int, epoch: int) -> float``
-    and a ``per_epoch`` attribute satisfy this protocol at runtime (via
-    :func:`typing.runtime_checkable`). For serialization-aware storage on
-    :class:`~nvalchemi.training.losses.BaseLossFunction.weight`, however,
-    only the concrete classes in :data:`WeightScheduleField` are accepted
-    ---arbitrary callables cannot round-trip through
-    :class:`~nvalchemi.training.BaseSpec`. See the module docstring for
-    the extension path to add a new schedule.
-
-    Attributes
-    ----------
-    per_epoch
-        If ``True``, the schedule should advance by ``epoch`` instead of
-        by ``step``. This aligns loss-weight updates with training loops
-        that update learning-rate schedules once per epoch.
-
-    Parameters
-    ----------
-    step
-        Current global training step (0-indexed).
-    epoch
-        Current epoch number (0-indexed).
-
-    Returns
-    -------
-    float
-        Scalar weight to apply to the associated loss term.
-    """
-
-    per_epoch: Annotated[
-        bool,
-        "Whether the schedule steps per epoch; if False, schedule will update per step/batch.",
-    ]
-
-    def __call__(self, step: int, epoch: int) -> float:
-        """Evaluate the schedule at ``(step, epoch)``."""
-        ...
-
-
-# ---------------------------------------------------------------------------
-# Concrete schedules (tagged via the ``type`` literal for discriminated unions)
-# ---------------------------------------------------------------------------
-
+from nvalchemi.training.losses.base import _BaseWeightSchedule
 
 _PositiveSteps: TypeAlias = Annotated[
     int,
@@ -122,45 +68,6 @@ _PositiveSteps: TypeAlias = Annotated[
         description="Positive length of the schedule window in steps or epochs.",
     ),
 ]
-
-
-class _BaseWeightSchedule(BaseModel):
-    """Base Pydantic model for serializable loss-weight schedules.
-
-    Attributes
-    ----------
-    per_epoch
-        If ``False``, schedule windows advance by global step. If
-        ``True``, they advance by epoch.
-    schedule_type
-        Used and defined in the model to help the deserialization
-        process, which needs to be set by by field and remain
-        immutable.
-    """
-
-    model_config = {"frozen": True}
-
-    schedule_type: Annotated[
-        str,
-        Field(
-            description="This field is needed for subclasses to differentiate"
-            " between them during (de)serialization.",
-            frozen=True,
-        ),
-    ]
-    per_epoch: Annotated[
-        bool,
-        Field(
-            default=False,
-            description=(
-                "Whether to advance this schedule by epoch instead of by global step."
-            ),
-        ),
-    ] = False
-
-    def _schedule_index(self, step: int, epoch: int) -> int:
-        """Return the counter used to advance this schedule."""
-        return epoch if self.per_epoch else step
 
 
 class ConstantWeight(_BaseWeightSchedule):
@@ -191,7 +98,7 @@ class LinearWeight(_BaseWeightSchedule):
 
     def __call__(self, step: int, epoch: int) -> float:
         """Linear ramp from ``start`` to ``end``, clamped at both ends."""
-        idx = self._schedule_index(step, epoch)
+        idx = self._map_schedule_index(step, epoch)
         if idx <= 0:
             return float(self.start)
         if idx >= self.num_steps:
@@ -216,7 +123,7 @@ class CosineWeight(_BaseWeightSchedule):
 
     def __call__(self, step: int, epoch: int) -> float:
         """Half-cosine interpolation, clamped at both ends."""
-        idx = self._schedule_index(step, epoch)
+        idx = self._map_schedule_index(step, epoch)
         if idx <= 0:
             return float(self.start)
         if idx >= self.num_steps:
@@ -281,13 +188,14 @@ class PiecewiseWeight(_BaseWeightSchedule):
         ``bisect_right`` gives the count of boundaries that the index has
         reached or passed, which is the index into :attr:`values`.
         """
-        idx = bisect.bisect_right(self.boundaries, self._schedule_index(step, epoch))
+        idx = bisect.bisect_right(
+            self.boundaries, self._map_schedule_index(step, epoch)
+        )
         return float(self.values[idx])
 
 
-# Discriminated union used by BaseLossFunction's ``weight`` field.
-# Differentiates based on the `schedule_type` field.
 WeightScheduleField: TypeAlias = Annotated[
     ConstantWeight | LinearWeight | CosineWeight | PiecewiseWeight,
     Field(discriminator="schedule_type"),
 ]
+"""Closed discriminated union accepted by :class:`BaseLossFunction.weight`."""
