@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -32,6 +33,7 @@ from nvalchemi.training import (
     LinearWeight,
     StressLoss,
 )
+from nvalchemi.training._spec import create_model_spec, create_model_spec_from_json
 from nvalchemi.training.losses import (
     frobenius_mse,
     per_graph_mean,
@@ -1337,3 +1339,127 @@ class TestIgnoreNaN:
             StressLoss(ignore_nan=True),
         ):
             assert "ignore_nan=True" in repr(loss)
+
+
+class TestLossModelSpec:
+    """Tests for :func:`create_model_spec` round-trip on concrete losses.
+
+    These tests verify the generic spec workflow works end-to-end for
+    :class:`EnergyLoss`, :class:`ForceLoss`, and :class:`StressLoss`:
+    ``create_model_spec(cls, **kwargs)`` → ``model_dump_json`` → ``json.loads``
+    → :func:`create_model_spec_from_json` → ``spec.build()``. The rebuilt
+    instance must preserve ``__init__`` kwargs and stay functionally
+    equivalent on a batch.
+
+    Schedule kwargs (``weight=...``) are exercised via the **nested-spec**
+    pattern: ``weight=create_model_spec(ConstantWeight, value=...)``. The
+    generic spec builder does not round-trip a bare Pydantic schedule
+    instance through JSON, since the dumped dict has no ``cls_path``
+    discriminator. Nesting the schedule as its own spec is the supported
+    workflow.
+    """
+
+    def _roundtrip(self, spec: Any) -> Any:
+        dumped = json.loads(spec.model_dump_json())
+        return create_model_spec_from_json(dumped)
+
+    @pytest.mark.parametrize(
+        ("cls", "kwargs"),
+        [
+            pytest.param(EnergyLoss, {}, id="energy_defaults"),
+            pytest.param(
+                EnergyLoss,
+                {"per_atom": True, "ignore_nan": True},
+                id="energy_per_atom_ignore_nan",
+            ),
+            pytest.param(
+                EnergyLoss,
+                {"target_key": "u_ref", "prediction_key": "u_hat"},
+                id="energy_renamed_keys",
+            ),
+            pytest.param(ForceLoss, {}, id="force_defaults"),
+            pytest.param(
+                ForceLoss,
+                {"normalize_by_atom_count": False, "ignore_nan": True},
+                id="force_global_ignore_nan",
+            ),
+            pytest.param(StressLoss, {}, id="stress_defaults"),
+            pytest.param(StressLoss, {"ignore_nan": True}, id="stress_ignore_nan"),
+        ],
+    )
+    def test_loss_basespec_roundtrip_without_schedule(
+        self, cls: type[BaseLossFunction], kwargs: dict[str, Any]
+    ) -> None:
+        """JSON round-trip rebuilds a loss with matching kwargs."""
+        spec = create_model_spec(cls, **kwargs)
+        rebuilt = self._roundtrip(spec)
+        built = rebuilt.build()
+        assert isinstance(built, cls)
+        for k, v in kwargs.items():
+            assert getattr(built, k) == v
+        # Schedule-less losses carry ``weight=None``.
+        assert built.weight is None
+
+    @pytest.mark.parametrize(
+        "cls",
+        [EnergyLoss, ForceLoss, StressLoss],
+        ids=["energy", "force", "stress"],
+    )
+    def test_loss_basespec_roundtrip_with_nested_schedule(
+        self, cls: type[BaseLossFunction]
+    ) -> None:
+        """Nested ``create_model_spec`` on the schedule survives JSON round-trip."""
+        schedule_spec = create_model_spec(ConstantWeight, value=2.5)
+        spec = create_model_spec(cls, weight=schedule_spec)
+        rebuilt = self._roundtrip(spec)
+        built = rebuilt.build()
+        assert isinstance(built, cls)
+        assert isinstance(built.weight, ConstantWeight)
+        assert built.weight.value == 2.5
+
+    def test_loss_spec_preserves_timestamp(self) -> None:
+        """Rehydrated spec keeps the original timestamp byte-for-byte."""
+        spec = create_model_spec(EnergyLoss, per_atom=True)
+        rebuilt = self._roundtrip(spec)
+        assert rebuilt.timestamp == spec.timestamp
+
+    def test_rebuilt_loss_is_functionally_equivalent(self) -> None:
+        """A round-tripped loss produces the same value as the original."""
+        pred = torch.randn(3, 1)
+        target = torch.randn(3, 1)
+        batch = SimpleNamespace(
+            batch_idx=torch.tensor([0, 1, 2], dtype=torch.int32),
+            num_graphs=3,
+            num_nodes_per_graph=torch.tensor([1, 1, 1], dtype=torch.long),
+            energy=target,
+            predicted_energy=pred,
+        )
+
+        original = EnergyLoss(ignore_nan=True)
+        spec = create_model_spec(
+            EnergyLoss,
+            ignore_nan=True,
+            weight=create_model_spec(ConstantWeight, value=3.0),
+        )
+        rebuilt = self._roundtrip(spec).build()
+
+        # Original has no weight, rebuilt has ConstantWeight(3.0) — underlying
+        # ``_forward`` must agree; the ``3.0 *`` is applied by ``forward``.
+        assert torch.allclose(original(batch), rebuilt._forward(batch), atol=1e-6)
+        assert torch.allclose(rebuilt(batch), 3.0 * original(batch), atol=1e-6)
+
+    def test_bare_schedule_instance_does_not_round_trip(self) -> None:
+        """Document the unsupported path: bare Pydantic schedule can't be rehydrated.
+
+        Passing a ``ConstantWeight`` instance directly (instead of a nested
+        spec) dumps it as a plain ``{"value": ..., "per_epoch": ...}`` dict
+        with no ``cls_path`` discriminator. The rehydration step therefore
+        tries to feed the dict straight into the spec's ``weight`` field,
+        which is typed as :class:`LossWeightSchedule`, and Pydantic
+        rejects it. Users should wrap schedules in ``create_model_spec``
+        to serialize them.
+        """
+        spec = create_model_spec(StressLoss, weight=ConstantWeight(value=2.5))
+        dumped = json.loads(spec.model_dump_json())
+        with pytest.raises(Exception, match="LossWeightSchedule|validation"):
+            create_model_spec_from_json(dumped)
