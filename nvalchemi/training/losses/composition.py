@@ -14,62 +14,63 @@
 # limitations under the License.
 """Composable :class:`torch.nn.Module`-based loss-function abstractions.
 
-See :class:`BaseLossFunction` for the full call and arithmetic contract.
+Leaf loss terms are tensor-to-tensor :class:`BaseLossFunction` instances.
+:class:`ComposedLossFunction` is a separate keyed-mapping aggregator that
+sums those already-weighted leaves.
 """
 
 from __future__ import annotations
 
 import abc
 import math
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict, cast
 
 import torch
 from torch import nn
 
 from nvalchemi.training.losses.base import LossWeightSchedule
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
-    from nvalchemi.data.batch import Batch
+class ComposedLossOutput(TypedDict):
+    """Output returned by :class:`ComposedLossFunction`.
+
+    The mapping always contains ``total_loss``. Additional component-name
+    keys may also be present and map to weighted loss tensors.
+    """
+
+    total_loss: torch.Tensor
 
 
-def _validate_static_weights(weights: Any, expected_len: int) -> tuple[float, ...]:
-    """Coerce ``weights`` to a tuple of ``expected_len`` finite floats."""
-    try:
-        items = list(weights)
-    except TypeError as exc:
+def _validate_prediction_target(
+    loss: BaseLossFunction,
+    pred: torch.Tensor,
+    target: torch.Tensor,
+) -> None:
+    """Validate that prediction and target tensors have matching shapes."""
+    prediction_key = getattr(loss, "prediction_key", None)
+    target_key = getattr(loss, "target_key", None)
+    if pred.shape != target.shape:
         raise ValueError(
-            f"weights must be a list/tuple of floats; got {type(weights).__name__}."
-        ) from exc
-    for i, w in enumerate(items):
-        if isinstance(w, bool) or not isinstance(w, (int, float)):
-            raise ValueError(
-                f"weights[{i}] must be a non-bool int/float; got {type(w).__name__}."
-            )
-        coerced = float(w)
-        if not math.isfinite(coerced):
-            raise ValueError(f"weights[{i}] must be finite; got {coerced!r}")
-    if len(items) != expected_len:
-        raise ValueError(
-            f"weights length ({len(items)}) must equal components length "
-            f"({expected_len})"
+            f"{type(loss).__name__}: prediction and target shape mismatch; "
+            f"prediction_key={prediction_key!r} has shape {tuple(pred.shape)}, "
+            f"target_key={target_key!r} has shape {tuple(target.shape)}."
         )
-    return tuple(float(w) for w in items)
 
 
 class BaseLossFunction(nn.Module, abc.ABC):
     """Abstract :class:`torch.nn.Module` base for ALCHEMI loss functions.
 
-    **Subclass contract.** Concrete losses override :meth:`_forward` to
-    return the unweighted loss tensor. The public :meth:`forward` is
-    final: it returns ``current_weight(step, epoch) * _forward(...)``.
-    Do not override :meth:`forward` in a subclass — the language cannot
-    enforce this, but doing so breaks the schedule contract.
+    **Subclass contract.** Concrete losses override :meth:`_forward` with
+    tensor-first loss logic and return the unweighted loss tensor. The
+    public :meth:`forward` is final: it validates the prediction/target
+    tensor shapes, then returns
+    ``current_weight(step, epoch) * _forward(pred, target, **kwargs)``.
+    Do not override :meth:`forward` in a subclass unless you know what
+    you're doing.
 
-    Arithmetic (``+``, ``*``, ``/``) returns a
-    :class:`ComposedLossFunction`; ``sum([...])`` works via
-    :meth:`__radd__`.
+    Addition returns a :class:`ComposedLossFunction`; ``sum([...])`` works
+    via :meth:`__radd__`.
 
     Parameters
     ----------
@@ -91,21 +92,26 @@ class BaseLossFunction(nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def _forward(
-        self, batch: Batch, *, step: int = 0, epoch: int | None = None
+        self, pred: torch.Tensor, target: torch.Tensor, **kwargs: Any
     ) -> torch.Tensor:
         """Return the unweighted loss tensor."""
 
     def forward(
-        self, batch: Batch, *, step: int = 0, epoch: int | None = None
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        step: int = 0,
+        epoch: int | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Final wrapper: returns ``current_weight(step, epoch) * _forward(...)``."""
+        _validate_prediction_target(self, pred, target)
         if self.weight is None:
             # Identity-weight fast path: skip the `1.0 *` scalar multiply.
-            return self._forward(batch, step=step, epoch=epoch)
+            return self._forward(pred, target, step=step, epoch=epoch, **kwargs)
         w = self.current_weight(step, epoch)
-        if w == 1.0:
-            return self._forward(batch, step=step, epoch=epoch)
-        return w * self._forward(batch, step=step, epoch=epoch)
+        return w * self._forward(pred, target, step=step, epoch=epoch, **kwargs)
 
     def current_weight(self, step: int = 0, epoch: int | None = None) -> float:
         """Evaluate the scalar weight to apply at ``(step, epoch)``.
@@ -174,65 +180,51 @@ class BaseLossFunction(nn.Module, abc.ABC):
     # Arithmetic dunders — return ComposedLossFunction.
     def __add__(self, other: Any) -> ComposedLossFunction:
         """Return ``self + other`` flattening any existing compositions."""
-        if not isinstance(other, BaseLossFunction):
+        if not isinstance(other, (BaseLossFunction, ComposedLossFunction)):
             return NotImplemented
-        left_components, left_weights = _flatten(self)
-        right_components, right_weights = _flatten(other)
-        return ComposedLossFunction(
-            components=left_components + right_components,
-            static_weights=left_weights + right_weights,
-        )
+        return ComposedLossFunction(components=_flatten(self) + _flatten(other))
 
-    def __radd__(self, other: Any) -> BaseLossFunction:
+    def __radd__(self, other: Any) -> BaseLossFunction | ComposedLossFunction:
         """Return ``self`` when seeded with integer ``0`` (for :func:`sum`)."""
         if other == 0:
             return self
         return NotImplemented
 
-    def __mul__(self, scalar: Any) -> ComposedLossFunction:
-        """Return ``self * scalar``; scales every component's static weight."""
-        if not isinstance(scalar, (int, float)) or isinstance(scalar, bool):
-            return NotImplemented
-        factor = float(scalar)
-        if isinstance(self, ComposedLossFunction):
-            return ComposedLossFunction(
-                components=tuple(self.components),
-                static_weights=tuple(w * factor for w in self.static_weights),
-            )
-        return ComposedLossFunction(components=(self,), static_weights=(factor,))
-
-    def __rmul__(self, scalar: Any) -> ComposedLossFunction:
-        """Return ``scalar * self``; delegates to :meth:`__mul__`."""
-        return self.__mul__(scalar)
-
-    def __truediv__(self, scalar: Any) -> ComposedLossFunction:
-        """Return ``self / scalar`` as ``(1 / scalar) * self``."""
-        if not isinstance(scalar, (int, float)) or isinstance(scalar, bool):
-            return NotImplemented
-        divisor = float(scalar)
-        if divisor == 0.0:
-            raise ZeroDivisionError("cannot divide a loss by zero")
-        return self.__mul__(1.0 / divisor)
-
 
 def _flatten(
-    loss: BaseLossFunction,
-) -> tuple[tuple[BaseLossFunction, ...], tuple[float, ...]]:
-    """Return ``(components, static_weights)`` pulled from a composition, or wrap a bare loss."""
+    loss: BaseLossFunction | ComposedLossFunction,
+) -> tuple[BaseLossFunction, ...]:
+    """Return leaf components pulled from a composition, or wrap a bare loss."""
     if isinstance(loss, ComposedLossFunction):
-        return tuple(loss.components), tuple(loss.static_weights)
-    return (loss,), (1.0,)
+        return tuple(loss.components)
+    return (loss,)
 
 
-class ComposedLossFunction(BaseLossFunction):
-    """Weighted sum of :class:`BaseLossFunction` components.
+def _component_names(components: Sequence[BaseLossFunction]) -> tuple[str, ...]:
+    """Return class names with suffixes applied to duplicate component types."""
+    raw_names = tuple(type(comp).__name__ for comp in components)
+    counts: dict[str, int] = {}
+    for name in raw_names:
+        counts[name] = counts.get(name, 0) + 1
+    next_index: dict[str, int] = {}
+    names: list[str] = []
+    for name in raw_names:
+        if counts[name] > 1:
+            idx = next_index.get(name, 0)
+            next_index[name] = idx + 1
+            names.append(f"{name}_{idx}")
+        else:
+            names.append(name)
+    return tuple(names)
 
-    A composition does NOT carry its own schedule: outer scheduling, if
-    desired, is expressed via ``scalar * (a + b)`` or by multiplying
-    the result at the call site. :meth:`current_weight` always returns
-    ``1.0`` and raises if :attr:`weight` is ever set on a composition.
-    Each component's schedule fires exactly once, inside that
-    component's own ``forward``.
+
+class ComposedLossFunction(nn.Module):
+    """Sum of :class:`BaseLossFunction` components.
+
+    A composition does NOT carry its own schedule and is not itself a
+    :class:`BaseLossFunction`: it routes keyed prediction/target mappings
+    into each component's tensor-first ``forward`` method. Each component's
+    schedule fires exactly once, inside that component's own ``forward``.
 
     Components live in an :class:`torch.nn.ModuleList` for
     ``.modules()`` / ``.state_dict()`` / nested-``__repr__`` support.
@@ -241,108 +233,123 @@ class ComposedLossFunction(BaseLossFunction):
     ----------
     components
         Loss terms to combine; must contain at least one element.
-    static_weights
-        Static scalars broadcast into the components; length must equal
-        ``len(components)``. Defaults to ``(1.0,) * len(components)``.
     """
 
     def __init__(
         self,
-        components: Sequence[BaseLossFunction],
-        static_weights: Sequence[float] | None = None,
+        components: Sequence[BaseLossFunction | ComposedLossFunction],
     ) -> None:
-        """Initialize with ``components`` and matching ``static_weights``."""
+        """Initialize with ``components``."""
         super().__init__()
         components = tuple(components)
         if len(components) == 0:
             raise ValueError("components must contain at least one loss term")
         for i, comp in enumerate(components):
-            if not isinstance(comp, BaseLossFunction):
+            if not isinstance(comp, (BaseLossFunction, ComposedLossFunction)):
                 raise TypeError(
-                    f"components[{i}] must be a BaseLossFunction, got "
+                    f"components[{i}] must be a BaseLossFunction or "
+                    f"ComposedLossFunction, got "
                     f"{type(comp).__name__}"
                 )
-        self.components: nn.ModuleList = nn.ModuleList(components)
-        raw = (1.0,) * len(components) if static_weights is None else static_weights
-        self.static_weights: tuple[float, ...] = _validate_static_weights(
-            raw, expected_len=len(components)
-        )
+        # flattening is needed in case we are merging composed losses
+        flat_components: list[BaseLossFunction] = []
+        for comp in components:
+            flat_components.extend(_flatten(comp))
 
-    def _forward(
-        self, batch: Batch, *, step: int = 0, epoch: int | None = None
-    ) -> torch.Tensor:
-        """Return ``sum(static_w * comp(batch, step=step, epoch=epoch))``."""
-        # __init__ enforces at least one component, so next() cannot raise.
-        pairs = zip(self.static_weights, self.components, strict=True)
-        first_w, first_comp = next(pairs)
-        first_term = first_comp(batch, step=step, epoch=epoch)
-        # Identity-weight fast path: skip the `1.0 *` on the first term.
-        total = first_term if first_w == 1.0 else first_w * first_term
-        for static_w, comp in pairs:
-            term = comp(batch, step=step, epoch=epoch)
-            total = total + (term if static_w == 1.0 else static_w * term)
-        return total
+        self.components: nn.ModuleList = nn.ModuleList(flat_components)
 
-    def current_weight(self, step: int = 0, epoch: int | None = None) -> float:  # noqa: ARG002
-        """Return 1.0 — compositions do not carry their own schedule.
+    def forward(
+        self,
+        predictions: Mapping[str, torch.Tensor],
+        targets: Mapping[str, torch.Tensor],
+        *,
+        step: int = 0,
+        epoch: int | None = None,
+        **kwargs: Any,
+    ) -> ComposedLossOutput:
+        """Return total and weighted per-component loss contributions."""
+        total: torch.Tensor | None = None
+        contributions: dict[str, torch.Tensor] = {}
+        names = _component_names(tuple(self.components))
 
-        Raises
-        ------
-        RuntimeError
-            If :attr:`weight` has been set on this composition.
-        """
-        if self.weight is not None:
-            raise RuntimeError(
-                "ComposedLossFunction does not support its own schedule "
-                "(weight must be None). Attach schedules to individual "
-                "components, or scale the composition via `scalar * composed`."
-            )
-        return 1.0
+        for name, comp in zip(names, self.components, strict=True):
+            prediction_key = getattr(comp, "prediction_key", None)
+            target_key = getattr(comp, "target_key", None)
+            if prediction_key is None:
+                raise AttributeError(
+                    f"{type(comp).__name__} cannot be used in "
+                    "ComposedLossFunction without a prediction_key attribute."
+                )
+            if target_key is None:
+                raise AttributeError(
+                    f"{type(comp).__name__} cannot be used in "
+                    "ComposedLossFunction without a target_key attribute."
+                )
+            try:
+                pred = predictions[prediction_key]
+            except KeyError as exc:
+                raise KeyError(
+                    f"{type(comp).__name__}: prediction mapping is missing "
+                    f"key {prediction_key!r}"
+                ) from exc
+            try:
+                target = targets[target_key]
+            except KeyError as exc:
+                raise KeyError(
+                    f"{type(comp).__name__}: target mapping is missing "
+                    f"key {target_key!r}"
+                ) from exc
+            if not isinstance(pred, torch.Tensor):
+                raise TypeError(
+                    f"{type(comp).__name__}: prediction mapping key "
+                    f"{prediction_key!r} must resolve to torch.Tensor, "
+                    f"got {type(pred).__name__}."
+                )
+            if not isinstance(target, torch.Tensor):
+                raise TypeError(
+                    f"{type(comp).__name__}: target mapping key "
+                    f"{target_key!r} must resolve to torch.Tensor, "
+                    f"got {type(target).__name__}."
+                )
+            _validate_prediction_target(comp, pred, target)
+            term = comp(pred, target, step=step, epoch=epoch, **kwargs)
+
+            contributions[name] = term
+            total = term if total is None else total + term
+        if total is None:
+            raise RuntimeError("ComposedLossFunction has no components.")
+        contributions["total_loss"] = total
+
+        # cast is mainly for type checking; this is to show that
+        # we will guarantee a total_loss key
+        return cast(ComposedLossOutput, contributions)
 
     def weight_factors(
         self, step: int = 0, epoch: int | None = None
     ) -> dict[str, float]:
-        """Return a flat dict mapping each component's class name to its effective coefficient.
+        """Return a flat dict mapping each component's class name to its weight.
 
-        For a bare component ``c`` the entry is
-        ``static_weights[i] * c.current_weight(step, epoch)``. Nested
-        compositions are flattened recursively and their factors scaled
-        by the outer ``static_weights[i]``. Duplicate class names get
-        numeric suffixes (``_0``, ``_1``, ...) applied to *all*
-        colliding entries, not only the duplicates. The suffix pass
-        runs exactly once at the top level, so mixed
-        suffixed/unsuffixed output is not possible.
+        Duplicate class names get numeric suffixes (``_0``, ``_1``, ...)
+        applied to *all* colliding entries, not only the duplicates.
         """
-        pairs = self._flat_weight_factors(step, epoch)
-        counts: dict[str, int] = {}
-        for name, _ in pairs:
-            counts[name] = counts.get(name, 0) + 1
-        next_index: dict[str, int] = {}
-        out: dict[str, float] = {}
-        for name, coef in pairs:
-            if counts[name] > 1:
-                idx = next_index.get(name, 0)
-                next_index[name] = idx + 1
-                out[f"{name}_{idx}"] = coef
-            else:
-                out[name] = coef
-        return out
+        names = _component_names(tuple(self.components))
+        return {
+            name: comp.current_weight(step, epoch)
+            for name, comp in zip(names, self.components, strict=True)
+        }
 
-    def _flat_weight_factors(
-        self, step: int, epoch: int | None
-    ) -> list[tuple[str, float]]:
-        """Return raw ``(class_name, effective_coefficient)`` pairs without collision suffixing."""
-        collected: list[tuple[str, float]] = []
-        for static_w, comp in zip(self.static_weights, self.components, strict=True):
-            if isinstance(comp, ComposedLossFunction):
-                for name, coef in comp._flat_weight_factors(step, epoch):
-                    collected.append((name, static_w * coef))
-            else:
-                collected.append(
-                    (type(comp).__name__, static_w * comp.current_weight(step, epoch))
-                )
-        return collected
+    def __add__(self, other: Any) -> ComposedLossFunction:
+        """Return ``self + other`` flattening any existing compositions."""
+        if not isinstance(other, (BaseLossFunction, ComposedLossFunction)):
+            return NotImplemented
+        return ComposedLossFunction(components=_flatten(self) + _flatten(other))
+
+    def __radd__(self, other: Any) -> ComposedLossFunction:
+        """Return ``self`` when seeded with integer ``0`` (for :func:`sum`)."""
+        if other == 0:
+            return self
+        return NotImplemented
 
     def extra_repr(self) -> str:
-        """Expose static weights alongside the default nested-module repr."""
-        return f"static_weights={self.static_weights}"
+        """Expose component count alongside the default nested-module repr."""
+        return f"num_components={len(self.components)}"

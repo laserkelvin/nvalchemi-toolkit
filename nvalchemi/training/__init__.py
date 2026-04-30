@@ -31,6 +31,7 @@ from nvalchemi.training._stages import TrainingStage
 from nvalchemi.training.losses import (
     BaseLossFunction,
     ComposedLossFunction,
+    ComposedLossOutput,
     ConstantWeight,
     CosineWeight,
     EnergyLoss,
@@ -46,6 +47,7 @@ __all__ = [
     "BaseSpec",
     "CheckpointManifest",
     "ComposedLossFunction",
+    "ComposedLossOutput",
     "ConstantWeight",
     "CosineWeight",
     "EnergyLoss",

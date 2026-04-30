@@ -15,11 +15,13 @@
 """Loss-function abstractions, schedules, terms, and reductions.
 
 Loss terms are Pydantic-serializable :class:`BaseLossFunction` instances
-combinable via arithmetic (``2.0 * energy_loss + 10.0 * force_loss``).
-:class:`ComposedLossFunction` represents the resulting weighted sum. The
-structural fields of a composition (``components``, static ``weights``)
-round-trip through :class:`~nvalchemi.training.BaseSpec`; schedule
-instances attached to the ``weight`` field are not serialized and are
+that consume prediction and target tensors directly. Addition
+(``energy_loss + force_loss``) builds a :class:`ComposedLossFunction`,
+which routes keyed prediction/target mappings into those tensor-first
+terms and returns a :class:`ComposedLossOutput` with the total loss and
+per-component contributions. Loss coefficients and schedules belong on
+the leaf loss terms' ``weight`` fields.
+Schedule instances attached to a leaf loss's ``weight`` field are
 reconstructed by ``TrainingStrategy`` from their ``(instance, spec)``
 pair, mirroring the pattern used for models and optimizers.
 """
@@ -30,6 +32,7 @@ from nvalchemi.training.losses.base import LossWeightSchedule
 from nvalchemi.training.losses.composition import (
     BaseLossFunction,
     ComposedLossFunction,
+    ComposedLossOutput,
 )
 from nvalchemi.training.losses.reductions import (
     frobenius_mse,
@@ -52,6 +55,7 @@ from nvalchemi.training.losses.terms import (
 __all__ = [
     "BaseLossFunction",
     "ComposedLossFunction",
+    "ComposedLossOutput",
     "ConstantWeight",
     "CosineWeight",
     "EnergyLoss",

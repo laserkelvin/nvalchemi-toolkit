@@ -18,7 +18,8 @@ This module also re-exports :class:`BaseLossFunction` and
 :class:`ComposedLossFunction` from :mod:`.composition` for discoverability:
 subclass authors can do ``from nvalchemi.training.losses.base import
 BaseLossFunction`` without tracking the internal module layout. The
-canonical home of the two classes remains :mod:`.composition`.
+canonical home of the leaf base class, keyed composition aggregator, and
+composition output type remains :mod:`.composition`.
 """
 
 from __future__ import annotations
@@ -107,10 +108,12 @@ class _BaseWeightSchedule(BaseModel):
 from nvalchemi.training.losses.composition import (  # noqa: E402
     BaseLossFunction,
     ComposedLossFunction,
+    ComposedLossOutput,
 )
 
 __all__ = [
     "BaseLossFunction",
     "ComposedLossFunction",
+    "ComposedLossOutput",
     "LossWeightSchedule",
 ]
