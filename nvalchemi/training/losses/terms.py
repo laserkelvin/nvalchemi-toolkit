@@ -12,37 +12,52 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Concrete loss-term implementations.
+"""Concrete loss terms: :class:`EnergyLoss`, :class:`ForceLoss`, :class:`StressLoss`.
 
-This module defines :class:`EnergyLoss`, :class:`ForceLoss`, and
-:class:`StressLoss` — the three primary loss terms for ALCHEMI
-potentials. They operate on a :class:`~nvalchemi.data.batch.Batch` and
-take keyword-only ``step`` and ``epoch`` arguments. Targets are read
-from the canonical ``batch`` fields (``energy`` / ``forces`` /
-``stress``) and predictions from the ``predicted_*`` attribute
-convention that ``TrainingStrategy`` populates on the batch before
-invoking the loss. Both the target and prediction attribute names are
-configurable Pydantic fields so experiments can rewire them without
-subclassing.
-
-All three losses inherit composition arithmetic from
-:class:`~nvalchemi.training.losses.composition.BaseLossFunction`:
-``1.0 * EnergyLoss() + 10.0 * ForceLoss() + 0.1 * StressLoss()`` builds
-a :class:`~nvalchemi.training.losses.composition.ComposedLossFunction`.
+All three read targets from canonical batch fields (``energy`` /
+``forces`` / ``stress``) and predictions from the ``predicted_*``
+attribute convention that ``TrainingStrategy`` populates before
+invoking the loss. Attribute names are plain ``__init__`` arguments
+(``target_key`` / ``prediction_key``) so experiments can rewire them
+without subclassing. Composition arithmetic is inherited from
+:class:`~nvalchemi.training.losses.composition.BaseLossFunction`.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Any
 
 import torch
-from pydantic import Field
 
+from nvalchemi.training.losses.base import LossWeightSchedule
 from nvalchemi.training.losses.composition import BaseLossFunction
 from nvalchemi.training.losses.reductions import frobenius_mse, per_graph_sum
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from nvalchemi.data.batch import Batch
+
+
+_MISSING: object = object()
+
+
+def _required_batch_attr(
+    batch: Batch,
+    attr: str,
+    *,
+    error_message_factory: Callable[[bool], str],
+) -> Any:
+    """Return ``batch.<attr>`` or raise ``ValueError`` built lazily on miss.
+
+    ``error_message_factory(is_none)`` is invoked only on the error path;
+    its ``is_none`` argument distinguishes "attribute missing" from
+    "attribute present but ``None``".
+    """
+    value = getattr(batch, attr, _MISSING)
+    if value is _MISSING or value is None:
+        raise ValueError(error_message_factory(value is not _MISSING))
+    return value
 
 
 def _get_batch_attr(
@@ -52,23 +67,35 @@ def _get_batch_attr(
     loss_name: str,
     role: str,
 ) -> torch.Tensor:
-    """Return ``batch.<attr>`` or raise an actionable ``ValueError`` distinguishing missing-vs-``None``."""
-    suggestion = (
-        f"Populate batch.{attr}, or configure "
-        f"{loss_name}({role}_key=...) for your batch schema."
-    )
-    if not hasattr(batch, attr):
-        raise ValueError(
-            f"{loss_name} expected batch.{attr} but the attribute is "
-            f"missing from batch. {suggestion}"
-        )
-    value = getattr(batch, attr)
-    if value is None:
-        raise ValueError(
+    """Return ``batch.<attr>`` or raise a prediction/target-style ``ValueError``."""
+
+    def _message(is_none: bool) -> str:
+        state = "exists on batch and is None" if is_none else "is missing from batch"
+        return (
             f"{loss_name} expected batch.{attr} to be populated but it "
-            f"exists on batch and is None. {suggestion}"
+            f"{state}. Populate batch.{attr}, or configure "
+            f"{loss_name}({role}_key=...) for your batch schema."
         )
-    return value
+
+    return _required_batch_attr(batch, attr, error_message_factory=_message)
+
+
+def _require_graph_metadata(
+    batch: Batch,
+    attr: str,
+    *,
+    loss_name: str,
+    reason: str,
+) -> torch.Tensor | int:
+    """Return ``batch.<attr>`` or raise a metadata-style ``ValueError``."""
+
+    def _message(is_none: bool) -> str:  # noqa: ARG001
+        return (
+            f"{loss_name} ({reason}) requires 'batch.{attr}'; populate it "
+            f"on the Batch or reconfigure {loss_name} so it is not needed."
+        )
+
+    return _required_batch_attr(batch, attr, error_message_factory=_message)
 
 
 def _prediction_and_target(
@@ -78,11 +105,17 @@ def _prediction_and_target(
     *,
     loss_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fetch ``(prediction, target)`` tensors from ``batch`` via :func:`_get_batch_attr`."""
+    """Fetch ``(prediction, target)`` tensors and validate their shapes match."""
     pred = _get_batch_attr(
         batch, prediction_key, loss_name=loss_name, role="prediction"
     )
     target = _get_batch_attr(batch, target_key, loss_name=loss_name, role="target")
+    if pred.shape != target.shape:
+        raise ValueError(
+            f"{loss_name}: prediction and target shape mismatch; "
+            f"prediction_key={prediction_key!r} has shape {tuple(pred.shape)}, "
+            f"target_key={target_key!r} has shape {tuple(target.shape)}."
+        )
     return pred, target
 
 
@@ -90,44 +123,69 @@ class EnergyLoss(BaseLossFunction):
     """Mean-squared-error loss on per-graph total energy.
 
     Energy is already a per-graph quantity of shape ``(B, 1)``, so no
-    scatter reduction is needed: :meth:`compute` returns a plain MSE
-    over the batch. When ``per_atom`` is ``True``, both prediction and
-    target are divided by ``batch.num_nodes_per_graph`` before the MSE,
-    yielding a per-atom-normalized energy loss.
+    scatter reduction is needed: :meth:`_forward` returns a plain MSE
+    over the batch. When ``per_atom=True``, both prediction and target
+    are divided by ``batch.num_nodes_per_graph`` before the MSE, so
+    large graphs don't dominate the loss.
+
+    Parameters
+    ----------
+    target_key : str, default "energy"
+        Batch attribute name for the target tensor.
+    prediction_key : str, default "predicted_energy"
+        Batch attribute name for the model output.
+    per_atom : bool, default False
+        Divide both energies by ``batch.num_nodes_per_graph`` before MSE.
+    weight : LossWeightSchedule, optional
+        Scalar schedule applied in :meth:`forward`; ``None`` (default)
+        means an identity weight of ``1.0``.
     """
 
-    target_key: Annotated[
-        str,
-        Field(description="Name of the target-energy attribute on batch."),
-    ] = "energy"
-    prediction_key: Annotated[
-        str,
-        Field(description="Name of the predicted-energy attribute on batch."),
-    ] = "predicted_energy"
-    per_atom: Annotated[
-        bool,
-        Field(
-            description=(
-                "If True, divide predicted and target energy by "
-                "batch.num_nodes_per_graph before MSE."
-            ),
-        ),
-    ] = False
+    def __init__(
+        self,
+        *,
+        target_key: str = "energy",
+        prediction_key: str = "predicted_energy",
+        per_atom: bool = False,
+        weight: LossWeightSchedule | None = None,
+    ) -> None:
+        """Configure attribute keys and per-atom normalization."""
+        super().__init__(weight=weight)
+        self.target_key = target_key
+        self.prediction_key = prediction_key
+        self.per_atom = per_atom
 
-    def compute(
+    def _forward(
         self, batch: Batch, *, step: int = 0, epoch: int | None = None
-    ) -> torch.Tensor:
+    ) -> torch.Tensor:  # noqa: ARG002
         """Return the (optionally per-atom-normalized) energy MSE over the batch."""
         pred, target = _prediction_and_target(
             batch, self.prediction_key, self.target_key, loss_name="EnergyLoss"
         )
         if self.per_atom:
-            counts = batch.num_nodes_per_graph.to(
-                device=pred.device, dtype=pred.dtype
-            ).unsqueeze(-1)
+            raw_counts = _require_graph_metadata(
+                batch,
+                "num_nodes_per_graph",
+                loss_name="EnergyLoss(per_atom=True)",
+                reason="per_atom=True",
+            )
+            counts = raw_counts.to(device=pred.device, dtype=pred.dtype).unsqueeze(-1)
+            # ``num_nodes_per_graph`` should already be on ``pred.device`` for
+            # peak performance; the ``.to(...)`` above is a safety net. If
+            # profiling flags a host→device transfer here, the fix belongs in
+            # ``Batch`` collation, not in the loss.
             pred = pred / counts
             target = target / counts
         return (pred - target).pow(2).mean()
+
+    def extra_repr(self) -> str:
+        """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
+        return (
+            f"target_key={self.target_key!r}, "
+            f"prediction_key={self.prediction_key!r}, "
+            f"per_atom={self.per_atom!r}, "
+            f"weight={self.weight!r}"
+        )
 
 
 class ForceLoss(BaseLossFunction):
@@ -136,54 +194,85 @@ class ForceLoss(BaseLossFunction):
     Both branches return the mean-squared force *component* and differ
     only in whether each graph is weighted equally or each atom is:
 
-    - ``normalize_by_atom_count=True`` (default): per-graph mean of the
-      squared-component error, then mean over graphs. Small and large
-      graphs contribute equally to the final scalar. Uses
-      :func:`~nvalchemi.training.losses.reductions.per_graph_sum` and
-      reuses ``batch.num_nodes_per_graph`` (clamped to ≥ 1) as the
-      denominator to avoid the extra ``bincount`` inside
-      ``per_graph_mean``.
-    - ``normalize_by_atom_count=False``: elementwise mean over the
-      full ``(V, 3)`` tensor — each atom-component contributes equally
-      regardless of graph.
+    - ``normalize_by_atom_count=True`` (default): per-graph mean of
+      squared-component error via :func:`per_graph_sum`, then mean
+      over graphs. Small and large graphs contribute equally.
+    - ``normalize_by_atom_count=False``: elementwise mean over the full
+      ``(V, 3)`` tensor.
+
+    Parameters
+    ----------
+    target_key : str, default "forces"
+        Batch attribute name for the target tensor.
+    prediction_key : str, default "predicted_forces"
+        Batch attribute name for the model output.
+    normalize_by_atom_count : bool, default True
+        Divide per-graph force MSE by number of atoms before mean.
+    weight : LossWeightSchedule, optional
+        Scalar schedule applied in :meth:`forward`; ``None`` (default)
+        means an identity weight of ``1.0``.
     """
 
-    target_key: Annotated[
-        str,
-        Field(description="Name of the target-forces attribute on batch."),
-    ] = "forces"
-    prediction_key: Annotated[
-        str,
-        Field(description="Name of the predicted-forces attribute on batch."),
-    ] = "predicted_forces"
-    normalize_by_atom_count: Annotated[
-        bool,
-        Field(
-            description=(
-                "If True, per-graph mean of squared error then mean over "
-                "graphs (each graph weighted equally). If False, "
-                "elementwise mean over all atoms and components."
-            ),
-        ),
-    ] = True
+    def __init__(
+        self,
+        *,
+        target_key: str = "forces",
+        prediction_key: str = "predicted_forces",
+        normalize_by_atom_count: bool = True,
+        weight: LossWeightSchedule | None = None,
+    ) -> None:
+        """Configure attribute keys and per-graph normalization."""
+        super().__init__(weight=weight)
+        self.target_key = target_key
+        self.prediction_key = prediction_key
+        self.normalize_by_atom_count = normalize_by_atom_count
 
-    def compute(
+    def _forward(
         self, batch: Batch, *, step: int = 0, epoch: int | None = None
-    ) -> torch.Tensor:
-        """Return the force-component MSE (optionally graph-balanced via per-atom-count normalization)."""
+    ) -> torch.Tensor:  # noqa: ARG002
+        """Return the force-component MSE (optionally graph-balanced)."""
         pred, target = _prediction_and_target(
             batch, self.prediction_key, self.target_key, loss_name="ForceLoss"
         )
         if not self.normalize_by_atom_count:
             return (pred - target).pow(2).mean()
-        per_atom_se = (pred - target).pow(2).sum(dim=-1)
-        per_graph_se_sum = per_graph_sum(
-            per_atom_se, batch.batch_idx, num_graphs=batch.num_graphs
+        batch_idx = _require_graph_metadata(
+            batch,
+            "batch_idx",
+            loss_name="ForceLoss(normalize_by_atom_count=True)",
+            reason="normalize_by_atom_count=True",
         )
-        counts = batch.num_nodes_per_graph.to(
+        num_graphs = _require_graph_metadata(
+            batch,
+            "num_graphs",
+            loss_name="ForceLoss(normalize_by_atom_count=True)",
+            reason="normalize_by_atom_count=True",
+        )
+        raw_counts = _require_graph_metadata(
+            batch,
+            "num_nodes_per_graph",
+            loss_name="ForceLoss(normalize_by_atom_count=True)",
+            reason="normalize_by_atom_count=True",
+        )
+        per_atom_se = (pred - target).pow(2).sum(dim=-1)
+        per_graph_se_sum = per_graph_sum(per_atom_se, batch_idx, num_graphs=num_graphs)
+        # See note in ``EnergyLoss._forward``: ``num_nodes_per_graph`` is
+        # expected to already be on the same device as ``per_atom_se``. The
+        # ``.to(...)`` guards mixed-device batches; if it becomes a
+        # bottleneck the fix belongs in ``Batch`` collation.
+        counts = raw_counts.to(
             device=per_atom_se.device, dtype=per_atom_se.dtype
         ).clamp_min(1)
         return (per_graph_se_sum / counts).mean() / 3.0
+
+    def extra_repr(self) -> str:
+        """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
+        return (
+            f"target_key={self.target_key!r}, "
+            f"prediction_key={self.prediction_key!r}, "
+            f"normalize_by_atom_count={self.normalize_by_atom_count!r}, "
+            f"weight={self.weight!r}"
+        )
 
 
 class StressLoss(BaseLossFunction):
@@ -192,22 +281,43 @@ class StressLoss(BaseLossFunction):
     Both pred and target are shape ``(B, 3, 3)``. The loss is the mean
     of the per-graph squared-Frobenius residual, computed via
     :func:`~nvalchemi.training.losses.reductions.frobenius_mse`.
+
+    Parameters
+    ----------
+    target_key : str, default "stress"
+        Batch attribute name for the target tensor.
+    prediction_key : str, default "predicted_stress"
+        Batch attribute name for the model output.
+    weight : LossWeightSchedule, optional
+        Scalar schedule applied in :meth:`forward`; ``None`` (default)
+        means an identity weight of ``1.0``.
     """
 
-    target_key: Annotated[
-        str,
-        Field(description="Name of the target-stress attribute on batch."),
-    ] = "stress"
-    prediction_key: Annotated[
-        str,
-        Field(description="Name of the predicted-stress attribute on batch."),
-    ] = "predicted_stress"
+    def __init__(
+        self,
+        *,
+        target_key: str = "stress",
+        prediction_key: str = "predicted_stress",
+        weight: LossWeightSchedule | None = None,
+    ) -> None:
+        """Configure attribute keys for target and prediction."""
+        super().__init__(weight=weight)
+        self.target_key = target_key
+        self.prediction_key = prediction_key
 
-    def compute(
+    def _forward(
         self, batch: Batch, *, step: int = 0, epoch: int | None = None
-    ) -> torch.Tensor:
+    ) -> torch.Tensor:  # noqa: ARG002
         """Return the mean per-graph Frobenius MSE of the stress tensor."""
         pred, target = _prediction_and_target(
             batch, self.prediction_key, self.target_key, loss_name="StressLoss"
         )
         return frobenius_mse(pred, target).mean()
+
+    def extra_repr(self) -> str:
+        """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
+        return (
+            f"target_key={self.target_key!r}, "
+            f"prediction_key={self.prediction_key!r}, "
+            f"weight={self.weight!r}"
+        )
