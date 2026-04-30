@@ -1114,3 +1114,226 @@ class TestConcreteLosses:
         # |pred - target|^2 sum over 3 components = 3 per atom.
         # per-graph mean = 3; mean over graphs = 3; / 3 = 1.0.
         assert torch.allclose(got, torch.tensor(1.0), atol=1e-6)
+
+
+class TestIgnoreNaN:
+    """Tests for the opt-in ``ignore_nan`` masking in concrete losses.
+
+    Targets with ``NaN`` represent missing labels and must not contribute
+    to loss value or gradient. Predictions are assumed finite. The
+    implementation uses branch-free tensor ops, so behavior is the same
+    as the eager path these tests assert.
+    """
+
+    def setup_method(self) -> None:
+        # Reuse the 3,5,2-atom layout from ``TestConcreteLosses`` so per-atom
+        # normalization and multi-graph masking paths are all exercised.
+        self.nodes_per_graph = [3, 5, 2]
+        self.num_graphs = 3
+        self.num_nodes = sum(self.nodes_per_graph)
+        self.batch_idx = torch.tensor([0, 0, 0, 1, 1, 1, 1, 1, 2, 2], dtype=torch.int32)
+        self.num_nodes_per_graph = torch.tensor(self.nodes_per_graph, dtype=torch.long)
+
+    def _batch(self, **extra: torch.Tensor) -> SimpleNamespace:
+        return SimpleNamespace(
+            batch_idx=self.batch_idx,
+            num_graphs=self.num_graphs,
+            num_nodes_per_graph=self.num_nodes_per_graph,
+            **extra,
+        )
+
+    # ---- EnergyLoss ---------------------------------------------------
+
+    def test_energy_loss_default_propagates_nan(self) -> None:
+        target = torch.tensor([[1.0], [float("nan")], [3.0]])
+        pred = torch.tensor([[1.5], [2.5], [3.5]])
+        batch = self._batch(energy=target, predicted_energy=pred)
+        got = EnergyLoss()(batch)
+        assert torch.isnan(got)
+
+    def test_energy_loss_ignore_nan_masks_missing_targets(self) -> None:
+        target = torch.tensor([[1.0], [float("nan")], [3.0]])
+        pred = torch.tensor([[1.5], [2.5], [3.5]])
+        batch = self._batch(energy=target, predicted_energy=pred)
+        got = EnergyLoss(ignore_nan=True)(batch)
+        # Valid entries contribute (0.5)^2 and (0.5)^2; two valid entries.
+        expected = torch.tensor((0.25 + 0.25) / 2.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_energy_loss_ignore_nan_zero_gradient_at_nan_positions(self) -> None:
+        target = torch.tensor([[1.0], [float("nan")], [3.0]])
+        pred = torch.tensor([[1.5], [10.0], [3.5]], requires_grad=True)
+        batch = self._batch(energy=target, predicted_energy=pred)
+        EnergyLoss(ignore_nan=True)(batch).backward()
+        assert pred.grad is not None
+        # The NaN-target entry must receive exactly zero gradient.
+        assert pred.grad[1].item() == 0.0
+        # Other entries must receive finite, non-zero gradient.
+        assert torch.isfinite(pred.grad).all()
+        assert pred.grad[0].item() != 0.0
+        assert pred.grad[2].item() != 0.0
+
+    def test_energy_loss_ignore_nan_all_nan_gives_zero(self) -> None:
+        target = torch.full((self.num_graphs, 1), float("nan"))
+        pred = torch.randn(self.num_graphs, 1, requires_grad=True)
+        batch = self._batch(energy=target, predicted_energy=pred)
+        got = EnergyLoss(ignore_nan=True)(batch)
+        assert torch.allclose(got, torch.tensor(0.0))
+        got.backward()
+        assert pred.grad is not None
+        assert torch.all(pred.grad == 0.0)
+
+    def test_energy_loss_ignore_nan_per_atom_applies_normalization_first(self) -> None:
+        # Per-atom normalization must be applied before masking so the
+        # valid-entry MSE is computed on per-atom values, not raw energies.
+        target = torch.tensor([[3.0], [float("nan")], [4.0]])  # per-atom: 1, -, 2
+        pred = torch.tensor([[6.0], [15.0], [8.0]])  # per-atom: 2, 3, 4
+        batch = self._batch(energy=target, predicted_energy=pred)
+        got = EnergyLoss(per_atom=True, ignore_nan=True)(batch)
+        # Valid per-atom diffs: (2-1)=1 and (4-2)=2; MSE over 2 entries.
+        expected = torch.tensor((1.0 + 4.0) / 2.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_energy_loss_ignore_nan_off_matches_baseline(self) -> None:
+        target = torch.randn(self.num_graphs, 1)
+        pred = torch.randn(self.num_graphs, 1)
+        batch = self._batch(energy=target, predicted_energy=pred)
+        baseline = EnergyLoss()(batch)
+        opt_in = EnergyLoss(ignore_nan=True)(batch)
+        assert torch.allclose(baseline, opt_in, atol=1e-6)
+
+    # ---- ForceLoss ----------------------------------------------------
+
+    def test_force_loss_default_propagates_nan(self) -> None:
+        target = torch.zeros(self.num_nodes, 3)
+        target[4, 1] = float("nan")
+        pred = torch.ones(self.num_nodes, 3)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        assert torch.isnan(ForceLoss(normalize_by_atom_count=True)(batch))
+        assert torch.isnan(ForceLoss(normalize_by_atom_count=False)(batch))
+
+    def test_force_loss_ignore_nan_global_masks_missing_components(self) -> None:
+        target = torch.zeros(self.num_nodes, 3)
+        target[4, 1] = float("nan")  # one component missing
+        pred = torch.ones(self.num_nodes, 3)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        got = ForceLoss(normalize_by_atom_count=False, ignore_nan=True)(batch)
+        # V*3 - 1 = 29 valid entries, each contributing (1 - 0)^2 = 1.
+        expected = torch.tensor(29.0 / 29.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_force_loss_ignore_nan_per_graph_all_nan_graph_zero_contribution(
+        self,
+    ) -> None:
+        # Graph 1 (atoms 3..7) has fully-NaN force labels; graphs 0 and 2
+        # are fully labeled. The all-NaN graph must contribute zero to the
+        # mean over graphs.
+        target = torch.zeros(self.num_nodes, 3)
+        target[3:8] = float("nan")
+        pred = torch.ones(self.num_nodes, 3)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        got = ForceLoss(normalize_by_atom_count=True, ignore_nan=True)(batch)
+        # Graph 0: 3 atoms * 3 components all valid, each (1-0)^2 = 1,
+        # per-graph loss = 9/9 = 1. Graph 2: 2 atoms * 3 components all
+        # valid, per-graph loss = 6/6 = 1. Graph 1: all NaN, loss = 0.
+        # Mean over 3 graphs = (1 + 0 + 1) / 3.
+        expected = torch.tensor(2.0 / 3.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_force_loss_ignore_nan_per_graph_partial_mask(self) -> None:
+        # Single component missing on one atom; check the per-graph
+        # denominator reflects 3*n_atoms - missing, not 3*n_atoms.
+        target = torch.zeros(self.num_nodes, 3)
+        target[0, 0] = float("nan")  # graph 0, atom 0, x component
+        pred = torch.ones(self.num_nodes, 3)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        got = ForceLoss(normalize_by_atom_count=True, ignore_nan=True)(batch)
+        # Graph 0: 8 valid components (out of 9), each contributes 1; loss = 8/8 = 1.
+        # Graph 1: 15/15 = 1. Graph 2: 6/6 = 1. Mean = 1.0.
+        expected = torch.tensor(1.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_force_loss_ignore_nan_zero_gradient_at_nan_positions(self) -> None:
+        target = torch.zeros(self.num_nodes, 3)
+        target[0, 0] = float("nan")
+        pred = torch.randn(self.num_nodes, 3, requires_grad=True)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        ForceLoss(normalize_by_atom_count=True, ignore_nan=True)(batch).backward()
+        assert pred.grad is not None
+        assert pred.grad[0, 0].item() == 0.0
+        # At least one other component receives non-zero gradient.
+        assert torch.isfinite(pred.grad).all()
+        assert (pred.grad != 0.0).any()
+
+    def test_force_loss_ignore_nan_off_matches_baseline(
+        self, fixed_torch_seed: None
+    ) -> None:
+        target = torch.randn(self.num_nodes, 3)
+        pred = torch.randn(self.num_nodes, 3)
+        batch = self._batch(forces=target, predicted_forces=pred)
+        for norm in (True, False):
+            baseline = ForceLoss(normalize_by_atom_count=norm)(batch)
+            opt_in = ForceLoss(normalize_by_atom_count=norm, ignore_nan=True)(batch)
+            assert torch.allclose(baseline, opt_in, atol=1e-6)
+
+    # ---- StressLoss ---------------------------------------------------
+
+    def test_stress_loss_default_propagates_nan(self) -> None:
+        target = torch.zeros(self.num_graphs, 3, 3)
+        target[1, 2, 2] = float("nan")
+        pred = torch.ones(self.num_graphs, 3, 3)
+        batch = self._batch(stress=target, predicted_stress=pred)
+        assert torch.isnan(StressLoss()(batch))
+
+    def test_stress_loss_ignore_nan_all_nan_graph_zero_contribution(self) -> None:
+        target = torch.zeros(self.num_graphs, 3, 3)
+        target[1] = float("nan")  # full graph 1 unlabeled
+        pred = torch.ones(self.num_graphs, 3, 3)
+        batch = self._batch(stress=target, predicted_stress=pred)
+        got = StressLoss(ignore_nan=True)(batch)
+        # Graph 0: 9 valid entries each (1-0)^2 = 1, per-graph loss = 9/9 = 1.
+        # Graph 1: all NaN, loss = 0. Graph 2: loss = 1.
+        # Mean = (1 + 0 + 1) / 3.
+        expected = torch.tensor(2.0 / 3.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_stress_loss_ignore_nan_partial_mask(self) -> None:
+        target = torch.zeros(self.num_graphs, 3, 3)
+        target[0, 0, 0] = float("nan")  # one entry missing in graph 0
+        pred = torch.ones(self.num_graphs, 3, 3)
+        batch = self._batch(stress=target, predicted_stress=pred)
+        got = StressLoss(ignore_nan=True)(batch)
+        # Graph 0: 8 valid entries of (1-0)^2 = 1 -> loss = 8/8 = 1.
+        # Graphs 1, 2: loss = 1. Mean = 1.0.
+        expected = torch.tensor(1.0)
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_stress_loss_ignore_nan_zero_gradient_at_nan_positions(self) -> None:
+        target = torch.zeros(self.num_graphs, 3, 3)
+        target[0, 0, 0] = float("nan")
+        pred = torch.randn(self.num_graphs, 3, 3, requires_grad=True)
+        batch = self._batch(stress=target, predicted_stress=pred)
+        StressLoss(ignore_nan=True)(batch).backward()
+        assert pred.grad is not None
+        assert pred.grad[0, 0, 0].item() == 0.0
+        assert torch.isfinite(pred.grad).all()
+
+    def test_stress_loss_ignore_nan_off_matches_baseline(
+        self, fixed_torch_seed: None
+    ) -> None:
+        target = torch.randn(self.num_graphs, 3, 3)
+        pred = torch.randn(self.num_graphs, 3, 3)
+        batch = self._batch(stress=target, predicted_stress=pred)
+        baseline = StressLoss()(batch)
+        opt_in = StressLoss(ignore_nan=True)(batch)
+        assert torch.allclose(baseline, opt_in, atol=1e-6)
+
+    # ---- Repr ---------------------------------------------------------
+
+    def test_ignore_nan_appears_in_extra_repr(self) -> None:
+        for loss in (
+            EnergyLoss(ignore_nan=True),
+            ForceLoss(ignore_nan=True),
+            StressLoss(ignore_nan=True),
+        ):
+            assert "ignore_nan=True" in repr(loss)

@@ -119,6 +119,35 @@ def _prediction_and_target(
     return pred, target
 
 
+def _masked_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Return mean-squared-error over finite target entries only.
+
+    Uses branch-free tensor ops so the loss is safe under ``torch.compile``:
+    no Python ``if`` on tensor values, no boolean indexing, no ``.item()``.
+    Target positions with ``NaN`` contribute zero to both numerator and
+    denominator; predictions at those positions receive zero gradient.
+    When every target entry is ``NaN`` the denominator is clamped to ``1``
+    so the loss is ``0.0`` rather than ``NaN``.
+
+    Parameters
+    ----------
+    pred : torch.Tensor
+        Prediction tensor. Expected to be fully finite.
+    target : torch.Tensor
+        Target tensor of the same shape as ``pred``; may contain ``NaN``
+        at positions representing missing labels.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar mean of squared residuals over valid target entries.
+    """
+    valid = ~target.isnan()
+    residual = torch.where(valid, pred - target, torch.zeros_like(pred))
+    denom = valid.to(dtype=pred.dtype).sum().clamp_min(1.0)
+    return residual.pow(2).sum() / denom
+
+
 class EnergyLoss(BaseLossFunction):
     """Mean-squared-error loss on per-graph total energy.
 
@@ -136,6 +165,13 @@ class EnergyLoss(BaseLossFunction):
         Batch attribute name for the model output.
     per_atom : bool, default False
         Divide both energies by ``batch.num_nodes_per_graph`` before MSE.
+    ignore_nan : bool, default False
+        When ``True``, target entries equal to ``NaN`` are excluded from
+        both loss value and gradient (a "nanmean"-style reduction).
+        Intended for batches where some samples lack an energy label.
+        Implemented with branch-free tensor ops for ``torch.compile``
+        compatibility. When every target entry is ``NaN`` the loss is
+        ``0.0``.
     weight : LossWeightSchedule, optional
         Scalar schedule applied in :meth:`forward`; ``None`` (default)
         means an identity weight of ``1.0``.
@@ -147,6 +183,7 @@ class EnergyLoss(BaseLossFunction):
         target_key: str = "energy",
         prediction_key: str = "predicted_energy",
         per_atom: bool = False,
+        ignore_nan: bool = False,
         weight: LossWeightSchedule | None = None,
     ) -> None:
         """Configure attribute keys and per-atom normalization."""
@@ -154,6 +191,7 @@ class EnergyLoss(BaseLossFunction):
         self.target_key = target_key
         self.prediction_key = prediction_key
         self.per_atom = per_atom
+        self.ignore_nan = ignore_nan
 
     def _forward(
         self, batch: Batch, *, step: int = 0, epoch: int | None = None
@@ -176,6 +214,8 @@ class EnergyLoss(BaseLossFunction):
             # ``Batch`` collation, not in the loss.
             pred = pred / counts
             target = target / counts
+        if self.ignore_nan:
+            return _masked_mse(pred, target)
         return (pred - target).pow(2).mean()
 
     def extra_repr(self) -> str:
@@ -184,6 +224,7 @@ class EnergyLoss(BaseLossFunction):
             f"target_key={self.target_key!r}, "
             f"prediction_key={self.prediction_key!r}, "
             f"per_atom={self.per_atom!r}, "
+            f"ignore_nan={self.ignore_nan!r}, "
             f"weight={self.weight!r}"
         )
 
@@ -208,6 +249,13 @@ class ForceLoss(BaseLossFunction):
         Batch attribute name for the model output.
     normalize_by_atom_count : bool, default True
         Divide per-graph force MSE by number of atoms before mean.
+    ignore_nan : bool, default False
+        When ``True``, target force components equal to ``NaN`` are
+        excluded from both loss value and gradient. Intended for batches
+        where some atoms/graphs lack force labels. Implemented with
+        branch-free tensor ops for ``torch.compile`` compatibility. A
+        graph whose entire force tensor is ``NaN`` contributes ``0.0``
+        to the loss.
     weight : LossWeightSchedule, optional
         Scalar schedule applied in :meth:`forward`; ``None`` (default)
         means an identity weight of ``1.0``.
@@ -219,6 +267,7 @@ class ForceLoss(BaseLossFunction):
         target_key: str = "forces",
         prediction_key: str = "predicted_forces",
         normalize_by_atom_count: bool = True,
+        ignore_nan: bool = False,
         weight: LossWeightSchedule | None = None,
     ) -> None:
         """Configure attribute keys and per-graph normalization."""
@@ -226,6 +275,7 @@ class ForceLoss(BaseLossFunction):
         self.target_key = target_key
         self.prediction_key = prediction_key
         self.normalize_by_atom_count = normalize_by_atom_count
+        self.ignore_nan = ignore_nan
 
     def _forward(
         self, batch: Batch, *, step: int = 0, epoch: int | None = None
@@ -235,6 +285,8 @@ class ForceLoss(BaseLossFunction):
             batch, self.prediction_key, self.target_key, loss_name="ForceLoss"
         )
         if not self.normalize_by_atom_count:
+            if self.ignore_nan:
+                return _masked_mse(pred, target)
             return (pred - target).pow(2).mean()
         batch_idx = _require_graph_metadata(
             batch,
@@ -248,6 +300,21 @@ class ForceLoss(BaseLossFunction):
             loss_name="ForceLoss(normalize_by_atom_count=True)",
             reason="normalize_by_atom_count=True",
         )
+        if self.ignore_nan:
+            # Per-component masking: the valid-component count per graph
+            # already encodes the per-atom 3-component normalization, so
+            # this branch does NOT trail a ``/3.0`` like the dense branch.
+            valid = ~target.isnan()
+            residual = torch.where(valid, pred - target, torch.zeros_like(pred))
+            per_atom_se = residual.pow(2).sum(dim=-1)
+            per_atom_valid = valid.to(dtype=pred.dtype).sum(dim=-1)
+            per_graph_se_sum = per_graph_sum(
+                per_atom_se, batch_idx, num_graphs=num_graphs
+            )
+            per_graph_valid = per_graph_sum(
+                per_atom_valid, batch_idx, num_graphs=num_graphs
+            )
+            return (per_graph_se_sum / per_graph_valid.clamp_min(1.0)).mean()
         raw_counts = _require_graph_metadata(
             batch,
             "num_nodes_per_graph",
@@ -271,6 +338,7 @@ class ForceLoss(BaseLossFunction):
             f"target_key={self.target_key!r}, "
             f"prediction_key={self.prediction_key!r}, "
             f"normalize_by_atom_count={self.normalize_by_atom_count!r}, "
+            f"ignore_nan={self.ignore_nan!r}, "
             f"weight={self.weight!r}"
         )
 
@@ -288,6 +356,13 @@ class StressLoss(BaseLossFunction):
         Batch attribute name for the target tensor.
     prediction_key : str, default "predicted_stress"
         Batch attribute name for the model output.
+    ignore_nan : bool, default False
+        When ``True``, target stress components equal to ``NaN`` are
+        excluded from both loss value and gradient. Intended for batches
+        that mix samples with and without stress labels. Implemented
+        with branch-free tensor ops for ``torch.compile`` compatibility.
+        A graph whose entire stress tensor is ``NaN`` contributes
+        ``0.0`` to the loss.
     weight : LossWeightSchedule, optional
         Scalar schedule applied in :meth:`forward`; ``None`` (default)
         means an identity weight of ``1.0``.
@@ -298,12 +373,14 @@ class StressLoss(BaseLossFunction):
         *,
         target_key: str = "stress",
         prediction_key: str = "predicted_stress",
+        ignore_nan: bool = False,
         weight: LossWeightSchedule | None = None,
     ) -> None:
         """Configure attribute keys for target and prediction."""
         super().__init__(weight=weight)
         self.target_key = target_key
         self.prediction_key = prediction_key
+        self.ignore_nan = ignore_nan
 
     def _forward(
         self, batch: Batch, *, step: int = 0, epoch: int | None = None
@@ -312,6 +389,17 @@ class StressLoss(BaseLossFunction):
         pred, target = _prediction_and_target(
             batch, self.prediction_key, self.target_key, loss_name="StressLoss"
         )
+        if self.ignore_nan:
+            # Per-component masking on ``(B, 3, 3)``: reduce squared
+            # residuals and valid-component counts over the two trailing
+            # dims, divide per-graph, then average over graphs. A graph
+            # with all-NaN stress has numerator 0 and denominator clamped
+            # to 1, contributing zero.
+            valid = ~target.isnan()
+            residual = torch.where(valid, pred - target, torch.zeros_like(pred))
+            per_graph_num = residual.pow(2).sum(dim=(-2, -1))
+            per_graph_den = valid.to(dtype=pred.dtype).sum(dim=(-2, -1)).clamp_min(1.0)
+            return (per_graph_num / per_graph_den).mean()
         return frobenius_mse(pred, target).mean()
 
     def extra_repr(self) -> str:
@@ -319,5 +407,6 @@ class StressLoss(BaseLossFunction):
         return (
             f"target_key={self.target_key!r}, "
             f"prediction_key={self.prediction_key!r}, "
+            f"ignore_nan={self.ignore_nan!r}, "
             f"weight={self.weight!r}"
         )
