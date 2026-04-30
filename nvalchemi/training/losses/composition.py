@@ -61,13 +61,11 @@ def _validate_prediction_target(
 class BaseLossFunction(nn.Module, abc.ABC):
     """Abstract :class:`torch.nn.Module` base for ALCHEMI loss functions.
 
-    **Subclass contract.** Concrete losses override :meth:`_forward` with
-    tensor-first loss logic and return the unweighted loss tensor. The
-    public :meth:`forward` is final: it validates the prediction/target
-    tensor shapes, then returns
-    ``current_weight(step, epoch) * _forward(pred, target, **kwargs)``.
-    Do not override :meth:`forward` in a subclass unless you know what
-    you're doing.
+    Concrete losses override :meth:`_forward` with tensor-first loss
+    logic and return the unweighted loss tensor. The :meth:`forward`
+    method will call the user's defined :meth:`_forward`, with shape
+    validation on the predictions and targets, then applies the
+    scheduled weighting value if specified.
 
     Addition returns a :class:`ComposedLossFunction`; ``sum([...])`` works
     via :meth:`__radd__`.
@@ -76,8 +74,7 @@ class BaseLossFunction(nn.Module, abc.ABC):
     ----------
     weight
         Optional scalar schedule. ``None`` (default) means an identity
-        weight of ``1.0``; :meth:`current_weight` skips schedule
-        evaluation entirely in that case.
+        weight of ``1.0``.
 
     Attributes
     ----------
@@ -107,9 +104,6 @@ class BaseLossFunction(nn.Module, abc.ABC):
     ) -> torch.Tensor:
         """Final wrapper: returns ``current_weight(step, epoch) * _forward(...)``."""
         _validate_prediction_target(self, pred, target)
-        if self.weight is None:
-            # Identity-weight fast path: skip the `1.0 *` scalar multiply.
-            return self._forward(pred, target, step=step, epoch=epoch, **kwargs)
         w = self.current_weight(step, epoch)
         return w * self._forward(pred, target, step=step, epoch=epoch, **kwargs)
 
@@ -221,8 +215,7 @@ def _component_names(components: Sequence[BaseLossFunction]) -> tuple[str, ...]:
 class ComposedLossFunction(nn.Module):
     """Sum of :class:`BaseLossFunction` components.
 
-    A composition does NOT carry its own schedule and is not itself a
-    :class:`BaseLossFunction`: it routes keyed prediction/target mappings
+    The role of this class is to rout keyed prediction/target mappings
     into each component's tensor-first ``forward`` method. Each component's
     schedule fires exactly once, inside that component's own ``forward``.
 
