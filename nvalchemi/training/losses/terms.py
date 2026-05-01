@@ -23,7 +23,7 @@ loss terms.
 
 from __future__ import annotations
 
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 from jaxtyping import Bool, Float, Integer
@@ -32,6 +32,9 @@ from plum import dispatch, overload
 from nvalchemi._typing import BatchIndices, Energy, Forces, Scalar, Stress
 from nvalchemi.training.losses.composition import BaseLossFunction, assert_same_shape
 from nvalchemi.training.losses.reductions import frobenius_mse, per_graph_sum
+
+if TYPE_CHECKING:
+    from nvalchemi.data.batch import Batch
 
 _AnyFloatTensor: TypeAlias = Float[torch.Tensor, "..."]
 _NodeCounts: TypeAlias = Integer[torch.Tensor, "B"]
@@ -224,6 +227,7 @@ class EnergyLoss(BaseLossFunction):
         *,
         step: int = 0,  # noqa: ARG002
         epoch: int | None = None,  # noqa: ARG002
+        batch: Batch | None = None,
         num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
         **kwargs: Any,  # noqa: ARG002
     ) -> Scalar:
@@ -240,6 +244,9 @@ class EnergyLoss(BaseLossFunction):
             forward training counters uniformly to every component.
         epoch : int | None, default None
             Ignored; accepted for the same reason as ``step``.
+        batch : Batch | None, optional
+            Source for missing graph metadata. Explicit metadata kwargs
+            override batch-derived values when both are provided.
         num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None, optional
             Per-graph node counts or padded node-validity mask. Required
             when ``per_atom=True``.
@@ -259,6 +266,8 @@ class EnergyLoss(BaseLossFunction):
             prediction_key=self.prediction_key,
             target_key=self.target_key,
         )
+        if batch is not None and self.per_atom and num_nodes_per_graph is None:
+            num_nodes_per_graph = getattr(batch, "num_nodes_per_graph", None)
         if self.per_atom:
             counts = _node_counts(num_nodes_per_graph, pred).unsqueeze(-1)
             pred = pred / counts
@@ -347,6 +356,7 @@ class ForceLoss(BaseLossFunction):
         *,
         step: int = 0,  # noqa: ARG002
         epoch: int | None = None,  # noqa: ARG002
+        batch: Batch | None = None,
         batch_idx: BatchIndices | None = None,
         num_graphs: int | None = None,
         num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
@@ -366,6 +376,9 @@ class ForceLoss(BaseLossFunction):
             forward training counters uniformly to every component.
         epoch : int | None, default None
             Ignored; accepted for the same reason as ``step``.
+        batch : Batch | None, optional
+            Source for missing graph metadata. Explicit metadata kwargs
+            override batch-derived values when both are provided.
         batch_idx : BatchIndices | None, optional
             Dense-layout graph index for each node, shape ``(V,)``.
             Required for dense graph-balanced reduction and ignored for
@@ -392,6 +405,16 @@ class ForceLoss(BaseLossFunction):
             prediction_key=self.prediction_key,
             target_key=self.target_key,
         )
+        if batch is not None:
+            # Dense-path metadata only needed for graph-balanced reduction.
+            if self.normalize_by_atom_count and pred.ndim == 2:
+                if batch_idx is None:
+                    batch_idx = getattr(batch, "batch_idx", None)
+                if num_graphs is None:
+                    num_graphs = getattr(batch, "num_graphs", None)
+            # Padded-path metadata only needed for padded inputs.
+            if pred.ndim == 3 and num_nodes_per_graph is None:
+                num_nodes_per_graph = getattr(batch, "num_nodes_per_graph", None)
         valid = self._valid_force_components(pred, target, num_nodes_per_graph)
         residual = torch.where(valid, pred - target, torch.zeros_like(pred))
         squared_error = residual.pow(2)

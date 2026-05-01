@@ -1017,7 +1017,6 @@ class TestConcreteLosses:
     def test_force_loss_matches_hand_computed(self) -> None:
         # 2 graphs with 3 and 2 atoms for a small hand-traceable case.
         batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
-        num_nodes_per_graph = torch.tensor([3, 2], dtype=torch.long)
         target = torch.zeros(5, 3)
         pred = torch.tensor(
             [
@@ -1039,7 +1038,6 @@ class TestConcreteLosses:
             target,
             batch_idx=batch_idx,
             num_graphs=2,
-            num_nodes_per_graph=num_nodes_per_graph,
         )
         assert torch.allclose(got_norm, torch.tensor(49.0 / 36.0), atol=1e-6)
 
@@ -1317,6 +1315,79 @@ class TestConcreteLosses:
         assert torch.allclose(
             got["per_component_total"]["ForceLoss"], torch.tensor(1.0)
         )
+
+    def test_force_loss_resolves_from_batch_dense(self) -> None:
+        pred = torch.randn(self.num_nodes, 3)
+        target = torch.randn(self.num_nodes, 3)
+        mini_batch = self._batch()
+
+        got_batch = ForceLoss()(pred, target, batch=mini_batch)
+        got_explicit = ForceLoss()(
+            pred,
+            target,
+            batch_idx=self.batch_idx,
+            num_graphs=self.num_graphs,
+        )
+        assert torch.allclose(got_batch, got_explicit, atol=1e-6)
+
+    def test_energy_loss_per_atom_resolves_from_batch(self) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]])
+        pred = torch.tensor([[6.0], [15.0], [8.0]])
+        mini_batch = self._batch()
+
+        got_batch = EnergyLoss(per_atom=True)(pred, target, batch=mini_batch)
+        got_explicit = EnergyLoss(per_atom=True)(
+            pred, target, num_nodes_per_graph=self.num_nodes_per_graph
+        )
+        assert torch.allclose(got_batch, got_explicit, atol=1e-6)
+
+    def test_force_loss_explicit_kwarg_overrides_batch(self) -> None:
+        pred = torch.randn(self.num_nodes, 3)
+        target = torch.randn(self.num_nodes, 3)
+        mini_batch = self._batch()
+
+        # Collapse to a single graph so the override path produces a
+        # measurably different loss from the batch-derived grouping.
+        override_batch_idx = torch.zeros(self.num_nodes, dtype=torch.int32)
+        override_num_graphs = 1
+
+        got_override = ForceLoss()(
+            pred,
+            target,
+            batch=mini_batch,
+            batch_idx=override_batch_idx,
+            num_graphs=override_num_graphs,
+        )
+        got_direct = ForceLoss()(
+            pred,
+            target,
+            batch_idx=override_batch_idx,
+            num_graphs=override_num_graphs,
+        )
+        got_batch_only = ForceLoss()(pred, target, batch=mini_batch)
+
+        assert torch.allclose(got_override, got_direct, atol=1e-6)
+        assert not torch.allclose(got_override, got_batch_only, atol=1e-6)
+
+    def test_energy_loss_per_atom_explicit_override_wins(self) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]])
+        pred = torch.tensor([[6.0], [15.0], [8.0]])
+        mini_batch = self._batch()
+
+        # Flat 1-atom counts produce a different per-atom scale than the
+        # batch-derived [3, 5, 2] counts, making the override observable.
+        override_counts = torch.tensor([1, 1, 1], dtype=torch.long)
+
+        got_override = EnergyLoss(per_atom=True)(
+            pred, target, batch=mini_batch, num_nodes_per_graph=override_counts
+        )
+        got_direct = EnergyLoss(per_atom=True)(
+            pred, target, num_nodes_per_graph=override_counts
+        )
+        got_batch_only = EnergyLoss(per_atom=True)(pred, target, batch=mini_batch)
+
+        assert torch.allclose(got_override, got_direct, atol=1e-6)
+        assert not torch.allclose(got_override, got_batch_only, atol=1e-6)
 
 
 class TestIgnoreNaN:
