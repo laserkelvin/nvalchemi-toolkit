@@ -42,20 +42,67 @@ class ComposedLossOutput(TypedDict):
     total_loss: torch.Tensor
 
 
-def _validate_prediction_target(
-    loss: BaseLossFunction,
+def assert_same_shape(
     pred: torch.Tensor,
     target: torch.Tensor,
+    *,
+    name: str,
+    prediction_key: str | None = None,
+    target_key: str | None = None,
 ) -> None:
-    """Validate that prediction and target tensors have matching shapes."""
-    prediction_key = getattr(loss, "prediction_key", None)
-    target_key = getattr(loss, "target_key", None)
-    if pred.shape != target.shape:
+    """Raise :class:`ValueError` when ``pred`` and ``target`` are not compatible.
+
+    Checks dtype equality first (a dtype mismatch is usually a bug
+    upstream of shape), then shape broadcast-compatibility via
+    :func:`torch.broadcast_shapes`. Shapes do not need to be equal — a
+    common and intended case is ``(B, 1)`` vs ``(B, 3)`` where a
+    per-graph prediction is compared against a per-component target.
+
+    Parameters
+    ----------
+    pred : torch.Tensor
+        Prediction tensor.
+    target : torch.Tensor
+        Target tensor whose dtype must equal ``pred``'s and whose shape
+        must be broadcast-compatible with ``pred``'s.
+    name : str
+        Calling loss-term's class name, used as a prefix in the error
+        message (typically ``type(self).__name__``).
+    prediction_key : str, optional
+        Key the prediction tensor was pulled from in the composed
+        mapping. When provided, included in the error message.
+    target_key : str, optional
+        Key the target tensor was pulled from in the composed mapping.
+        When provided, included in the error message.
+
+    Raises
+    ------
+    ValueError
+        If ``pred.dtype != target.dtype`` or ``pred.shape`` and
+        ``target.shape`` are not broadcast-compatible.
+    """
+    pred_fragment = (
+        f"prediction_key={prediction_key!r}"
+        if prediction_key is not None
+        else "prediction"
+    )
+    target_fragment = (
+        f"target_key={target_key!r}" if target_key is not None else "target"
+    )
+    if pred.dtype != target.dtype:
         raise ValueError(
-            f"{type(loss).__name__}: prediction and target shape mismatch; "
-            f"prediction_key={prediction_key!r} has shape {tuple(pred.shape)}, "
-            f"target_key={target_key!r} has shape {tuple(target.shape)}."
+            f"{name}: prediction and target dtype mismatch; "
+            f"{pred_fragment} has dtype {pred.dtype}, "
+            f"{target_fragment} has dtype {target.dtype}."
         )
+    try:
+        torch.broadcast_shapes(pred.shape, target.shape)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"{name}: prediction and target shape mismatch; "
+            f"{pred_fragment} has shape {tuple(pred.shape)}, "
+            f"{target_fragment} has shape {tuple(target.shape)}."
+        ) from exc
 
 
 class BaseLossFunction(nn.Module, abc.ABC):
@@ -63,9 +110,11 @@ class BaseLossFunction(nn.Module, abc.ABC):
 
     Concrete losses override :meth:`_forward` with tensor-first loss
     logic and return the unweighted loss tensor. The :meth:`forward`
-    method will call the user's defined :meth:`_forward`, with shape
-    validation on the predictions and targets, then applies the
-    scheduled weighting value if specified.
+    method only applies the scheduled weighting value (if any) and
+    delegates to :meth:`_forward`; it does not shape-check the inputs.
+    Leaves are responsible for their own prediction/target shape
+    validation by calling the module-level :func:`assert_same_shape`
+    helper.
 
     Addition returns a :class:`ComposedLossFunction`; ``sum([...])`` works
     via :meth:`__radd__`.
@@ -102,8 +151,12 @@ class BaseLossFunction(nn.Module, abc.ABC):
         epoch: int | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """Final wrapper: returns ``current_weight(step, epoch) * _forward(...)``."""
-        _validate_prediction_target(self, pred, target)
+        """Final wrapper: returns ``current_weight(step, epoch) * _forward(...)``.
+
+        Does not shape-check ``pred`` against ``target``; concrete loss
+        terms opt in by calling the module-level
+        :func:`assert_same_shape` helper inside their own ``_forward``.
+        """
         w = self.current_weight(step, epoch)
         return w * self._forward(pred, target, step=step, epoch=epoch, **kwargs)
 
@@ -304,7 +357,6 @@ class ComposedLossFunction(nn.Module):
                     f"{target_key!r} must resolve to torch.Tensor, "
                     f"got {type(target).__name__}."
                 )
-            _validate_prediction_target(comp, pred, target)
             term = comp(pred, target, step=step, epoch=epoch, **kwargs)
 
             contributions[name] = term

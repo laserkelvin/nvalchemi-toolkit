@@ -35,6 +35,7 @@ from nvalchemi.training import (
 )
 from nvalchemi.training._spec import create_model_spec, create_model_spec_from_json
 from nvalchemi.training.losses import (
+    assert_same_shape,
     frobenius_mse,
     per_graph_mean,
     per_graph_mse,
@@ -1001,16 +1002,16 @@ class TestConcreteLosses:
             pytest.param(
                 lambda: EnergyLoss(),
                 {
-                    "energy": torch.zeros(3),  # (B,) instead of (B, 1)
-                    "predicted_energy": torch.zeros(3, 1),
+                    "energy": torch.zeros(3, 2),  # incompatible trailing dim
+                    "predicted_energy": torch.zeros(3, 3),
                 },
                 "EnergyLoss",
-                id="energy_rank_mismatch",
+                id="energy_trailing_mismatch",
             ),
             pytest.param(
                 lambda: ForceLoss(),
                 {
-                    "forces": torch.zeros(10, 1),  # wrong trailing dim
+                    "forces": torch.zeros(10, 2),  # trailing 2 vs 3 not broadcastable
                     "predicted_forces": torch.zeros(10, 3),
                 },
                 "ForceLoss",
@@ -1019,7 +1020,7 @@ class TestConcreteLosses:
             pytest.param(
                 lambda: StressLoss(),
                 {
-                    "stress": torch.zeros(3, 3),  # missing leading B
+                    "stress": torch.zeros(3, 2),  # trailing 2 vs 3 not broadcastable
                     "predicted_stress": torch.zeros(3, 3, 3),
                 },
                 "StressLoss",
@@ -1498,3 +1499,96 @@ class TestLossModelSpec:
         dumped = json.loads(spec.model_dump_json())
         with pytest.raises(Exception, match="LossWeightSchedule|validation"):
             create_model_spec_from_json(dumped)
+
+
+class TestShapeValidationOptIn:
+    def test_bare_subclass_does_not_shape_check(self) -> None:
+        loss = _ToyLoss(value=1.0)
+        pred = torch.randn(3, 1)
+        target = torch.randn(4, 5, 7)  # deliberately mismatched
+        got = loss(pred, target)
+        assert torch.allclose(got, torch.tensor(1.0))
+
+    def test_energy_loss_raises_on_shape_mismatch(self) -> None:
+        loss = EnergyLoss()
+        pred = torch.zeros(3, 2)
+        target = torch.zeros(3, 3)  # trailing 2 vs 3 not broadcastable
+        with pytest.raises(
+            ValueError,
+            match="EnergyLoss: prediction and target shape mismatch",
+        ):
+            loss(pred, target)
+
+    def test_assert_same_shape_public_helper(self) -> None:
+        pred = torch.zeros(3, 2)
+        target = torch.zeros(3, 2)
+        assert_same_shape(
+            pred,
+            target,
+            name="MyLoss",
+            prediction_key="p",
+            target_key="t",
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"MyLoss: prediction and target shape mismatch; "
+            r"prediction_key='p' has shape \(3, 2\), "
+            r"target_key='t' has shape \(3, 3\)",
+        ):
+            assert_same_shape(
+                pred,
+                torch.zeros(3, 3),
+                name="MyLoss",
+                prediction_key="p",
+                target_key="t",
+            )
+
+    def test_assert_same_shape_omits_key_fragments_when_none(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"MyLoss: prediction and target shape mismatch; "
+            r"prediction has shape \(3, 2\), target has shape \(3, 3\)",
+        ):
+            assert_same_shape(
+                torch.zeros(3, 2),
+                torch.zeros(3, 3),
+                name="MyLoss",
+            )
+
+    def test_assert_same_shape_accepts_broadcastable(self) -> None:
+        # (B, 1) vs (B, 3) is broadcast-compatible; must not raise.
+        assert_same_shape(
+            torch.zeros(4, 1),
+            torch.zeros(4, 3),
+            name="MyLoss",
+            prediction_key="p",
+            target_key="t",
+        )
+
+    def test_assert_same_shape_rejects_dtype_mismatch(self) -> None:
+        pred = torch.zeros(3, 2, dtype=torch.float32)
+        target = torch.zeros(3, 2, dtype=torch.float64)
+        with pytest.raises(
+            ValueError,
+            match=r"MyLoss: prediction and target dtype mismatch; "
+            r"prediction_key='p' has dtype torch\.float32, "
+            r"target_key='t' has dtype torch\.float64",
+        ):
+            assert_same_shape(
+                pred,
+                target,
+                name="MyLoss",
+                prediction_key="p",
+                target_key="t",
+            )
+
+    def test_assert_same_shape_dtype_check_runs_before_shape_check(self) -> None:
+        # Both dtype AND shape mismatch — must surface dtype error, not shape.
+        pred = torch.zeros(3, 2, dtype=torch.float32)
+        target = torch.zeros(3, 3, dtype=torch.float64)
+        with pytest.raises(ValueError, match="dtype mismatch"):
+            assert_same_shape(
+                pred,
+                target,
+                name="MyLoss",
+            )

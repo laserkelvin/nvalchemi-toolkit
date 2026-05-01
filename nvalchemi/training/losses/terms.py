@@ -31,7 +31,7 @@ from plum import dispatch, overload
 
 from nvalchemi._typing import BatchIndices, Energy, Forces, Scalar, Stress
 from nvalchemi.training.losses.base import LossWeightSchedule
-from nvalchemi.training.losses.composition import BaseLossFunction
+from nvalchemi.training.losses.composition import BaseLossFunction, assert_same_shape
 from nvalchemi.training.losses.reductions import frobenius_mse, per_graph_sum
 
 _AnyFloatTensor: TypeAlias = Float[torch.Tensor, "..."]
@@ -175,7 +175,13 @@ class EnergyLoss(BaseLossFunction):
     Tensor Contract
     ---------------
     pred, target : Energy
-        Per-graph energy tensors of shape ``(B, 1)``.
+        Per-graph energy tensors of shape ``(B, 1)``. Shape validation
+        uses :func:`torch.broadcast_shapes`, so broadcast-compatible
+        pairs pass the check, but callers should provide both tensors
+        at the canonical ``(B, 1)`` layout. In particular, pairing a
+        ``(B, 1)`` prediction with a ``(B,)`` target broadcasts to
+        ``(B, B)`` and silently computes pairwise residuals across the
+        batch rather than per-graph residuals.
     num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"], optional
         Required only when ``per_atom=True``. May be explicit per-graph
         counts or a padded node-validity mask.
@@ -244,6 +250,13 @@ class EnergyLoss(BaseLossFunction):
         Scalar
             Scalar energy loss.
         """
+        assert_same_shape(
+            pred,
+            target,
+            name=type(self).__name__,
+            prediction_key=self.prediction_key,
+            target_key=self.target_key,
+        )
         if self.per_atom:
             counts = _node_counts(num_nodes_per_graph, pred).unsqueeze(-1)
             pred = pred / counts
@@ -284,7 +297,9 @@ class ForceLoss(BaseLossFunction):
     ---------------
     pred, target : Forces | Float[torch.Tensor, "B V_max 3"]
         Dense per-node forces of shape ``(V, 3)`` or padded per-graph
-        forces of shape ``(B, V_max, 3)``.
+        forces of shape ``(B, V_max, 3)``. Shape validation accepts any
+        broadcast-compatible ``pred`` / ``target`` pair, but the
+        canonical contract remains the dense or padded layout above.
     batch_idx : BatchIndices, optional
         Required for dense ``(V, 3)`` forces when
         ``normalize_by_atom_count=True``. Ignored for padded forces.
@@ -366,6 +381,13 @@ class ForceLoss(BaseLossFunction):
         Scalar
             Scalar force loss.
         """
+        assert_same_shape(
+            pred,
+            target,
+            name=type(self).__name__,
+            prediction_key=self.prediction_key,
+            target_key=self.target_key,
+        )
         valid = self._valid_force_components(pred, target, num_nodes_per_graph)
         residual = torch.where(valid, pred - target, torch.zeros_like(pred))
         squared_error = residual.pow(2)
@@ -541,7 +563,9 @@ class StressLoss(BaseLossFunction):
     Tensor Contract
     ---------------
     pred, target : Stress
-        Per-graph stress tensors of shape ``(B, 3, 3)``.
+        Per-graph stress tensors of shape ``(B, 3, 3)``. Shape
+        validation accepts any broadcast-compatible ``pred`` / ``target``
+        pair, but the canonical contract remains ``(B, 3, 3)``.
 
     Parameters
     ----------
@@ -598,6 +622,13 @@ class StressLoss(BaseLossFunction):
         Scalar
             Scalar stress loss.
         """
+        assert_same_shape(
+            pred,
+            target,
+            name=type(self).__name__,
+            prediction_key=self.prediction_key,
+            target_key=self.target_key,
+        )
         if self.ignore_nan:
             # Per-component masking on ``(B, 3, 3)``: reduce squared
             # residuals and valid-component counts over the two trailing
