@@ -46,35 +46,42 @@ from nvalchemi.training.losses import (
 class _ToyLoss(BaseLossFunction):
     # Concrete subclass returning a constant tensor — used in composition tests.
 
-    def __init__(
-        self,
-        value: float = 1.0,
-        *,
-        weight: Any = None,
-    ) -> None:
-        super().__init__(weight=weight)
+    def __init__(self, value: float = 1.0) -> None:
+        super().__init__()
         self.value = float(value)
         self.prediction_key = "prediction"
         self.target_key = "target"
 
-    def _forward(
-        self, pred: torch.Tensor, target: torch.Tensor, **kwargs: Any
-    ) -> torch.Tensor:  # noqa: ARG002
+    def forward(
+        self,
+        pred: torch.Tensor,  # noqa: ARG002
+        target: torch.Tensor,  # noqa: ARG002
+        *,
+        step: int = 0,  # noqa: ARG002
+        epoch: int | None = None,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
+    ) -> torch.Tensor:
         return torch.tensor(self.value)
 
 
 class _PositionsLoss(BaseLossFunction):
-    # Toy loss whose ``_forward`` sums ``pred`` (gradient-bearing).
+    # Toy loss whose ``forward`` sums ``pred`` (gradient-bearing).
 
-    def __init__(self, scale: float = 1.0, *, weight: Any = None) -> None:
-        super().__init__(weight=weight)
+    def __init__(self, scale: float = 1.0) -> None:
+        super().__init__()
         self.scale = float(scale)
         self.prediction_key = "positions"
         self.target_key = "positions"
 
-    def _forward(
-        self, pred: torch.Tensor, target: torch.Tensor, **kwargs: Any
-    ) -> torch.Tensor:  # noqa: ARG002
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,  # noqa: ARG002
+        *,
+        step: int = 0,  # noqa: ARG002
+        epoch: int | None = None,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
+    ) -> torch.Tensor:
         return self.scale * pred.sum()
 
 
@@ -327,10 +334,9 @@ class TestReductionsCompile:
 
 
 class TestBaseLossFunction:
-    # ``forward(pred, target, ...)`` is final and returns
-    # ``current_weight(step, epoch) * _forward(pred, target, ...)``.
-    # Subclasses override ``_forward``; composed calls dispatch to each
-    # component via its own ``forward``, so each schedule fires once.
+    # ``forward(pred, target, ...)`` is the sole abstract method and returns
+    # the raw unweighted loss tensor — weighting lives on
+    # :class:`ComposedLossFunction`.
 
     def test_baseloss_abstract_cannot_instantiate(self) -> None:
         with pytest.raises(TypeError, match="abstract"):
@@ -340,127 +346,24 @@ class TestBaseLossFunction:
         loss = _ToyLoss(value=1.0)
         assert isinstance(loss, nn.Module)
 
-    def test_baseloss_default_weight_is_none(self) -> None:
+    def test_baseloss_has_no_weight_attribute(self) -> None:
         loss = _ToyLoss(value=3.0)
-        assert loss.weight is None
+        assert not hasattr(loss, "weight")
 
-    def test_baseloss_forward_delegates_to_private_forward(self) -> None:
+    def test_baseloss_forward_returns_raw_unweighted_tensor(self) -> None:
+        # Calling the module must return exactly what ``forward`` returns,
+        # with no weighting applied at the leaf.
         loss = _ToyLoss(value=2.5)
-        direct = loss._forward(*_dummy_loss_tensors())
-        via_call = loss(*_dummy_loss_tensors())
-        assert torch.allclose(direct, via_call)
+        assert torch.allclose(loss(*_dummy_loss_tensors()), torch.tensor(2.5))
 
-    def test_none_weight_current_weight_is_one(self) -> None:
-        loss = _ToyLoss(value=4.0)  # no weight
-        assert loss.current_weight(step=7, epoch=3) == 1.0
-        # forward returns the unweighted _forward result.
+    def test_baseloss_forward_accepts_and_ignores_step_and_epoch(self) -> None:
+        # ``step`` / ``epoch`` are part of the abstract signature only so
+        # :class:`ComposedLossFunction` can forward them uniformly; the
+        # base contract does not apply a schedule.
+        loss = _ToyLoss(value=4.0)
         assert torch.allclose(
             loss(*_dummy_loss_tensors(), step=7, epoch=3), torch.tensor(4.0)
         )
-
-    def test_current_weight_with_constant_schedule(self) -> None:
-        loss = _ToyLoss(value=1.0, weight=ConstantWeight(value=2.5))
-        assert loss.current_weight(step=0, epoch=0) == 2.5
-
-    def test_current_weight_per_epoch_none_epoch_raises(self) -> None:
-        loss = _ToyLoss(
-            value=1.0,
-            weight=LinearWeight(start=0.0, end=1.0, num_steps=10, per_epoch=True),
-        )
-        with pytest.raises(ValueError, match="per_epoch=True"):
-            loss.current_weight(step=0, epoch=None)
-
-    @pytest.mark.parametrize(
-        ("bad_value", "match"),
-        [
-            pytest.param(float("nan"), r"non-finite weight nan", id="nan"),
-            pytest.param(float("inf"), r"non-finite weight inf", id="inf"),
-            pytest.param(float("-inf"), r"non-finite weight -inf", id="neg_inf"),
-        ],
-    )
-    def test_current_weight_non_finite_raises(
-        self, bad_value: float, match: str
-    ) -> None:
-        loss = _ToyLoss(value=1.0, weight=_ReturnSchedule(bad_value))
-        with pytest.raises(ValueError, match=match):
-            loss.current_weight(step=0, epoch=0)
-
-    def test_current_weight_non_numeric_raises(self) -> None:
-        loss = _ToyLoss(value=1.0, weight=_ReturnSchedule("oops"))
-        with pytest.raises(
-            TypeError,
-            match=r"_ReturnSchedule returned str; "
-            r"LossWeightSchedule\.__call__ must return float",
-        ):
-            loss.current_weight(step=0, epoch=0)
-
-    @pytest.mark.parametrize(
-        ("weight_factory", "step", "epoch", "expected"),
-        [
-            pytest.param(
-                lambda: ConstantWeight(value=2.5),
-                0,
-                0,
-                10.0,
-                id="constant_scalar",
-            ),
-            pytest.param(
-                lambda: LinearWeight(start=0.0, end=1.0, num_steps=10),
-                0,
-                None,
-                0.0,
-                id="linear_start",
-            ),
-            pytest.param(
-                lambda: LinearWeight(start=0.0, end=1.0, num_steps=10),
-                5,
-                None,
-                2.0,
-                id="linear_midpoint",
-            ),
-            pytest.param(
-                lambda: LinearWeight(start=0.0, end=1.0, num_steps=10),
-                10,
-                None,
-                4.0,
-                id="linear_end",
-            ),
-            pytest.param(
-                lambda: LinearWeight(start=0.0, end=1.0, num_steps=4, per_epoch=True),
-                99,
-                2,
-                2.0,
-                id="per_epoch_uses_epoch",
-            ),
-        ],
-    )
-    def test_baseloss_call_applies_own_schedule(
-        self,
-        weight_factory: Any,
-        step: int,
-        epoch: int | None,
-        expected: float,
-    ) -> None:
-        loss = _ToyLoss(value=4.0, weight=weight_factory())
-        got = loss(*_dummy_loss_tensors(), step=step, epoch=epoch)
-        assert torch.allclose(got, torch.tensor(expected), atol=1e-6)
-
-    def test_baseloss_epoch_none_treated_as_zero_for_step_schedule(self) -> None:
-        # per_epoch=False schedules allow epoch=None; internal
-        # ``epoch or 0`` coercion means the schedule reads only ``step``.
-        loss = _ToyLoss(
-            value=1.0, weight=LinearWeight(start=0.0, end=10.0, num_steps=10)
-        )
-        got = loss(*_dummy_loss_tensors(), step=7, epoch=None)
-        assert torch.allclose(got, torch.tensor(7.0), atol=1e-6)
-
-    def test_baseloss_per_epoch_schedule_with_none_epoch_raises(self) -> None:
-        loss = _ToyLoss(
-            value=1.0,
-            weight=LinearWeight(start=0.0, end=1.0, num_steps=10, per_epoch=True),
-        )
-        with pytest.raises(ValueError, match="per_epoch=True"):
-            loss(*_dummy_loss_tensors(), step=3, epoch=None)
 
     def test_baseloss_to_device_smoke(self) -> None:
         # Stateless loss still supports ``.to()`` via nn.Module.
@@ -487,21 +390,20 @@ class TestLossRepr:
                     "target_key='energy'",
                     "prediction_key='predicted_energy'",
                     "per_atom=True",
-                    "weight=None",
                 ),
                 id="energy",
             ),
             pytest.param(
                 lambda: ForceLoss(normalize_by_atom_count=False),
                 "ForceLoss",
-                ("normalize_by_atom_count=False", "weight=None"),
+                ("normalize_by_atom_count=False",),
                 id="force",
             ),
             pytest.param(
-                lambda: StressLoss(weight=ConstantWeight(value=2.0)),
+                lambda: StressLoss(ignore_nan=True),
                 "StressLoss",
-                ("target_key='stress'", "ConstantWeight"),
-                id="stress_scheduled",
+                ("target_key='stress'", "ignore_nan=True"),
+                id="stress",
             ),
         ],
     )
@@ -516,6 +418,11 @@ class TestLossRepr:
         for substring in substrings:
             assert substring in text, (substring, text)
 
+    def test_concrete_loss_repr_has_no_weight_attribute(self) -> None:
+        # Weight lives on the composition, not on leaves.
+        for text in (repr(EnergyLoss()), repr(ForceLoss()), repr(StressLoss())):
+            assert "weight" not in text
+
     def test_composed_repr_shows_nested_components(self) -> None:
         composed = EnergyLoss() + ForceLoss()
         text = repr(composed)
@@ -524,6 +431,14 @@ class TestLossRepr:
         assert "ForceLoss" in text
         # nn.ModuleList numbers its children; "(0):" is the first entry.
         assert "(0)" in text
+
+    def test_composed_repr_includes_normalize_weights_flag(self) -> None:
+        text = repr(EnergyLoss() + ForceLoss())
+        assert "normalize_weights=True" in text
+        text_off = repr(
+            ComposedLossFunction((EnergyLoss(), ForceLoss()), normalize_weights=False)
+        )
+        assert "normalize_weights=False" in text_off
 
     def test_extra_repr_non_empty_on_concrete(self) -> None:
         for loss in (EnergyLoss(), ForceLoss(), StressLoss()):
@@ -541,15 +456,18 @@ class TestComposedLossFunction:
         assert isinstance(composed, ComposedLossFunction)
         assert tuple(composed.components) == (self.loss_a, self.loss_b)
 
-    def test_composed_has_no_weight_attribute_of_its_own(self) -> None:
-        # Regardless of what the components carry, a composition's own
-        # schedule is absent. Component weights are the only weighting path.
-        components = (
-            _ToyLoss(value=1.0, weight=ConstantWeight(value=2.0)),
-            _ToyLoss(value=1.0, weight=LinearWeight(start=0.0, end=1.0, num_steps=5)),
+    def test_composed_defaults_to_normalize_weights_true(self) -> None:
+        composed = ComposedLossFunction((EnergyLoss(), ForceLoss()))
+        assert composed.normalize_weights is True
+        # Defaults to all-1.0 weights → normalized to 1/N each.
+        assert composed.current_weight() == [0.5, 0.5]
+
+    def test_composed_default_weights_are_all_one(self) -> None:
+        composed = ComposedLossFunction(
+            (EnergyLoss(), ForceLoss()), normalize_weights=False
         )
-        composed = ComposedLossFunction(components=components)
-        assert not hasattr(composed, "weight")
+        assert composed._weights == [1.0, 1.0]
+        assert composed.current_weight() == [1.0, 1.0]
 
     def test_composed_is_nn_module(self) -> None:
         composed = self.loss_a + self.loss_b
@@ -561,15 +479,6 @@ class TestComposedLossFunction:
     def test_composed_components_stored_as_module_list(self) -> None:
         composed = self.loss_a + self.loss_b
         assert isinstance(composed.components, nn.ModuleList)
-
-    @pytest.mark.parametrize(
-        "op",
-        [lambda loss: 2.0 * loss, lambda loss: loss * 2.0, lambda loss: loss / 2.0],
-        ids=["left_mul", "right_mul", "div"],
-    )
-    def test_scalar_arithmetic_is_not_supported(self, op: Any) -> None:
-        with pytest.raises(TypeError):
-            op(self.loss_a)
 
     @pytest.mark.parametrize(
         "build",
@@ -591,26 +500,135 @@ class TestComposedLossFunction:
         assert isinstance(composed, ComposedLossFunction)
         assert len(composed.components) == 3
 
-    def test_weighted_sum_numerically_correct(self) -> None:
-        loss_a = _ToyLoss(value=1.0, weight=ConstantWeight(value=2.0))
-        loss_b = _ToyLoss(value=1.0, weight=ConstantWeight(value=3.0))
-        composed = loss_a + loss_b
-        out = composed(*_dummy_loss_mappings(), step=0, epoch=0)
-        assert set(out) == {"total_loss", "_ToyLoss_0", "_ToyLoss_1"}
-        assert torch.allclose(out["_ToyLoss_0"], torch.tensor(2.0))
-        assert torch.allclose(out["_ToyLoss_1"], torch.tensor(3.0))
-        assert torch.allclose(out["total_loss"], torch.tensor(5.0), atol=1e-6)
+    def test_weights_length_must_match_components(self) -> None:
+        with pytest.raises(ValueError, match="weights has length"):
+            ComposedLossFunction((self.loss_a, self.loss_b), weights=[1.0, 2.0, 3.0])
 
-    def test_composed_is_pure_sum_of_weighted_components(self) -> None:
-        # composed = a*v1 + b*v2 where each component's schedule is applied
-        # exactly once inside its own forward.
+    def test_weights_reject_non_numeric(self) -> None:
+        with pytest.raises(TypeError, match="weights\\[0\\] must be"):
+            ComposedLossFunction(
+                (self.loss_a,),
+                weights=["not-a-weight"],  # type: ignore[list-item]
+            )
+
+    def test_weights_none_entry_coerced_to_one(self) -> None:
+        composed = ComposedLossFunction(
+            (self.loss_a, self.loss_b),
+            weights=[None, 3.0],
+            normalize_weights=False,
+        )
+        assert composed._weights == [1.0, 3.0]
+
+    def test_normalize_weights_zero_sum_raises(self) -> None:
+        composed = ComposedLossFunction((self.loss_a, self.loss_b), weights=[0.0, 0.0])
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"sum is not strictly positive \(sum=0\.0\)\. "
+                r"Resolved weights at step=0, epoch=None: "
+                r"\{'_ToyLoss_0': 0\.0, '_ToyLoss_1': 0\.0\}"
+            ),
+        ):
+            composed.current_weight()
+
+    def test_normalize_weights_nonzero_but_zero_sum_raises(self) -> None:
+        # [1, -1] sums to zero; the error message must reflect that the
+        # individual resolved weights were non-zero.
+        composed = ComposedLossFunction((self.loss_a, self.loss_b), weights=[1.0, -1.0])
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"sum is not strictly positive \(sum=0\.0\)\. "
+                r"Resolved weights at step=7, epoch=2: "
+                r"\{'_ToyLoss_0': 1\.0, '_ToyLoss_1': -1\.0\}"
+            ),
+        ):
+            composed.current_weight(step=7, epoch=2)
+
+    def test_normalize_weights_negative_sum_raises(self) -> None:
+        # A negative raw sum would flip every effective weight's sign
+        # after normalization; reject it with the same "not strictly
+        # positive" error used for zero sums.
+        composed = ComposedLossFunction((self.loss_a, self.loss_b), weights=[1.0, -3.0])
+        with pytest.raises(
+            ValueError, match=r"sum is not strictly positive \(sum=-2\.0\)"
+        ):
+            composed.current_weight()
+
+    def test_normalize_weights_false_returns_raw(self) -> None:
+        composed = ComposedLossFunction(
+            (self.loss_a, self.loss_b),
+            weights=[3.0, 2.0],
+            normalize_weights=False,
+        )
+        assert composed.current_weight() == [3.0, 2.0]
+
+    def test_weighted_sum_unnormalized_is_pure_weighted_sum(self) -> None:
         a, b, v1, v2 = 2.0, 3.0, 5.0, 7.0
-        comp1 = _ToyLoss(value=v1, weight=ConstantWeight(value=a))
-        comp2 = _ToyLoss(value=v2, weight=ConstantWeight(value=b))
-        composed = ComposedLossFunction(components=(comp1, comp2))
+        comp1 = _ToyLoss(value=v1)
+        comp2 = _ToyLoss(value=v2)
+        composed = ComposedLossFunction(
+            (comp1, comp2), weights=[a, b], normalize_weights=False
+        )
         out = composed(*_dummy_loss_mappings(), step=0, epoch=0)
         expected = a * v1 + b * v2
         assert torch.allclose(out["total_loss"], torch.tensor(expected), atol=1e-6)
+
+    def test_per_component_total_and_weight_populated(self) -> None:
+        comp1 = _ToyLoss(value=2.0)
+        comp2 = _ToyLoss(value=4.0)
+        composed = ComposedLossFunction(
+            (comp1, comp2), weights=[3.0, 2.0], normalize_weights=False
+        )
+        out = composed(*_dummy_loss_mappings())
+        assert set(out) == {
+            "total_loss",
+            "per_component_total",
+            "per_component_weight",
+            "per_component_raw_weight",
+        }
+        assert torch.allclose(
+            out["per_component_total"]["_ToyLoss_0"], torch.tensor(6.0)
+        )
+        assert torch.allclose(
+            out["per_component_total"]["_ToyLoss_1"], torch.tensor(8.0)
+        )
+        assert out["per_component_weight"] == {
+            "_ToyLoss_0": 3.0,
+            "_ToyLoss_1": 2.0,
+        }
+        # Without normalization raw and effective weights match.
+        assert out["per_component_raw_weight"] == out["per_component_weight"]
+        assert torch.allclose(out["total_loss"], torch.tensor(14.0))
+
+    def test_per_component_weight_reflects_normalization(self) -> None:
+        composed = ComposedLossFunction(
+            (_ToyLoss(value=1.0), _ToyLoss(value=1.0)),
+            weights=[3.0, 2.0],
+        )
+        out = composed(*_dummy_loss_mappings())
+        assert out["per_component_weight"] == {
+            "_ToyLoss_0": 0.6,
+            "_ToyLoss_1": 0.4,
+        }
+        # Raw weights expose the pre-normalization values so a user
+        # logging a scheduled loss can observe the underlying ramp.
+        assert out["per_component_raw_weight"] == {
+            "_ToyLoss_0": 3.0,
+            "_ToyLoss_1": 2.0,
+        }
+
+    def test_per_component_raw_weight_tracks_schedule_on_single_leaf(self) -> None:
+        # Single-component normalized composition: effective weight is
+        # always 1.0, so raw_weight is the only way to observe the
+        # underlying schedule ramp.
+        schedule = LinearWeight(start=0.0, end=1.0, num_steps=10)
+        composed = schedule * _ToyLoss(value=1.0)
+        out_mid = composed(*_dummy_loss_mappings(), step=5)
+        assert out_mid["per_component_weight"] == {"_ToyLoss": 1.0}
+        assert out_mid["per_component_raw_weight"] == {"_ToyLoss": 0.5}
+        out_end = composed(*_dummy_loss_mappings(), step=10)
+        assert out_end["per_component_raw_weight"] == {"_ToyLoss": 1.0}
 
     def test_empty_components_raises(self) -> None:
         with pytest.raises(ValueError, match="at least one"):
@@ -629,7 +647,9 @@ class TestComposedLossFunction:
         positions = torch.randn(4, 3, requires_grad=True)
         loss_a = _PositionsLoss(scale=2.0)
         loss_b = _PositionsLoss(scale=3.0)
-        composed = loss_a + loss_b
+        composed = ComposedLossFunction(
+            (loss_a, loss_b), weights=[1.0, 1.0], normalize_weights=False
+        )
         out = composed(
             {"positions": positions},
             {"positions": torch.zeros_like(positions)},
@@ -642,21 +662,24 @@ class TestComposedLossFunction:
         assert positions.grad is not None
         assert torch.allclose(positions.grad, expected_grad, atol=1e-6)
 
-    def test_component_schedule_applied_inside_composition(self) -> None:
-        # Each component's schedule is applied exactly once — inside
-        # its own forward.
-        weighted = _ToyLoss(value=4.0, weight=ConstantWeight(value=2.5))
-        composed = ComposedLossFunction(components=(weighted,))
+    def test_schedule_applied_inside_composition(self) -> None:
+        # A schedule attached to a component's slot in the composition is
+        # resolved once per call.
+        leaf = _ToyLoss(value=4.0)
+        composed = ComposedLossFunction(
+            (leaf,), weights=[ConstantWeight(value=2.5)], normalize_weights=False
+        )
         out = composed(*_dummy_loss_mappings(), step=0, epoch=0)
-        # 2.5 (schedule) * 4.0 (_forward) = 10.0
+        # 2.5 (schedule) * 4.0 (forward) = 10.0
         assert torch.allclose(out["total_loss"], torch.tensor(10.0), atol=1e-6)
 
     def test_linear_schedule_on_component_in_composition(self) -> None:
-        scheduled = _ToyLoss(
-            value=1.0,
-            weight=LinearWeight(start=0.0, end=1.0, num_steps=10),
+        leaf = _ToyLoss(value=1.0)
+        composed = ComposedLossFunction(
+            (leaf,),
+            weights=[LinearWeight(start=0.0, end=1.0, num_steps=10)],
+            normalize_weights=False,
         )
-        composed = ComposedLossFunction(components=(scheduled,))
         assert torch.allclose(
             composed(*_dummy_loss_mappings(), step=0)["total_loss"],
             torch.tensor(0.0),
@@ -674,32 +697,171 @@ class TestComposedLossFunction:
         )
 
     def test_per_epoch_schedule_with_none_epoch_raises_in_composition(self) -> None:
-        scheduled = _ToyLoss(
-            value=1.0,
-            weight=LinearWeight(start=0.0, end=1.0, num_steps=10, per_epoch=True),
+        leaf = _ToyLoss(value=1.0)
+        composed = ComposedLossFunction(
+            (leaf,),
+            weights=[LinearWeight(start=0.0, end=1.0, num_steps=10, per_epoch=True)],
         )
-        composed = ComposedLossFunction(components=(scheduled,))
         with pytest.raises(ValueError, match="per_epoch=True"):
             composed(*_dummy_loss_mappings(), step=3, epoch=None)
 
-    def test_nested_composition_applies_each_schedule_exactly_once(self) -> None:
-        # Nesting should not cause duplicate schedule application.
-        leaf = _ToyLoss(value=2.0, weight=ConstantWeight(value=3.0))
-        inner = ComposedLossFunction(components=(leaf,))
-        outer = ComposedLossFunction(components=(inner,))
-        out = outer(*_dummy_loss_mappings(), step=0, epoch=0)
-        # 3 * 2 = 6
-        assert torch.allclose(out["total_loss"], torch.tensor(6.0), atol=1e-6)
-        assert torch.allclose(out["_ToyLoss"], torch.tensor(6.0))
+    @pytest.mark.parametrize(
+        ("bad_value", "match"),
+        [
+            pytest.param(float("nan"), r"non-finite weight nan", id="nan"),
+            pytest.param(float("inf"), r"non-finite weight inf", id="inf"),
+            pytest.param(float("-inf"), r"non-finite weight -inf", id="neg_inf"),
+        ],
+    )
+    def test_schedule_non_finite_weight_raises(
+        self, bad_value: float, match: str
+    ) -> None:
+        composed = ComposedLossFunction(
+            (_ToyLoss(value=1.0),),
+            weights=[_ReturnSchedule(bad_value)],
+            normalize_weights=False,
+        )
+        with pytest.raises(ValueError, match=match):
+            composed.current_weight(step=0, epoch=0)
 
-    @pytest.mark.parametrize("op", ["add", "mul"], ids=["add", "mul"])
+    def test_schedule_non_numeric_weight_raises(self) -> None:
+        composed = ComposedLossFunction(
+            (_ToyLoss(value=1.0),),
+            weights=[_ReturnSchedule("oops")],
+            normalize_weights=False,
+        )
+        with pytest.raises(
+            TypeError,
+            match=r"_ReturnSchedule returned str; "
+            r"LossWeightSchedule\.__call__ must return float",
+        ):
+            composed.current_weight(step=0, epoch=0)
+
+    def test_nested_composition_applies_each_weight_exactly_once(self) -> None:
+        # Nesting must not cause duplicate weight application.
+        leaf = _ToyLoss(value=2.0)
+        inner = ComposedLossFunction((leaf,), weights=[3.0], normalize_weights=False)
+        outer = ComposedLossFunction((inner,), weights=[1.0], normalize_weights=False)
+        out = outer(*_dummy_loss_mappings(), step=0, epoch=0)
+        # 1 * 3 * 2 = 6
+        assert torch.allclose(out["total_loss"], torch.tensor(6.0), atol=1e-6)
+        assert torch.allclose(out["per_component_total"]["_ToyLoss"], torch.tensor(6.0))
+
+    def test_nested_composition_multiplies_weights_elementwise(self) -> None:
+        leaf1 = _ToyLoss(value=1.0)
+        leaf2 = _ToyLoss(value=1.0)
+        inner = ComposedLossFunction(
+            (leaf1, leaf2), weights=[3.0, 2.0], normalize_weights=False
+        )
+        # Outer wraps the inner composition with weight 5.0.
+        outer = ComposedLossFunction((inner,), weights=[5.0], normalize_weights=False)
+        # After flattening the effective per-leaf weights are 5*3=15, 5*2=10.
+        assert outer.current_weight() == [15.0, 10.0]
+
+    @pytest.mark.parametrize("op", ["add"], ids=["add"])
     def test_not_implemented_for_bad_type(self, op: str) -> None:
         if op == "add":
             with pytest.raises(TypeError):
                 _ = self.loss_a + "hello"  # type: ignore[operator]
-        else:
-            with pytest.raises(TypeError):
-                _ = self.loss_a * "hello"  # type: ignore[operator]
+
+
+class TestOperatorSugar:
+    """Tests for ``scalar * loss``, ``schedule * loss``, and operator composition."""
+
+    @pytest.mark.parametrize(
+        ("side", "weight_kind"),
+        [
+            ("left", "float"),
+            ("right", "float"),
+            ("left", "schedule"),
+            ("right", "schedule"),
+        ],
+    )
+    def test_multiplication_wraps_leaf_in_composition(
+        self, side: str, weight_kind: str
+    ) -> None:
+        leaf = _ToyLoss(value=1.0)
+        weight: float | ConstantWeight = (
+            3.0 if weight_kind == "float" else ConstantWeight(value=2.5)
+        )
+        composed = weight * leaf if side == "left" else leaf * weight
+        assert isinstance(composed, ComposedLossFunction)
+        assert len(composed.components) == 1
+        assert composed._weights == [weight]
+
+    def test_scaled_leaf_plus_scaled_leaf_flattens_and_normalizes(self) -> None:
+        composed = 3.0 * EnergyLoss() + 2.0 * ForceLoss()
+        assert isinstance(composed, ComposedLossFunction)
+        assert len(composed.components) == 2
+        # Raw weights preserved on construction; normalization is applied
+        # only at call time.
+        assert composed._weights == [3.0, 2.0]
+        # Default normalize_weights=True: 3/(3+2), 2/(3+2).
+        assert composed.current_weight() == [0.6, 0.4]
+
+    def test_single_scaled_leaf_normalizes_to_one(self) -> None:
+        composed = 3.0 * _ToyLoss(value=5.0)
+        # One component → sum(raw)=3 → effective 1.0.
+        assert composed.current_weight() == [1.0]
+        out = composed(*_dummy_loss_mappings())
+        assert torch.allclose(out["total_loss"], torch.tensor(5.0), atol=1e-6)
+
+    def test_schedule_times_leaf_participates_in_current_weight(self) -> None:
+        # Operator-attached schedule is stored on the composition and
+        # resolved at call time. Step-interpolation detail is covered by
+        # ``test_linear_schedule_on_component_in_composition``.
+        schedule = LinearWeight(start=0.0, end=1.0, num_steps=10)
+        composed = schedule * _ToyLoss(value=1.0) + _ToyLoss(value=1.0)
+        assert composed._weights[0] is schedule
+        assert composed.current_weight(step=10) == [0.5, 0.5]
+
+    def test_float_mul_on_composition_scales_every_weight(self) -> None:
+        base = ComposedLossFunction(
+            (_ToyLoss(value=1.0), _ToyLoss(value=1.0)),
+            weights=[3.0, 2.0],
+            normalize_weights=False,
+        )
+        scaled = 4.0 * base
+        assert scaled._weights == [12.0, 8.0]
+        # Normalization flag is inherited.
+        assert scaled.normalize_weights is False
+
+    def test_schedule_mul_on_composition_raises(self) -> None:
+        base = ComposedLossFunction((_ToyLoss(value=1.0),))
+        schedule = ConstantWeight(value=2.0)
+        with pytest.raises(TypeError, match="LossWeightSchedule"):
+            _ = schedule * base
+
+    def test_add_mismatched_normalize_raises(self) -> None:
+        normalized = ComposedLossFunction(
+            (_ToyLoss(value=1.0),), normalize_weights=True
+        )
+        unnormalized = ComposedLossFunction(
+            (_ToyLoss(value=1.0),), normalize_weights=False
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"mismatched normalize_weights \(self=True, other=False\)",
+        ):
+            _ = normalized + unnormalized
+        with pytest.raises(
+            ValueError,
+            match=r"mismatched normalize_weights \(self=False, other=True\)",
+        ):
+            _ = unnormalized + normalized
+
+    def test_bool_multiplication_rejected(self) -> None:
+        # ``True * loss`` could silently mean "1.0 * loss", which hides
+        # user bugs. Reject bools explicitly.
+        with pytest.raises(TypeError):
+            _ = True * _ToyLoss(value=1.0)  # type: ignore[operator]
+
+    def test_radd_bare_leaf_plus_composition(self) -> None:
+        composition = 2.0 * _ToyLoss(value=1.0)
+        result = _ToyLoss(value=1.0) + composition
+        assert isinstance(result, ComposedLossFunction)
+        assert len(result.components) == 2
+        assert result._weights == [1.0, 2.0]
 
 
 class TestWeightFactors:
@@ -707,34 +869,29 @@ class TestWeightFactors:
         ("factory", "expected"),
         [
             pytest.param(
-                lambda: _ToyLoss(),
-                {"_ToyLoss": 1.0},
-                id="bare_none_weight",
-            ),
-            pytest.param(
-                lambda: _ToyLoss(weight=ConstantWeight(value=0.5)),
-                {"_ToyLoss": 0.5},
-                id="bare_constant_schedule",
+                lambda: ComposedLossFunction(
+                    (EnergyLoss(), ForceLoss()),
+                    normalize_weights=False,
+                ),
+                {"EnergyLoss": 1.0, "ForceLoss": 1.0},
+                id="default_weights_unnormalized",
             ),
             pytest.param(
                 lambda: ComposedLossFunction(
-                    components=(
-                        EnergyLoss(weight=ConstantWeight(value=2.0)),
-                        ForceLoss(weight=ConstantWeight(value=3.0)),
-                    ),
+                    (EnergyLoss(), ForceLoss()),
+                    weights=[ConstantWeight(value=2.0), ConstantWeight(value=3.0)],
+                    normalize_weights=False,
                 ),
                 {"EnergyLoss": 2.0, "ForceLoss": 3.0},
-                id="composed_component_weights",
+                id="schedule_weights_unnormalized",
             ),
             pytest.param(
                 lambda: ComposedLossFunction(
-                    components=(
-                        EnergyLoss(weight=ConstantWeight(value=0.5)),
-                        ForceLoss(weight=ConstantWeight(value=0.25)),
-                    ),
+                    (EnergyLoss(), ForceLoss()),
+                    weights=[3.0, 2.0],
                 ),
-                {"EnergyLoss": 0.5, "ForceLoss": 0.25},
-                id="composed_component_schedules",
+                {"EnergyLoss": 0.6, "ForceLoss": 0.4},
+                id="float_weights_normalized",
             ),
         ],
     )
@@ -744,15 +901,13 @@ class TestWeightFactors:
         assert factory().weight_factors(step=0, epoch=0) == expected
 
     def test_weight_factors_no_args_smoke(self) -> None:
-        # Both ``current_weight`` and ``weight_factors`` take default
-        # ``step=0, epoch=None`` so introspection helpers don't demand args.
-        loss = _ToyLoss(weight=ConstantWeight(value=0.5))
-        assert loss.current_weight() == 0.5
-        assert loss.weight_factors() == {"_ToyLoss": 0.5}
+        # ``weight_factors`` takes default ``step=0, epoch=None`` so
+        # introspection helpers don't demand args.
         composed = ComposedLossFunction(
-            components=(EnergyLoss(weight=ConstantWeight(value=2.0)),)
+            (EnergyLoss(),), weights=[ConstantWeight(value=2.0)]
         )
-        assert composed.weight_factors() == {"EnergyLoss": 2.0}
+        # Single component + normalization → effective weight is 1.0.
+        assert composed.weight_factors() == {"EnergyLoss": 1.0}
 
     def test_weight_factors_class_name_collision_gets_indexed_suffix(self) -> None:
         composed = ComposedLossFunction(
@@ -760,8 +915,9 @@ class TestWeightFactors:
         )
         got = composed.weight_factors(step=0, epoch=0)
         assert set(got) == {"StressLoss_0", "StressLoss_1"}
-        assert got["StressLoss_0"] == 1.0
-        assert got["StressLoss_1"] == 1.0
+        # Normalized to 0.5 each.
+        assert got["StressLoss_0"] == 0.5
+        assert got["StressLoss_1"] == 0.5
 
     def test_weight_factors_three_way_collision_across_nested_composition(self) -> None:
         # Inner composition contains two ``StressLoss`` instances; wrapping in
@@ -770,17 +926,23 @@ class TestWeightFactors:
         # ``{"StressLoss_0", "StressLoss_1", "StressLoss"}`` from per-level
         # suffixing.
         inner = ComposedLossFunction(components=(StressLoss(), StressLoss()))
-        outer = ComposedLossFunction(components=(inner, StressLoss()))
+        outer = ComposedLossFunction(
+            components=(inner, StressLoss()), normalize_weights=False
+        )
         got = outer.weight_factors(step=0, epoch=0)
         assert set(got) == {"StressLoss_0", "StressLoss_1", "StressLoss_2"}
         assert all(v == 1.0 for v in got.values())
 
     def test_weight_factors_nested_composition_flattens(self) -> None:
         inner = ComposedLossFunction(
-            components=(EnergyLoss(weight=ConstantWeight(value=0.5)),),
+            (EnergyLoss(),),
+            weights=[ConstantWeight(value=0.5)],
+            normalize_weights=False,
         )
         outer = ComposedLossFunction(
-            components=(inner, ForceLoss(weight=ConstantWeight(value=4.0))),
+            (inner, ForceLoss()),
+            weights=[1.0, ConstantWeight(value=4.0)],
+            normalize_weights=False,
         )
         assert outer.weight_factors(step=0, epoch=0) == {
             "EnergyLoss": 0.5,
@@ -1108,13 +1270,23 @@ class TestConcreteLosses:
 
         composed = (
             EnergyLoss()
-            + ForceLoss(weight=ConstantWeight(value=10.0))
-            + StressLoss(weight=ConstantWeight(value=0.1))
+            + ConstantWeight(value=10.0) * ForceLoss()
+            + ConstantWeight(value=0.1) * StressLoss()
         )
         assert isinstance(composed, ComposedLossFunction)
         assert len(composed.components) == 3
         out = _call_from_batch(composed, batch)
-        assert set(out) == {"total_loss", "EnergyLoss", "ForceLoss", "StressLoss"}
+        assert set(out) == {
+            "total_loss",
+            "per_component_total",
+            "per_component_weight",
+            "per_component_raw_weight",
+        }
+        assert set(out["per_component_total"]) == {
+            "EnergyLoss",
+            "ForceLoss",
+            "StressLoss",
+        }
         out["total_loss"].backward()
         for grad in (
             batch.predicted_energy.grad,
@@ -1140,8 +1312,11 @@ class TestConcreteLosses:
         )
         # |pred - target|^2 sum over 3 components = 3 per atom.
         # per-graph mean = 3; mean over graphs = 3; / 3 = 1.0.
+        # Single-component composition normalizes effective weight to 1.0.
         assert torch.allclose(got["total_loss"], torch.tensor(1.0), atol=1e-6)
-        assert torch.allclose(got["ForceLoss"], torch.tensor(1.0))
+        assert torch.allclose(
+            got["per_component_total"]["ForceLoss"], torch.tensor(1.0)
+        )
 
 
 class TestIgnoreNaN:
@@ -1384,19 +1559,13 @@ class TestIgnoreNaN:
 class TestLossModelSpec:
     """Tests for :func:`create_model_spec` round-trip on concrete losses.
 
-    These tests verify the generic spec workflow works end-to-end for
-    :class:`EnergyLoss`, :class:`ForceLoss`, and :class:`StressLoss`:
-    ``create_model_spec(cls, **kwargs)`` → ``model_dump_json`` → ``json.loads``
-    → :func:`create_model_spec_from_json` → ``spec.build()``. The rebuilt
-    instance must preserve ``__init__`` kwargs and stay functionally
-    equivalent on tensor inputs.
-
-    Schedule kwargs (``weight=...``) are exercised via the **nested-spec**
-    pattern: ``weight=create_model_spec(ConstantWeight, value=...)``. The
-    generic spec builder does not round-trip a bare Pydantic schedule
-    instance through JSON, since the dumped dict has no ``cls_path``
-    discriminator. Nesting the schedule as its own spec is the supported
-    workflow.
+    Since leaf losses no longer carry a ``weight`` kwarg (weighting lives
+    on :class:`ComposedLossFunction`), these tests exercise the generic
+    spec workflow for plain concrete-loss kwargs only:
+    ``create_model_spec(cls, **kwargs)`` → ``model_dump_json`` →
+    ``json.loads`` → :func:`create_model_spec_from_json` →
+    ``spec.build()``. The rebuilt instance must preserve ``__init__``
+    kwargs and stay functionally equivalent on tensor inputs.
     """
 
     def _roundtrip(self, spec: Any) -> Any:
@@ -1427,7 +1596,7 @@ class TestLossModelSpec:
             pytest.param(StressLoss, {"ignore_nan": True}, id="stress_ignore_nan"),
         ],
     )
-    def test_loss_basespec_roundtrip_without_schedule(
+    def test_loss_basespec_roundtrip(
         self, cls: type[BaseLossFunction], kwargs: dict[str, Any]
     ) -> None:
         """JSON round-trip rebuilds a loss with matching kwargs."""
@@ -1437,25 +1606,9 @@ class TestLossModelSpec:
         assert isinstance(built, cls)
         for k, v in kwargs.items():
             assert getattr(built, k) == v
-        # Schedule-less losses carry ``weight=None``.
-        assert built.weight is None
-
-    @pytest.mark.parametrize(
-        "cls",
-        [EnergyLoss, ForceLoss, StressLoss],
-        ids=["energy", "force", "stress"],
-    )
-    def test_loss_basespec_roundtrip_with_nested_schedule(
-        self, cls: type[BaseLossFunction]
-    ) -> None:
-        """Nested ``create_model_spec`` on the schedule survives JSON round-trip."""
-        schedule_spec = create_model_spec(ConstantWeight, value=2.5)
-        spec = create_model_spec(cls, weight=schedule_spec)
-        rebuilt = self._roundtrip(spec)
-        built = rebuilt.build()
-        assert isinstance(built, cls)
-        assert isinstance(built.weight, ConstantWeight)
-        assert built.weight.value == 2.5
+        # Leaves no longer carry a ``weight`` attribute — weighting lives
+        # on :class:`ComposedLossFunction`.
+        assert not hasattr(built, "weight")
 
     def test_loss_spec_preserves_timestamp(self) -> None:
         """Rehydrated spec keeps the original timestamp byte-for-byte."""
@@ -1468,37 +1621,10 @@ class TestLossModelSpec:
         pred = torch.randn(3, 1)
         target = torch.randn(3, 1)
         original = EnergyLoss(ignore_nan=True)
-        spec = create_model_spec(
-            EnergyLoss,
-            ignore_nan=True,
-            weight=create_model_spec(ConstantWeight, value=3.0),
-        )
+        spec = create_model_spec(EnergyLoss, ignore_nan=True)
         rebuilt = self._roundtrip(spec).build()
 
-        # Original has no weight, rebuilt has ConstantWeight(3.0) — underlying
-        # ``_forward`` must agree; the ``3.0 *`` is applied by ``forward``.
-        assert torch.allclose(
-            original(pred, target), rebuilt._forward(pred, target), atol=1e-6
-        )
-        assert torch.allclose(
-            rebuilt(pred, target), 3.0 * original(pred, target), atol=1e-6
-        )
-
-    def test_bare_schedule_instance_does_not_round_trip(self) -> None:
-        """Document the unsupported path: bare Pydantic schedule can't be rehydrated.
-
-        Passing a ``ConstantWeight`` instance directly (instead of a nested
-        spec) dumps it as a plain ``{"value": ..., "per_epoch": ...}`` dict
-        with no ``cls_path`` discriminator. The rehydration step therefore
-        tries to feed the dict straight into the spec's ``weight`` field,
-        which is typed as :class:`LossWeightSchedule`, and Pydantic
-        rejects it. Users should wrap schedules in ``create_model_spec``
-        to serialize them.
-        """
-        spec = create_model_spec(StressLoss, weight=ConstantWeight(value=2.5))
-        dumped = json.loads(spec.model_dump_json())
-        with pytest.raises(Exception, match="LossWeightSchedule|validation"):
-            create_model_spec_from_json(dumped)
+        assert torch.allclose(original(pred, target), rebuilt(pred, target), atol=1e-6)
 
 
 class TestShapeValidationOptIn:

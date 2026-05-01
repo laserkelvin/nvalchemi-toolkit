@@ -35,8 +35,9 @@ class LossWeightSchedule(Protocol):
 
     Any object callable with signature ``(step: int, epoch: int) -> float``
     and exposing a ``per_epoch`` attribute satisfies this protocol, and is
-    therefore accepted by
-    :attr:`~nvalchemi.training.losses.BaseLossFunction.weight`. Concrete
+    therefore accepted inside
+    :class:`~nvalchemi.training.losses.ComposedLossFunction`'s ``weights``
+    sequence or as the right-hand side of ``schedule * leaf``. Concrete
     Pydantic schedules live in
     :mod:`~nvalchemi.training.losses.schedules`.
 

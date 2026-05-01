@@ -14,9 +14,13 @@
 # limitations under the License.
 """Composable :class:`torch.nn.Module`-based loss-function abstractions.
 
-Leaf loss terms are tensor-to-tensor :class:`BaseLossFunction` instances.
-:class:`ComposedLossFunction` is a separate keyed-mapping aggregator that
-sums those already-weighted leaves.
+Leaf loss terms are tensor-to-tensor :class:`BaseLossFunction` instances
+whose :meth:`~BaseLossFunction.forward` returns the raw, unweighted loss
+tensor. :class:`ComposedLossFunction` owns the per-component weighting
+(either floats or :class:`LossWeightSchedule` instances) and, by default,
+normalizes the resolved weights so they sum to ``1.0`` at every call.
+This keeps weight scheduling a *relative* knob and leaves the learning
+rate as the sole *absolute* magnitude control.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from __future__ import annotations
 import abc
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
 import torch
@@ -35,11 +40,25 @@ from nvalchemi.training.losses.base import LossWeightSchedule
 class ComposedLossOutput(TypedDict):
     """Output returned by :class:`ComposedLossFunction`.
 
-    The mapping always contains ``total_loss``. Additional component-name
-    keys may also be present and map to weighted loss tensors.
+    This is solely used as a type hint, and not as a concrete data
+    structure; it's used to signal to users that the emitted dict
+    from composed losses will always at least contain the keys within
+    this ``TypedDict``.
+
+    The mapping always contains ``total_loss`` and three per-component
+    sub-mappings keyed by component name. ``per_component_weight`` holds
+    the effective (possibly normalized) weight actually applied to each
+    component at this call; ``per_component_raw_weight`` holds the
+    pre-normalization resolved weight — identical to
+    ``per_component_weight`` when ``normalize_weights=False`` and useful
+    for logging the underlying schedule value regardless of
+    normalization.
     """
 
     total_loss: torch.Tensor
+    per_component_total: dict[str, torch.Tensor]
+    per_component_weight: dict[str, float]
+    per_component_raw_weight: dict[str, float]
 
 
 def assert_same_shape(
@@ -108,40 +127,18 @@ def assert_same_shape(
 class BaseLossFunction(nn.Module, abc.ABC):
     """Abstract :class:`torch.nn.Module` base for ALCHEMI loss functions.
 
-    Concrete losses override :meth:`_forward` with tensor-first loss
-    logic and return the unweighted loss tensor. The :meth:`forward`
-    method only applies the scheduled weighting value (if any) and
-    delegates to :meth:`_forward`; it does not shape-check the inputs.
-    Leaves are responsible for their own prediction/target shape
-    validation by calling the module-level :func:`assert_same_shape`
-    helper.
-
-    Addition returns a :class:`ComposedLossFunction`; ``sum([...])`` works
-    via :meth:`__radd__`.
-
-    Parameters
-    ----------
-    weight
-        Optional scalar schedule. ``None`` (default) means an identity
-        weight of ``1.0``.
-
-    Attributes
-    ----------
-    weight
-        The :class:`LossWeightSchedule` instance or ``None``.
+    Concrete subclasses override :meth:`forward` and return the raw
+    unweighted loss tensor. Leaves are weightless — weighting and
+    scheduling live on :class:`ComposedLossFunction`. Operator sugar
+    (``scalar * leaf``, ``leaf + leaf``, ``sum([...])``) produces a
+    composition; see :class:`ComposedLossFunction` for semantics.
     """
 
-    def __init__(self, *, weight: LossWeightSchedule | None = None) -> None:
-        """Initialize the base loss with an optional ``weight`` schedule."""
+    def __init__(self) -> None:
+        """Initialize the base loss as a stateless :class:`nn.Module`."""
         super().__init__()
-        self.weight: LossWeightSchedule | None = weight
 
     @abc.abstractmethod
-    def _forward(
-        self, pred: torch.Tensor, target: torch.Tensor, **kwargs: Any
-    ) -> torch.Tensor:
-        """Return the unweighted loss tensor."""
-
     def forward(
         self,
         pred: torch.Tensor,
@@ -151,100 +148,118 @@ class BaseLossFunction(nn.Module, abc.ABC):
         epoch: int | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """Final wrapper: returns ``current_weight(step, epoch) * _forward(...)``.
+        """Return the unweighted loss tensor.
 
-        Does not shape-check ``pred`` against ``target``; concrete loss
-        terms opt in by calling the module-level
-        :func:`assert_same_shape` helper inside their own ``_forward``.
+        ``step`` and ``epoch`` are part of the signature so
+        :class:`ComposedLossFunction` can forward them uniformly to every
+        component; most leaves ignore them.
         """
-        w = self.current_weight(step, epoch)
-        return w * self._forward(pred, target, step=step, epoch=epoch, **kwargs)
-
-    def current_weight(self, step: int = 0, epoch: int | None = None) -> float:
-        """Evaluate the scalar weight to apply at ``(step, epoch)``.
-
-        Returns 1.0 when no schedule is configured; otherwise evaluates
-        and validates the configured schedule.
-
-        Parameters
-        ----------
-        step
-            Current global training step.
-        epoch
-            Current training epoch, or ``None`` when unused.
-
-        Returns
-        -------
-        float
-            Finite scalar weight.
-
-        Raises
-        ------
-        ValueError
-            If a ``per_epoch=True`` schedule is evaluated with
-            ``epoch is None``, or the schedule returns a non-finite
-            value.
-        TypeError
-            If the schedule returns a non-numeric value.
-        """
-        if self.weight is None:
-            return 1.0
-        schedule = self.weight
-        context = type(self).__name__
-        if schedule.per_epoch and epoch is None:
-            raise ValueError(
-                f"epoch must be provided when the {context} loss weight "
-                "schedule has per_epoch=True. Pass epoch=<current_epoch> to "
-                "the loss, or set per_epoch=False on the schedule."
-            )
-        try:
-            value = schedule(step, epoch or 0)
-        except TypeError as exc:
-            raise TypeError(
-                f"{type(schedule).__name__} does not satisfy the "
-                "LossWeightSchedule contract: __call__ must accept "
-                "(step: int, epoch: int) and return a float."
-            ) from exc
-        if not isinstance(value, (int, float)):
-            raise TypeError(
-                f"{type(schedule).__name__} returned {type(value).__name__}; "
-                "LossWeightSchedule.__call__ must return float."
-            )
-        coerced = float(value)
-        if not math.isfinite(coerced):
-            raise ValueError(
-                f"{type(schedule).__name__} for {context} returned non-finite "
-                f"weight {coerced!r}; schedules must return finite floats."
-            )
-        return coerced
-
-    def weight_factors(
-        self, step: int = 0, epoch: int | None = None
-    ) -> dict[str, float]:
-        """Return ``{class_name: current_weight}`` — see :class:`ComposedLossFunction` for the composed form."""
-        return {type(self).__name__: self.current_weight(step, epoch)}
 
     # Arithmetic dunders — return ComposedLossFunction.
+    def __mul__(self, other: Any) -> ComposedLossFunction:
+        """Return ``ComposedLossFunction([self], weights=[other])``.
+
+        ``other`` may be a :class:`float`/:class:`int` or a
+        :class:`LossWeightSchedule`.
+        """
+        match other:
+            case bool():
+                return NotImplemented
+            case int() | float() | LossWeightSchedule():
+                return ComposedLossFunction([self], weights=[other])
+            case _:
+                return NotImplemented
+
+    def __rmul__(self, other: Any) -> ComposedLossFunction:
+        """Mirror of :meth:`__mul__` for ``scalar * loss``."""
+        return self.__mul__(other)
+
     def __add__(self, other: Any) -> ComposedLossFunction:
-        """Return ``self + other`` flattening any existing compositions."""
-        if not isinstance(other, (BaseLossFunction, ComposedLossFunction)):
-            return NotImplemented
-        return ComposedLossFunction(components=_flatten(self) + _flatten(other))
+        """Return ``self + other`` flattening any existing composition.
+
+        Both operands get weight ``1.0`` unless they are themselves
+        compositions, in which case their existing weights are preserved.
+        """
+        if isinstance(other, ComposedLossFunction):
+            return ComposedLossFunction(
+                [self, *other.components],
+                weights=[1.0, *other._weights],
+                normalize_weights=other.normalize_weights,
+            )
+        if isinstance(other, BaseLossFunction):
+            return ComposedLossFunction([self, other], weights=[1.0, 1.0])
+        return NotImplemented
 
     def __radd__(self, other: Any) -> BaseLossFunction | ComposedLossFunction:
         """Return ``self`` when seeded with integer ``0`` (for :func:`sum`)."""
         if other == 0:
             return self
+        if isinstance(other, (BaseLossFunction, ComposedLossFunction)):
+            return self.__add__(other)
         return NotImplemented
 
 
-def _flatten(
-    loss: BaseLossFunction | ComposedLossFunction,
-) -> tuple[BaseLossFunction, ...]:
-    """Return leaf components pulled from a composition, or wrap a bare loss."""
-    if isinstance(loss, ComposedLossFunction):
-        return tuple(loss.components)
-    return (loss,)
+def _resolve_weight(
+    weight: LossWeightSchedule | float,
+    step: int,
+    epoch: int | None,
+    *,
+    context: str,
+) -> float:
+    """Resolve a single weight (float or schedule) to a finite float.
+
+    Parameters
+    ----------
+    weight
+        Either a plain scalar or a :class:`LossWeightSchedule`.
+    step, epoch
+        Training counters forwarded to the schedule.
+    context
+        Caller-supplied name (typically the component's class name) used
+        in error messages.
+
+    Raises
+    ------
+    ValueError
+        If a ``per_epoch=True`` schedule is evaluated with
+        ``epoch is None`` or the schedule returns a non-finite value.
+    TypeError
+        If the schedule returns a non-numeric value.
+    """
+    if not isinstance(weight, LossWeightSchedule):
+        coerced = float(weight)
+        if not math.isfinite(coerced):
+            raise ValueError(
+                f"{context}: weight {weight!r} is not finite; "
+                "weights must be finite floats."
+            )
+        return coerced
+    if weight.per_epoch and epoch is None:
+        raise ValueError(
+            f"epoch must be provided when the {context} loss weight "
+            "schedule has per_epoch=True. Pass epoch=<current_epoch> to "
+            "the loss, or set per_epoch=False on the schedule."
+        )
+    try:
+        value = weight(step, epoch or 0)
+    except TypeError as exc:
+        raise TypeError(
+            f"{type(weight).__name__} does not satisfy the "
+            "LossWeightSchedule contract: __call__ must accept "
+            "(step: int, epoch: int) and return a float."
+        ) from exc
+    if not isinstance(value, (int, float)):
+        raise TypeError(
+            f"{type(weight).__name__} returned {type(value).__name__}; "
+            "LossWeightSchedule.__call__ must return float."
+        )
+    coerced = float(value)
+    if not math.isfinite(coerced):
+        raise ValueError(
+            f"{type(weight).__name__} for {context} returned non-finite "
+            f"weight {coerced!r}; schedules must return finite floats."
+        )
+    return coerced
 
 
 def _component_names(components: Sequence[BaseLossFunction]) -> tuple[str, ...]:
@@ -266,26 +281,56 @@ def _component_names(components: Sequence[BaseLossFunction]) -> tuple[str, ...]:
 
 
 class ComposedLossFunction(nn.Module):
-    """Sum of :class:`BaseLossFunction` components.
+    """Weighted sum of :class:`BaseLossFunction` components.
 
-    The role of this class is to rout keyed prediction/target mappings
-    into each component's tensor-first ``forward`` method. Each component's
-    schedule fires exactly once, inside that component's own ``forward``.
+    This class owns the per-component weighting — leaves are weightless.
+    Weights may be plain floats or :class:`LossWeightSchedule` instances;
+    they are resolved to floats at call time. By default the resolved
+    weights are normalized to sum to ``1.0`` so scheduling controls
+    *relative* contributions while the learning rate controls the
+    absolute loss magnitude. Opt out with ``normalize_weights=False``.
 
     Components live in an :class:`torch.nn.ModuleList` for
     ``.modules()`` / ``.state_dict()`` / nested-``__repr__`` support.
+    When a component is itself a :class:`ComposedLossFunction`, its
+    components and weights are flattened into the parent element-wise so
+    ``(A + B) + C`` is equivalent to ``A + B + C``.
 
     Parameters
     ----------
     components
         Loss terms to combine; must contain at least one element.
+    weights
+        Optional per-component weights. When provided, ``weights`` must
+        have the same length as ``components`` at construction time
+        (i.e. top-level components — child weights inside nested
+        compositions are multiplied element-wise by the parent weight
+        during flattening). A ``None`` entry is shorthand for ``1.0``,
+        so ``weights=[None, 2.0, None]`` means "component 1 gets 2×,
+        others default". Passing ``weights=None`` defaults every
+        component to ``1.0``.
+    normalize_weights
+        When ``True`` (default), resolved weights are divided by their
+        sum at each call so the effective weights sum to ``1.0``. A
+        zero-sum raises :class:`ValueError`. When ``False``, raw
+        weighted sums are returned.
+
+    Attributes
+    ----------
+    components
+        :class:`torch.nn.ModuleList` of the flattened leaf components.
+    normalize_weights
+        Whether effective weights are renormalized to sum to ``1.0``.
     """
 
     def __init__(
         self,
         components: Sequence[BaseLossFunction | ComposedLossFunction],
+        *,
+        weights: Sequence[LossWeightSchedule | float | None] | None = None,
+        normalize_weights: bool = True,
     ) -> None:
-        """Initialize with ``components``."""
+        """Store flattened components, their weights, and the normalization flag."""
         super().__init__()
         components = tuple(components)
         if len(components) == 0:
@@ -297,12 +342,124 @@ class ComposedLossFunction(nn.Module):
                     f"ComposedLossFunction, got "
                     f"{type(comp).__name__}"
                 )
-        # flattening is needed in case we are merging composed losses
+
+        if weights is None:
+            raw_weights: list[LossWeightSchedule | float] = [1.0] * len(components)
+        else:
+            raw_weights = [1.0 if w is None else w for w in weights]
+            if len(raw_weights) != len(components):
+                raise ValueError(
+                    f"weights has length {len(raw_weights)} but components has "
+                    f"length {len(components)}; lengths must match."
+                )
+            for i, w in enumerate(raw_weights):
+                match w:
+                    case bool():
+                        valid = False
+                    case int() | float() | LossWeightSchedule():
+                        valid = True
+                    case _:
+                        valid = False
+                if not valid:
+                    raise TypeError(
+                        f"weights[{i}] must be a float or LossWeightSchedule, "
+                        f"got {type(w).__name__}."
+                    )
+
         flat_components: list[BaseLossFunction] = []
-        for comp in components:
-            flat_components.extend(_flatten(comp))
+        flat_weights: list[LossWeightSchedule | float] = []
+        for comp, parent_w in zip(components, raw_weights, strict=True):
+            if isinstance(comp, ComposedLossFunction):
+                for child_comp, child_w in zip(
+                    comp.components, comp._weights, strict=True
+                ):
+                    flat_components.append(child_comp)
+                    flat_weights.append(_compose_weights(parent_w, child_w))
+            else:
+                flat_components.append(comp)
+                flat_weights.append(parent_w)
 
         self.components: nn.ModuleList = nn.ModuleList(flat_components)
+        self._weights: list[LossWeightSchedule | float] = flat_weights
+        self.normalize_weights: bool = normalize_weights
+
+    def _resolve_raw_and_effective(
+        self, step: int, epoch: int | None
+    ) -> tuple[tuple[str, ...], list[float], list[float]]:
+        """Resolve raw and effective weights in a single pass.
+
+        Returns a triple ``(names, raw, effective)`` where ``raw`` holds
+        the per-component resolved floats (pre-normalization) and
+        ``effective`` holds the weights that will actually be applied —
+        identical to ``raw`` when :attr:`normalize_weights` is ``False``
+        and ``raw / sum(raw)`` otherwise. When normalization is enabled
+        the raw weights must sum to a strictly positive float; a sum
+        that is non-positive (negative, zero, or non-finite from
+        cancellation) is rejected with :class:`ValueError` because the
+        resulting normalization either flips every contribution's sign
+        or blows up. Individual raw weights may themselves be negative
+        as long as their sum is positive.
+        """
+        names = _component_names(tuple(self.components))
+        raw = [
+            _resolve_weight(w, step, epoch, context=name)
+            for w, name in zip(self._weights, names, strict=True)
+        ]
+        if not self.normalize_weights:
+            return names, raw, list(raw)
+        total = sum(raw)
+        if not math.isfinite(total) or total <= 0.0:
+            resolved = dict(zip(names, raw, strict=True))
+            raise ValueError(
+                "ComposedLossFunction: cannot normalize weights whose sum "
+                f"is not strictly positive (sum={total!r}). Resolved "
+                f"weights at step={step}, epoch={epoch}: {resolved}. "
+                "Choose weights whose sum is a finite positive float or "
+                "set normalize_weights=False."
+            )
+        effective = [w / total for w in raw]
+        return names, raw, effective
+
+    def current_weight(self, step: int = 0, epoch: int | None = None) -> list[float]:
+        """Resolve each component's weight to a float for ``(step, epoch)``.
+
+        When :attr:`normalize_weights` is ``True`` the returned list sums
+        to ``1.0``; otherwise it is the raw resolved weights. With
+        normalization enabled the raw sum must be a strictly positive
+        float or :class:`ValueError` is raised.
+
+        Parameters
+        ----------
+        step
+            Current global training step.
+        epoch
+            Current training epoch, or ``None`` when unused.
+
+        Returns
+        -------
+        list[float]
+            One effective weight per component, in order.
+
+        Raises
+        ------
+        ValueError
+            If normalization is enabled and the raw weights do not sum
+            to a strictly positive, finite float.
+        """
+        _, _, effective = self._resolve_raw_and_effective(step, epoch)
+        return effective
+
+    def weight_factors(
+        self, step: int = 0, epoch: int | None = None
+    ) -> dict[str, float]:
+        """Return a flat ``{component_name: effective_weight}`` dict.
+
+        Duplicate class names get numeric suffixes (``_0``, ``_1``, ...)
+        applied to *all* colliding entries, not only the duplicates.
+        """
+        names = _component_names(tuple(self.components))
+        effective = self.current_weight(step=step, epoch=epoch)
+        return dict(zip(names, effective, strict=True))
 
     def forward(
         self,
@@ -313,12 +470,29 @@ class ComposedLossFunction(nn.Module):
         epoch: int | None = None,
         **kwargs: Any,
     ) -> ComposedLossOutput:
-        """Return total and weighted per-component loss contributions."""
-        total: torch.Tensor | None = None
-        contributions: dict[str, torch.Tensor] = {}
-        names = _component_names(tuple(self.components))
+        """Return the weighted total loss and per-component diagnostics.
 
-        for name, comp in zip(names, self.components, strict=True):
+        Each component is called with the routed ``pred`` / ``target``
+        tensors and the effective weight for this step. The output's
+        ``per_component_total`` contains ``effective_weight * raw_loss``
+        per component; ``per_component_weight`` holds the scalar weights
+        that were applied (after normalization, if enabled);
+        ``per_component_raw_weight`` holds the pre-normalization
+        resolved weights so schedule ramps remain observable on
+        single-component normalized compositions.
+        """
+        names, raw_weights, effective = self._resolve_raw_and_effective(step, epoch)
+
+        per_component_total: dict[str, torch.Tensor] = {}
+        per_component_weight: dict[str, float] = dict(
+            zip(names, effective, strict=True)
+        )
+        per_component_raw_weight: dict[str, float] = dict(
+            zip(names, raw_weights, strict=True)
+        )
+        total: torch.Tensor | None = None
+
+        for name, comp, weight in zip(names, self.components, effective, strict=True):
             prediction_key = getattr(comp, "prediction_key", None)
             target_key = getattr(comp, "target_key", None)
             if prediction_key is None:
@@ -357,44 +531,155 @@ class ComposedLossFunction(nn.Module):
                     f"{target_key!r} must resolve to torch.Tensor, "
                     f"got {type(target).__name__}."
                 )
-            term = comp(pred, target, step=step, epoch=epoch, **kwargs)
+            raw = comp(pred, target, step=step, epoch=epoch, **kwargs)
+            if not isinstance(raw, torch.Tensor):
+                raise TypeError(
+                    f"{type(comp).__name__} returned "
+                    f"{type(raw).__name__} from forward(); "
+                    "BaseLossFunction subclasses must return a torch.Tensor."
+                )
+            contribution = weight * raw
+            per_component_total[name] = contribution
+            total = contribution if total is None else total + contribution
 
-            contributions[name] = term
-            total = term if total is None else total + term
         if total is None:
             raise RuntimeError("ComposedLossFunction has no components.")
-        contributions["total_loss"] = total
 
-        # cast is mainly for type checking; this is to show that
-        # we will guarantee a total_loss key
-        return cast(ComposedLossOutput, contributions)
+        return cast(
+            ComposedLossOutput,
+            {
+                "total_loss": total,
+                "per_component_total": per_component_total,
+                "per_component_weight": per_component_weight,
+                "per_component_raw_weight": per_component_raw_weight,
+            },
+        )
 
-    def weight_factors(
-        self, step: int = 0, epoch: int | None = None
-    ) -> dict[str, float]:
-        """Return a flat dict mapping each component's class name to its weight.
+    def __mul__(self, other: Any) -> ComposedLossFunction:
+        """Scale every component weight by a float ``other``.
 
-        Duplicate class names get numeric suffixes (``_0``, ``_1``, ...)
-        applied to *all* colliding entries, not only the duplicates.
+        Only float/int scalars are accepted. Schedules are rejected with
+        :class:`TypeError`: compose schedules onto the individual
+        components before combining, or multiply the composition by a
+        plain float.
         """
-        names = _component_names(tuple(self.components))
-        return {
-            name: comp.current_weight(step, epoch)
-            for name, comp in zip(names, self.components, strict=True)
-        }
+        if isinstance(other, bool) or not isinstance(other, (int, float)):
+            if isinstance(other, LossWeightSchedule):
+                raise TypeError(
+                    "Multiplying a ComposedLossFunction by a "
+                    "LossWeightSchedule is not supported. Scale each "
+                    "component individually (e.g. schedule * EnergyLoss()) "
+                    "and compose the results, or multiply by a float."
+                )
+            return NotImplemented
+        scale = float(other)
+        scaled_weights = [_compose_weights(scale, w) for w in self._weights]
+        return ComposedLossFunction(
+            list(self.components),
+            weights=scaled_weights,
+            normalize_weights=self.normalize_weights,
+        )
+
+    def __rmul__(self, other: Any) -> ComposedLossFunction:
+        """Mirror of :meth:`__mul__` for ``scalar * composition``."""
+        return self.__mul__(other)
 
     def __add__(self, other: Any) -> ComposedLossFunction:
-        """Return ``self + other`` flattening any existing compositions."""
-        if not isinstance(other, (BaseLossFunction, ComposedLossFunction)):
-            return NotImplemented
-        return ComposedLossFunction(components=_flatten(self) + _flatten(other))
+        """Return ``self + other`` flattening any existing composition.
+
+        The result inherits :attr:`normalize_weights` from ``self``.
+        Adding two compositions with mismatched ``normalize_weights``
+        raises :class:`ValueError` — combine them explicitly via
+        :class:`ComposedLossFunction` to pick the intended flag.
+        """
+        if isinstance(other, ComposedLossFunction):
+            if self.normalize_weights != other.normalize_weights:
+                raise ValueError(
+                    "Cannot add ComposedLossFunctions with mismatched "
+                    f"normalize_weights (self={self.normalize_weights}, "
+                    f"other={other.normalize_weights}). Construct the "
+                    "combined composition explicitly via "
+                    "ComposedLossFunction(..., normalize_weights=...)."
+                )
+            return ComposedLossFunction(
+                [*self.components, *other.components],
+                weights=[*self._weights, *other._weights],
+                normalize_weights=self.normalize_weights,
+            )
+        if isinstance(other, BaseLossFunction):
+            return ComposedLossFunction(
+                [*self.components, other],
+                weights=[*self._weights, 1.0],
+                normalize_weights=self.normalize_weights,
+            )
+        return NotImplemented
 
     def __radd__(self, other: Any) -> ComposedLossFunction:
         """Return ``self`` when seeded with integer ``0`` (for :func:`sum`)."""
         if other == 0:
             return self
+        if isinstance(other, BaseLossFunction):
+            return ComposedLossFunction(
+                [other, *self.components],
+                weights=[1.0, *self._weights],
+                normalize_weights=self.normalize_weights,
+            )
         return NotImplemented
 
     def extra_repr(self) -> str:
-        """Expose component count alongside the default nested-module repr."""
-        return f"num_components={len(self.components)}"
+        """Expose component count and normalization alongside the default repr."""
+        return (
+            f"num_components={len(self.components)}, "
+            f"normalize_weights={self.normalize_weights}"
+        )
+
+
+def _compose_weights(
+    outer: LossWeightSchedule | float,
+    inner: LossWeightSchedule | float,
+) -> LossWeightSchedule | float:
+    """Return ``outer * inner`` as a weight, keeping floats where possible.
+
+    If either operand is a schedule, the result is a
+    :class:`_ProductWeight` that resolves ``outer(step, epoch) *
+    inner(step, epoch)`` lazily. Pure float × float collapses to a float.
+    """
+    outer_is_schedule = isinstance(outer, LossWeightSchedule)
+    inner_is_schedule = isinstance(inner, LossWeightSchedule)
+    if not outer_is_schedule and not inner_is_schedule:
+        return float(outer) * float(inner)
+    return _ProductWeight(outer, inner)
+
+
+@dataclass(frozen=True)
+class _ProductWeight:
+    """Lazy product of two weights — either operand may be a schedule or a float.
+
+    Needed for nested composition flattening: when a parent composition
+    has a non-unity weight and a child's weight is a
+    :class:`LossWeightSchedule`, the product cannot be resolved at
+    construction time because the schedule is a callable of
+    ``(step, epoch)``. :class:`_ProductWeight` captures both operands
+    and evaluates the product at call time while structurally
+    satisfying the :class:`LossWeightSchedule` protocol (``per_epoch``
+    attribute + ``__call__``).
+    """
+
+    left: LossWeightSchedule | float
+    right: LossWeightSchedule | float
+    per_epoch: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Derive ``per_epoch`` from the two operands."""
+        combined = bool(
+            getattr(self.left, "per_epoch", False)
+            or getattr(self.right, "per_epoch", False)
+        )
+        # Frozen dataclass → must go through object.__setattr__.
+        object.__setattr__(self, "per_epoch", combined)
+
+    def __call__(self, step: int, epoch: int) -> float:
+        """Return ``left(step, epoch) * right(step, epoch)``."""
+        left = self.left(step, epoch) if callable(self.left) else float(self.left)
+        right = self.right(step, epoch) if callable(self.right) else float(self.right)
+        return float(left) * float(right)

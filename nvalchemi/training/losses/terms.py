@@ -30,7 +30,6 @@ from jaxtyping import Bool, Float, Integer
 from plum import dispatch, overload
 
 from nvalchemi._typing import BatchIndices, Energy, Forces, Scalar, Stress
-from nvalchemi.training.losses.base import LossWeightSchedule
 from nvalchemi.training.losses.composition import BaseLossFunction, assert_same_shape
 from nvalchemi.training.losses.reductions import frobenius_mse, per_graph_sum
 
@@ -166,7 +165,7 @@ class EnergyLoss(BaseLossFunction):
     """Mean-squared-error loss on per-graph total energy.
 
     Energy is already a per-graph quantity of shape ``(B, 1)``, so no
-    scatter reduction is needed: :meth:`_forward` returns a plain MSE
+    scatter reduction is needed: :meth:`forward` returns a plain MSE
     over the inputs. When ``per_atom=True``, both prediction and target
     are divided by the per-graph node count before the MSE, so large
     graphs don't dominate the loss. Counts may be supplied directly as
@@ -201,9 +200,6 @@ class EnergyLoss(BaseLossFunction):
         Implemented with branch-free tensor ops for ``torch.compile``
         compatibility. When every target entry is ``NaN`` the loss is
         ``0.0``.
-    weight : LossWeightSchedule, optional
-        Scalar schedule applied in :meth:`forward`; ``None`` (default)
-        means an identity weight of ``1.0``.
     """
 
     def __init__(
@@ -213,22 +209,23 @@ class EnergyLoss(BaseLossFunction):
         prediction_key: str = "predicted_energy",
         per_atom: bool = False,
         ignore_nan: bool = False,
-        weight: LossWeightSchedule | None = None,
     ) -> None:
         """Configure attribute keys and per-atom normalization."""
-        super().__init__(weight=weight)
+        super().__init__()
         self.target_key = target_key
         self.prediction_key = prediction_key
         self.per_atom = per_atom
         self.ignore_nan = ignore_nan
 
-    def _forward(
+    def forward(
         self,
         pred: Energy,
         target: Energy,
         *,
+        step: int = 0,  # noqa: ARG002
+        epoch: int | None = None,  # noqa: ARG002
         num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002
     ) -> Scalar:
         """Return the optionally per-atom-normalized energy MSE.
 
@@ -238,6 +235,11 @@ class EnergyLoss(BaseLossFunction):
             Predicted per-graph energies of shape ``(B, 1)``.
         target : Energy
             Target per-graph energies of shape ``(B, 1)``.
+        step : int, default 0
+            Ignored; accepted so :class:`ComposedLossFunction` can
+            forward training counters uniformly to every component.
+        epoch : int | None, default None
+            Ignored; accepted for the same reason as ``step``.
         num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None, optional
             Per-graph node counts or padded node-validity mask. Required
             when ``per_atom=True``.
@@ -271,8 +273,7 @@ class EnergyLoss(BaseLossFunction):
             f"target_key={self.target_key!r}, "
             f"prediction_key={self.prediction_key!r}, "
             f"per_atom={self.per_atom!r}, "
-            f"ignore_nan={self.ignore_nan!r}, "
-            f"weight={self.weight!r}"
+            f"ignore_nan={self.ignore_nan!r}"
         )
 
 
@@ -322,9 +323,6 @@ class ForceLoss(BaseLossFunction):
         branch-free tensor ops for ``torch.compile`` compatibility. A
         graph whose entire force tensor is ``NaN`` contributes ``0.0``
         to the loss.
-    weight : LossWeightSchedule, optional
-        Scalar schedule applied in :meth:`forward`; ``None`` (default)
-        means an identity weight of ``1.0``.
     """
 
     def __init__(
@@ -334,24 +332,25 @@ class ForceLoss(BaseLossFunction):
         prediction_key: str = "predicted_forces",
         normalize_by_atom_count: bool = True,
         ignore_nan: bool = False,
-        weight: LossWeightSchedule | None = None,
     ) -> None:
         """Configure attribute keys and per-graph normalization."""
-        super().__init__(weight=weight)
+        super().__init__()
         self.target_key = target_key
         self.prediction_key = prediction_key
         self.normalize_by_atom_count = normalize_by_atom_count
         self.ignore_nan = ignore_nan
 
-    def _forward(
+    def forward(
         self,
         pred: _ForceTensor,
         target: _ForceTensor,
         *,
+        step: int = 0,  # noqa: ARG002
+        epoch: int | None = None,  # noqa: ARG002
         batch_idx: BatchIndices | None = None,
         num_graphs: int | None = None,
         num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002
     ) -> Scalar:
         """Return the force-component MSE, optionally graph-balanced.
 
@@ -362,6 +361,11 @@ class ForceLoss(BaseLossFunction):
             is ``(B, V_max, 3)``.
         target : Forces | Float[torch.Tensor, "B V_max 3"]
             Target forces with the same shape as ``pred``.
+        step : int, default 0
+            Ignored; accepted so :class:`ComposedLossFunction` can
+            forward training counters uniformly to every component.
+        epoch : int | None, default None
+            Ignored; accepted for the same reason as ``step``.
         batch_idx : BatchIndices | None, optional
             Dense-layout graph index for each node, shape ``(V,)``.
             Required for dense graph-balanced reduction and ignored for
@@ -548,8 +552,7 @@ class ForceLoss(BaseLossFunction):
             f"target_key={self.target_key!r}, "
             f"prediction_key={self.prediction_key!r}, "
             f"normalize_by_atom_count={self.normalize_by_atom_count!r}, "
-            f"ignore_nan={self.ignore_nan!r}, "
-            f"weight={self.weight!r}"
+            f"ignore_nan={self.ignore_nan!r}"
         )
 
 
@@ -580,9 +583,6 @@ class StressLoss(BaseLossFunction):
         with branch-free tensor ops for ``torch.compile`` compatibility.
         A graph whose entire stress tensor is ``NaN`` contributes
         ``0.0`` to the loss.
-    weight : LossWeightSchedule, optional
-        Scalar schedule applied in :meth:`forward`; ``None`` (default)
-        means an identity weight of ``1.0``.
     """
 
     def __init__(
@@ -591,19 +591,21 @@ class StressLoss(BaseLossFunction):
         target_key: str = "stress",
         prediction_key: str = "predicted_stress",
         ignore_nan: bool = False,
-        weight: LossWeightSchedule | None = None,
     ) -> None:
         """Configure attribute keys for target and prediction."""
-        super().__init__(weight=weight)
+        super().__init__()
         self.target_key = target_key
         self.prediction_key = prediction_key
         self.ignore_nan = ignore_nan
 
-    def _forward(
+    def forward(
         self,
         pred: Stress,
         target: Stress,
-        **kwargs: Any,
+        *,
+        step: int = 0,  # noqa: ARG002
+        epoch: int | None = None,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
     ) -> Scalar:
         """Return the mean per-graph Frobenius MSE of the stress tensor.
 
@@ -613,6 +615,11 @@ class StressLoss(BaseLossFunction):
             Predicted per-graph stress tensors of shape ``(B, 3, 3)``.
         target : Stress
             Target per-graph stress tensors of shape ``(B, 3, 3)``.
+        step : int, default 0
+            Ignored; accepted so :class:`ComposedLossFunction` can
+            forward training counters uniformly to every component.
+        epoch : int | None, default None
+            Ignored; accepted for the same reason as ``step``.
         **kwargs : Any
             Ignored keyword arguments accepted for the common loss-call
             interface.
@@ -647,6 +654,5 @@ class StressLoss(BaseLossFunction):
         return (
             f"target_key={self.target_key!r}, "
             f"prediction_key={self.prediction_key!r}, "
-            f"ignore_nan={self.ignore_nan!r}, "
-            f"weight={self.weight!r}"
+            f"ignore_nan={self.ignore_nan!r}"
         )

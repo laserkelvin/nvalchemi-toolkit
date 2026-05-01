@@ -18,7 +18,8 @@ Four Pydantic-validated schedules are provided: :class:`ConstantWeight`,
 :class:`LinearWeight`, :class:`CosineWeight`, and :class:`PiecewiseWeight`.
 Each satisfies the runtime-checkable
 :class:`~nvalchemi.training.losses.base.LossWeightSchedule` protocol and
-is the accepted type of :attr:`BaseLossFunction.weight`.
+can be supplied inside :class:`ComposedLossFunction`'s ``weights``
+sequence or on the left of ``schedule * leaf``.
 
 The concrete schedules always receive both the global step and epoch.
 When ``per_epoch=False`` (the default), schedule windows and boundaries
@@ -29,14 +30,12 @@ that update once per epoch.
 Serialization note
 ------------------
 
-Schedules are no longer round-tripped through a Pydantic discriminated
-union on :attr:`BaseLossFunction.weight`. Instead, losses follow the
-``(instance, spec)`` pattern used by models/optimizers/checkpoints
-(see :mod:`nvalchemi.training._checkpoint`): the upstream
-``TrainingStrategy`` reconstructs the schedule manually when rebuilding
-the loss from its :class:`~nvalchemi.training.BaseSpec`. A concrete
-schedule class still round-trips standalone via
-:func:`~nvalchemi.training.create_model_spec`.
+Schedules live in :class:`ComposedLossFunction`'s ``weights`` argument
+rather than on leaves, and are reconstructed by the upstream
+``TrainingStrategy`` from their ``(instance, spec)`` pair — the same
+pattern used for models and optimizers (see
+:mod:`nvalchemi.training._checkpoint`). A concrete schedule class still
+round-trips standalone via :func:`~nvalchemi.training.create_model_spec`.
 
 Adding a new schedule
 ---------------------

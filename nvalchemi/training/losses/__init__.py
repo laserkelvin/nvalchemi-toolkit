@@ -14,16 +14,16 @@
 # limitations under the License.
 """Loss-function abstractions, schedules, terms, and reductions.
 
-Loss terms are Pydantic-serializable :class:`BaseLossFunction` instances
-that consume prediction and target tensors directly. Addition
-(``energy_loss + force_loss``) builds a :class:`ComposedLossFunction`,
-which routes keyed prediction/target mappings into those tensor-first
-terms and returns a :class:`ComposedLossOutput` with the total loss and
-per-component contributions. Loss coefficients and schedules belong on
-the leaf loss terms' ``weight`` fields.
-Schedule instances attached to a leaf loss's ``weight`` field are
-reconstructed by ``TrainingStrategy`` from their ``(instance, spec)``
-pair, mirroring the pattern used for models and optimizers.
+Loss terms are :class:`BaseLossFunction` instances that consume
+prediction and target tensors directly and return raw (unweighted) loss
+tensors. :class:`ComposedLossFunction` owns the per-component weighting
+— either plain floats or :class:`LossWeightSchedule` instances — and,
+by default, renormalizes the effective weights to sum to ``1.0``.
+Operator sugar (``3.0 * EnergyLoss() + 2.0 * ForceLoss()``) builds a
+composition in one expression. Schedule instances attached to a
+composition's weights are reconstructed by ``TrainingStrategy`` from
+their ``(instance, spec)`` pair, mirroring the pattern used for models
+and optimizers.
 """
 
 from __future__ import annotations
