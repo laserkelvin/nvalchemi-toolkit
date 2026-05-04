@@ -307,7 +307,7 @@ batch=batch)`; see [Passing graph metadata](passing_graph_metadata).
 
 `ComposedLossFunction.forward` returns a
 {py:class}`~nvalchemi.training.ComposedLossOutput` — a
-{py:class}`typing.TypedDict` with four fields:
+{py:class}`typing.TypedDict` with five fields:
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -315,6 +315,7 @@ batch=batch)`; see [Passing graph metadata](passing_graph_metadata).
 | `per_component_total` | `dict[str, torch.Tensor]` | Per-component **weighted** loss (after applying the effective weight). Keyed by component class name with suffixes on duplicates. |
 | `per_component_weight` | `dict[str, float]` | Effective (post-normalization) weights actually applied at this call. |
 | `per_component_raw_weight` | `dict[str, float]` | Raw (pre-normalization) weights, equal to `per_component_weight` when `normalize_weights=False`. |
+| `per_component_sample` | `dict[str, torch.Tensor]` | Weighted, detached `(B,)` tensors for components that populate `per_sample_loss`. Absent when the leaf stores `None`. See [Per-sample loss diagnostics](#per-sample-loss-diagnostics) below for details (including aggregation caveats). |
 
 ```python
 out = loss_fn(predictions, targets)
@@ -328,6 +329,48 @@ for name, w in out["per_component_weight"].items():
 
 Duplicate class names get numeric suffixes (`StressLoss_0`,
 `StressLoss_1`, …) so keys remain unique.
+
+### Per-sample loss diagnostics
+
+Every leaf carries an optional `per_sample_loss: torch.Tensor | None` attribute.
+Concrete losses populate it as a side effect of `forward` with a detached
+per-graph tensor of shape `(B,)`, cleared to `None` at the top of every call.
+The scalar return still carries gradients — this attribute is for logging and
+diagnostics only.
+
+Which built-ins populate it:
+
+- `EnergyLoss`: populated when the residual has shape `(B,)` or `(B, 1)`. Left
+  as `None` on unexpected broadcast-trap shapes (see the warning in
+  [Canonical shape layouts](#canonical-shape-layouts)).
+- `StressLoss`: always populated (Frobenius MSE is already per-graph).
+- `ForceLoss`: populated whenever `normalize_by_atom_count=True` (dense +
+  `batch_idx` or padded + `num_nodes_per_graph`), and for padded inputs with
+  `normalize_by_atom_count=False`. **Not** populated for dense `(V, 3)` with
+  `normalize_by_atom_count=False`, since the scalar path does not need
+  `batch_idx` and requiring it just for diagnostics would change the call
+  contract.
+
+`ComposedLossOutput["per_component_sample"]` carries
+`effective_weight * component.per_sample_loss` (detached) for each component
+that populated the attribute. Components whose `per_sample_loss` was `None`
+are **absent** from the dict:
+
+```python
+out = loss(predictions, targets)
+if "EnergyLoss" in out["per_component_sample"]:
+    per_graph_energy_loss = out["per_component_sample"]["EnergyLoss"]
+    # shape (B,), detached, weighted by the effective energy weight at this step
+```
+
+```{note}
+For most losses `per_sample_loss.mean()` equals the scalar return, but two
+built-in paths populate a per-graph metric whose mean does **not** coincide
+with the global scalar: `EnergyLoss(ignore_nan=True)` (global divisor =
+count of valid entries) and padded `ForceLoss(normalize_by_atom_count=False)`
+(global divisor = total valid components across graphs). Inspect individual
+components rather than comparing aggregates.
+```
 
 ### Routing errors
 
@@ -642,6 +685,14 @@ class MaskedEnergyLoss(BaseLossFunction):
 constructor state. If you want callers to override routing keys or
 configure additional fields, expose those via `__init__` the way
 `HuberEnergyLoss` does above.
+
+### Populating `per_sample_loss` (optional)
+
+Custom leaves may set `self.per_sample_loss` to a detached `(B,)` tensor at
+the end of `forward` to expose per-graph diagnostics through
+`ComposedLossOutput["per_component_sample"]`. See
+[Per-sample loss diagnostics](#per-sample-loss-diagnostics) for the full
+contract; leave it `None` when a per-graph decomposition is unavailable.
 
 ### Testing a custom loss
 

@@ -45,20 +45,24 @@ class ComposedLossOutput(TypedDict):
     from composed losses will always at least contain the keys within
     this ``TypedDict``.
 
-    The mapping always contains ``total_loss`` and three per-component
+    The mapping always contains ``total_loss`` and four per-component
     sub-mappings keyed by component name. ``per_component_weight`` holds
     the effective (possibly normalized) weight actually applied to each
     component at this call; ``per_component_raw_weight`` holds the
     pre-normalization resolved weight — identical to
     ``per_component_weight`` when ``normalize_weights=False`` and useful
     for logging the underlying schedule value regardless of
-    normalization.
+    normalization. ``per_component_sample`` carries per-component
+    **weighted** per-sample loss tensors of shape ``(B,)``, detached;
+    see :attr:`BaseLossFunction.per_sample_loss` for the per-leaf
+    populate-or-skip contract.
     """
 
     total_loss: torch.Tensor
     per_component_total: dict[str, torch.Tensor]
     per_component_weight: dict[str, float]
     per_component_raw_weight: dict[str, float]
+    per_component_sample: dict[str, torch.Tensor]
 
 
 def assert_same_shape(
@@ -132,11 +136,28 @@ class BaseLossFunction(nn.Module, abc.ABC):
     scheduling live on :class:`ComposedLossFunction`. Operator sugar
     (``scalar * leaf``, ``leaf + leaf``, ``sum([...])``) produces a
     composition; see :class:`ComposedLossFunction` for semantics.
+
+    Attributes
+    ----------
+    per_sample_loss : torch.Tensor | None
+        Detached per-graph loss tensor of shape ``(B,)`` left as a side
+        effect of the most recent :meth:`forward` call, or ``None`` when
+        the loss does not naturally compute a per-graph view (or when
+        ``forward`` has never been called). Intended for logging and
+        diagnostics only — gradients flow through the scalar returned by
+        :meth:`forward`, not through this attribute. Concrete subclasses
+        are expected to clear this attribute to ``None`` at the top of
+        every :meth:`forward` call so that a partial failure leaves
+        ``None`` rather than stale state from a prior call. When a leaf
+        cannot decompose its scalar into a per-graph tensor (e.g.
+        broadcast-trap shapes or missing metadata on the scalar path),
+        the leaf leaves this attribute as ``None`` rather than guessing.
     """
 
     def __init__(self) -> None:
         """Initialize the base loss as a stateless :class:`nn.Module`."""
         super().__init__()
+        self.per_sample_loss: torch.Tensor | None = None
 
     @abc.abstractmethod
     def forward(
@@ -479,11 +500,14 @@ class ComposedLossFunction(nn.Module):
         that were applied (after normalization, if enabled);
         ``per_component_raw_weight`` holds the pre-normalization
         resolved weights so schedule ramps remain observable on
-        single-component normalized compositions.
+        single-component normalized compositions; see
+        :attr:`BaseLossFunction.per_sample_loss` for the
+        ``per_component_sample`` contract.
         """
         names, raw_weights, effective = self._resolve_raw_and_effective(step, epoch)
 
         per_component_total: dict[str, torch.Tensor] = {}
+        per_component_sample: dict[str, torch.Tensor] = {}
         per_component_weight: dict[str, float] = dict(
             zip(names, effective, strict=True)
         )
@@ -531,6 +555,8 @@ class ComposedLossFunction(nn.Module):
                     f"{target_key!r} must resolve to torch.Tensor, "
                     f"got {type(target).__name__}."
                 )
+            # Guard against stale diagnostics from custom leaves that forget to clear.
+            comp.per_sample_loss = None
             raw = comp(pred, target, step=step, epoch=epoch, **kwargs)
             if not isinstance(raw, torch.Tensor):
                 raise TypeError(
@@ -540,6 +566,21 @@ class ComposedLossFunction(nn.Module):
                 )
             contribution = weight * raw
             per_component_total[name] = contribution
+            sample = comp.per_sample_loss
+            if sample is not None:
+                if not isinstance(sample, torch.Tensor):
+                    raise TypeError(
+                        f"{type(comp).__name__} (component {name!r}) set "
+                        f"per_sample_loss to {type(sample).__name__}; "
+                        "must be a torch.Tensor or None."
+                    )
+                if sample.ndim != 1:
+                    raise ValueError(
+                        f"{type(comp).__name__} (component {name!r}) set "
+                        f"per_sample_loss with shape {tuple(sample.shape)}; "
+                        "must be a 1-D tensor of shape (B,)."
+                    )
+                per_component_sample[name] = (weight * sample).detach()
             total = contribution if total is None else total + contribution
 
         if total is None:
@@ -552,6 +593,7 @@ class ComposedLossFunction(nn.Module):
                 "per_component_total": per_component_total,
                 "per_component_weight": per_component_weight,
                 "per_component_raw_weight": per_component_raw_weight,
+                "per_component_sample": per_component_sample,
             },
         )
 

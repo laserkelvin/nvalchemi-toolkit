@@ -586,6 +586,7 @@ class TestComposedLossFunction:
             "per_component_total",
             "per_component_weight",
             "per_component_raw_weight",
+            "per_component_sample",
         }
         assert torch.allclose(
             out["per_component_total"]["_ToyLoss_0"], torch.tensor(6.0)
@@ -1279,6 +1280,7 @@ class TestConcreteLosses:
             "per_component_total",
             "per_component_weight",
             "per_component_raw_weight",
+            "per_component_sample",
         }
         assert set(out["per_component_total"]) == {
             "EnergyLoss",
@@ -1388,6 +1390,293 @@ class TestConcreteLosses:
 
         assert torch.allclose(got_override, got_direct, atol=1e-6)
         assert not torch.allclose(got_override, got_batch_only, atol=1e-6)
+
+
+class TestPerSampleLoss:
+    # ---- Shared helpers ----------------------------------------------
+
+    @staticmethod
+    def _assert_per_sample(
+        loss: BaseLossFunction, expected_shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        ps = loss.per_sample_loss
+        assert ps is not None
+        assert ps.shape == expected_shape
+        assert ps.requires_grad is False
+        return ps
+
+    @pytest.mark.parametrize(
+        ("kwargs", "extra", "expected_fn"),
+        [
+            pytest.param(
+                {},
+                {},
+                lambda pred, target, counts: (pred - target).pow(2).squeeze(-1),
+                id="default",
+            ),
+            pytest.param(
+                {"per_atom": True},
+                {"num_nodes_per_graph": torch.tensor([2, 3, 1], dtype=torch.long)},
+                lambda pred, target, counts: (
+                    ((pred - target) / counts.to(pred).unsqueeze(-1)).pow(2).squeeze(-1)
+                ),
+                id="per_atom_normalizes_before_squaring",
+            ),
+        ],
+    )
+    def test_energy_loss_per_sample_populated_detached_shape_and_value(
+        self,
+        kwargs: dict[str, Any],
+        extra: dict[str, torch.Tensor],
+        expected_fn: Any,
+    ) -> None:
+        torch.manual_seed(0)
+        b = 3
+        pred = torch.randn(b, 1, requires_grad=True)
+        target = torch.randn(b, 1)
+        counts = extra.get("num_nodes_per_graph")
+        loss = EnergyLoss(**kwargs)
+        scalar = loss(pred, target, **extra)
+        ps = self._assert_per_sample(loss, (b,))
+        torch.testing.assert_close(ps, expected_fn(pred, target, counts))
+        # Canonical ``(B, 1)`` path: mean over graphs matches scalar.
+        torch.testing.assert_close(ps.mean(), scalar)
+
+    def test_energy_loss_per_sample_ignore_nan_populates(self) -> None:
+        """``ignore_nan`` populates ``(B,)`` with zero on all-NaN rows.
+
+        Kept as a distinct case: ``per_sample_loss.mean()`` does NOT equal
+        the scalar return here because the scalar divides by the global
+        valid-entry count while the per-sample view is per-row residual.
+        """
+        pred = torch.tensor([[1.0], [2.0], [3.0], [4.0]])
+        target = torch.tensor([[0.0], [float("nan")], [2.5], [float("nan")]])
+        loss = EnergyLoss(ignore_nan=True)
+        loss(pred, target)
+        ps = self._assert_per_sample(loss, (4,))
+        assert ps[1].item() == 0.0
+        assert ps[3].item() == 0.0
+        torch.testing.assert_close(ps[0], torch.tensor(1.0))
+        torch.testing.assert_close(ps[2], torch.tensor(0.25))
+
+    @pytest.mark.parametrize("ignore_nan", [False, True], ids=["default", "ignore_nan"])
+    def test_stress_loss_per_sample_populated_detached_shape_and_mean(
+        self, ignore_nan: bool
+    ) -> None:
+        torch.manual_seed(0)
+        b = 3
+        pred = torch.randn(b, 3, 3, requires_grad=True)
+        target = torch.randn(b, 3, 3)
+        loss = StressLoss(ignore_nan=ignore_nan)
+        scalar = loss(pred, target)
+        ps = self._assert_per_sample(loss, (b,))
+        expected = (pred - target).pow(2).mean(dim=(-2, -1))
+        torch.testing.assert_close(ps, expected)
+        torch.testing.assert_close(ps.mean(), scalar)
+
+    def test_stress_loss_ignore_nan_all_nan_row_is_zero(self) -> None:
+        torch.manual_seed(0)
+        pred = torch.randn(3, 3, 3)
+        target = torch.randn(3, 3, 3)
+        target[1] = float("nan")
+        loss = StressLoss(ignore_nan=True)
+        loss(pred, target)
+        ps = self._assert_per_sample(loss, (3,))
+        assert ps[1].item() == 0.0
+        for g in (0, 2):
+            expected = (pred[g] - target[g]).pow(2).mean()
+            torch.testing.assert_close(ps[g], expected)
+
+    @pytest.mark.parametrize(
+        ("normalize", "layout"),
+        [
+            pytest.param(True, "dense", id="dense_normalize"),
+            pytest.param(True, "padded", id="padded_normalize"),
+            pytest.param(False, "padded", id="padded_no_normalize"),
+        ],
+    )
+    def test_force_loss_per_sample_populated_detached_shape_and_value(
+        self, normalize: bool, layout: str
+    ) -> None:
+        torch.manual_seed(0)
+        loss = ForceLoss(normalize_by_atom_count=normalize)
+        if layout == "dense":
+            v = 5
+            batch_idx = torch.tensor([0, 0, 1, 2, 2], dtype=torch.int32)
+            num_graphs = 3
+            pred = torch.randn(v, 3, requires_grad=True)
+            target = torch.randn(v, 3)
+            loss(pred, target, batch_idx=batch_idx, num_graphs=num_graphs)
+            ps = self._assert_per_sample(loss, (num_graphs,))
+            per_atom_se = (pred - target).pow(2).sum(dim=-1)
+            per_atom_valid = torch.ones(v, dtype=pred.dtype) * 3
+            per_graph_num = per_graph_sum(per_atom_se, batch_idx, num_graphs=num_graphs)
+            per_graph_den = per_graph_sum(
+                per_atom_valid, batch_idx, num_graphs=num_graphs
+            ).clamp_min(1.0)
+            expected = per_graph_num / per_graph_den
+            torch.testing.assert_close(ps, expected)
+            return
+        # padded layout shared by both normalize=True and normalize=False.
+        b = 3
+        v_max = 4
+        pred = torch.randn(b, v_max, 3, requires_grad=True)
+        target = torch.randn(b, v_max, 3)
+        num_nodes_per_graph = torch.tensor([2, 1, 4], dtype=torch.long)
+        scalar = loss(pred, target, num_nodes_per_graph=num_nodes_per_graph)
+        ps = self._assert_per_sample(loss, (b,))
+        node_mask = torch.arange(v_max).unsqueeze(0) < num_nodes_per_graph.unsqueeze(-1)
+        valid = node_mask.unsqueeze(-1).expand_as(pred).to(dtype=pred.dtype)
+        squared_error = ((pred - target) * valid).pow(2)
+        per_graph_num = squared_error.sum(dim=(-2, -1))
+        per_graph_den = valid.sum(dim=(-2, -1)).clamp_min(1.0)
+        expected = per_graph_num / per_graph_den
+        torch.testing.assert_close(ps, expected)
+        if normalize:
+            # Normalized path: per-sample mean equals the scalar return.
+            torch.testing.assert_close(ps.mean(), scalar)
+
+    def test_force_loss_dense_no_normalize_per_sample_is_none(self) -> None:
+        torch.manual_seed(0)
+        pred = torch.randn(5, 3)
+        target = torch.randn(5, 3)
+        loss = ForceLoss(normalize_by_atom_count=False)
+        loss(pred, target)
+        assert loss.per_sample_loss is None
+
+    def test_per_sample_loss_cleared_on_each_forward_call(self) -> None:
+        torch.manual_seed(0)
+        loss = ForceLoss(normalize_by_atom_count=False)
+        padded_pred = torch.randn(3, 4, 3)
+        padded_target = torch.randn(3, 4, 3)
+        num_nodes_per_graph = torch.tensor([2, 1, 4], dtype=torch.long)
+        loss(padded_pred, padded_target, num_nodes_per_graph=num_nodes_per_graph)
+        assert loss.per_sample_loss is not None
+        loss(torch.randn(5, 3), torch.randn(5, 3))
+        assert loss.per_sample_loss is None
+
+    def test_per_sample_loss_cleared_on_exception(self) -> None:
+        torch.manual_seed(0)
+        loss = EnergyLoss()
+        loss(torch.randn(3, 1), torch.randn(3, 1))
+        assert loss.per_sample_loss is not None
+        pred = torch.randn(3, 1, dtype=torch.float32)
+        target = torch.randn(3, 1, dtype=torch.float64)
+        with pytest.raises(ValueError):
+            loss(pred, target)
+        assert loss.per_sample_loss is None
+
+    @staticmethod
+    def _energy_stress_inputs(
+        b: int, requires_grad: bool = False
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        predictions = {
+            "predicted_energy": torch.randn(b, 1, requires_grad=requires_grad),
+            "predicted_stress": torch.randn(b, 3, 3, requires_grad=requires_grad),
+        }
+        targets = {
+            "energy": torch.randn(b, 1),
+            "stress": torch.randn(b, 3, 3),
+        }
+        return predictions, targets
+
+    def test_composed_output_has_per_component_sample_field(self) -> None:
+        torch.manual_seed(0)
+        b = 3
+        composed = EnergyLoss() + StressLoss()
+        out = composed(*self._energy_stress_inputs(b))
+        assert set(out["per_component_sample"]) == set(out["per_component_total"])
+        for value in out["per_component_sample"].values():
+            assert value.shape == (b,)
+            assert value.requires_grad is False
+
+    def test_composed_per_component_sample_is_weighted_by_effective_weight(
+        self,
+    ) -> None:
+        torch.manual_seed(0)
+        b = 3
+        energy = EnergyLoss()
+        stress = StressLoss()
+        composed = ComposedLossFunction(
+            (energy, stress), weights=[3.0, 1.0], normalize_weights=False
+        )
+        pred_e = torch.randn(b, 1)
+        tgt_e = torch.randn(b, 1)
+        pred_s = torch.randn(b, 3, 3)
+        tgt_s = torch.randn(b, 3, 3)
+        out = composed(
+            {"predicted_energy": pred_e, "predicted_stress": pred_s},
+            {"energy": tgt_e, "stress": tgt_s},
+        )
+        assert energy.per_sample_loss is not None
+        expected_energy = 3.0 * energy.per_sample_loss
+        torch.testing.assert_close(
+            out["per_component_sample"]["EnergyLoss"], expected_energy
+        )
+
+    def test_composed_component_without_per_sample_is_absent(self) -> None:
+        torch.manual_seed(0)
+        v = 5
+        b = 3
+        composed = ComposedLossFunction(
+            (EnergyLoss(), ForceLoss(normalize_by_atom_count=False))
+        )
+        predictions = {
+            "predicted_energy": torch.randn(b, 1),
+            "predicted_forces": torch.randn(v, 3),
+        }
+        targets = {
+            "energy": torch.randn(b, 1),
+            "forces": torch.randn(v, 3),
+        }
+        out = composed(predictions, targets)
+        assert "EnergyLoss" in out["per_component_sample"]
+        assert "ForceLoss" not in out["per_component_sample"]
+
+    def test_composed_per_component_sample_sum_matches_total_loss(self) -> None:
+        torch.manual_seed(0)
+        b = 4
+        composed = EnergyLoss() + StressLoss()
+        predictions, targets = self._energy_stress_inputs(b)
+        out = composed(predictions, targets)
+        per_sample_sum = sum(out["per_component_sample"].values())
+        torch.testing.assert_close(per_sample_sum.mean(), out["total_loss"])
+
+    @pytest.mark.parametrize(
+        ("bad_value", "expected_exc", "expected_msg_fragment"),
+        [
+            (1.0, TypeError, "must be a torch.Tensor or None"),
+            (torch.zeros(2, 3), ValueError, "must be a 1-D tensor"),
+        ],
+        ids=["non_tensor_raises_type_error", "non_1d_tensor_raises_value_error"],
+    )
+    def test_composed_rejects_invalid_custom_per_sample_loss(
+        self,
+        bad_value: Any,
+        expected_exc: type[BaseException],
+        expected_msg_fragment: str,
+    ) -> None:
+        class _BadPerSampleLoss(_ToyLoss):
+            def __init__(self, value: Any) -> None:
+                super().__init__()
+                self._value = value
+
+            def forward(
+                self,
+                pred: torch.Tensor,
+                target: torch.Tensor,
+                *,
+                step: int = 0,
+                epoch: int | None = None,
+                **kwargs: Any,
+            ) -> torch.Tensor:
+                out = super().forward(pred, target, step=step, epoch=epoch, **kwargs)
+                self.per_sample_loss = self._value
+                return out
+
+        composed = ComposedLossFunction((_BadPerSampleLoss(bad_value),))
+        with pytest.raises(expected_exc, match=expected_msg_fragment):
+            composed({"prediction": torch.tensor(0.0)}, {"target": torch.tensor(0.0)})
 
 
 class TestIgnoreNaN:

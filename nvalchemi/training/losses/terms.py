@@ -259,6 +259,7 @@ class EnergyLoss(BaseLossFunction):
         Scalar
             Scalar energy loss.
         """
+        self.per_sample_loss = None
         assert_same_shape(
             pred,
             target,
@@ -273,8 +274,20 @@ class EnergyLoss(BaseLossFunction):
             pred = pred / counts
             target = target / counts
         if self.ignore_nan:
-            return _masked_mse(pred, target)
-        return (pred - target).pow(2).mean()
+            valid = ~target.isnan()
+            residual = torch.where(valid, pred - target, torch.zeros_like(pred))
+            residual_sq = residual.pow(2)
+            scalar = residual_sq.sum() / valid.to(dtype=pred.dtype).sum().clamp_min(1.0)
+        else:
+            residual_sq = (pred - target).pow(2)
+            scalar = residual_sq.mean()
+        # Only populate when the residual has a recognizable per-graph
+        # shape; broadcast-trap shapes leave ``per_sample_loss`` cleared.
+        if residual_sq.ndim == 1:
+            self.per_sample_loss = residual_sq.detach()
+        elif residual_sq.ndim == 2 and residual_sq.shape[-1] == 1:
+            self.per_sample_loss = residual_sq.squeeze(-1).detach()
+        return scalar
 
     def extra_repr(self) -> str:
         """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
@@ -398,6 +411,7 @@ class ForceLoss(BaseLossFunction):
         Scalar
             Scalar force loss.
         """
+        self.per_sample_loss = None
         assert_same_shape(
             pred,
             target,
@@ -406,13 +420,11 @@ class ForceLoss(BaseLossFunction):
             target_key=self.target_key,
         )
         if batch is not None:
-            # Dense-path metadata only needed for graph-balanced reduction.
             if self.normalize_by_atom_count and pred.ndim == 2:
                 if batch_idx is None:
                     batch_idx = getattr(batch, "batch_idx", None)
                 if num_graphs is None:
                     num_graphs = getattr(batch, "num_graphs", None)
-            # Padded-path metadata only needed for padded inputs.
             if pred.ndim == 3 and num_nodes_per_graph is None:
                 num_nodes_per_graph = getattr(batch, "num_nodes_per_graph", None)
         valid = self._valid_force_components(pred, target, num_nodes_per_graph)
@@ -420,11 +432,23 @@ class ForceLoss(BaseLossFunction):
         squared_error = residual.pow(2)
         valid_components = valid.to(dtype=pred.dtype)
         if not self.normalize_by_atom_count:
+            # Padded inputs still admit a per-graph view; dense ``(V, 3)``
+            # has no batch dim on the scalar path, leaving
+            # ``per_sample_loss`` cleared as a documented gap.
+            if pred.ndim == 3:
+                per_graph_num = squared_error.sum(dim=(-2, -1))
+                per_graph_den = valid_components.sum(dim=(-2, -1))
+                self.per_sample_loss = (
+                    per_graph_num / per_graph_den.clamp_min(1.0)
+                ).detach()
+                return per_graph_num.sum() / per_graph_den.sum().clamp_min(1.0)
             return squared_error.sum() / valid_components.sum().clamp_min(1.0)
         per_graph_num, per_graph_den = self._per_graph_force_terms(
             squared_error, valid_components, batch_idx, num_graphs
         )
-        return (per_graph_num / per_graph_den.clamp_min(1.0)).mean()
+        per_sample = per_graph_num / per_graph_den.clamp_min(1.0)
+        self.per_sample_loss = per_sample.detach()
+        return per_sample.mean()
 
     @overload
     def _valid_force_components(  # noqa: F811
@@ -652,6 +676,7 @@ class StressLoss(BaseLossFunction):
         Scalar
             Scalar stress loss.
         """
+        self.per_sample_loss = None
         assert_same_shape(
             pred,
             target,
@@ -660,17 +685,18 @@ class StressLoss(BaseLossFunction):
             target_key=self.target_key,
         )
         if self.ignore_nan:
-            # Per-component masking on ``(B, 3, 3)``: reduce squared
-            # residuals and valid-component counts over the two trailing
-            # dims, divide per-graph, then average over graphs. A graph
-            # with all-NaN stress has numerator 0 and denominator clamped
-            # to 1, contributing zero.
+            # Per-component masking over ``(B, 3, 3)``; all-NaN graph has
+            # numerator 0 and clamped denominator 1, contributing zero.
             valid = ~target.isnan()
             residual = torch.where(valid, pred - target, torch.zeros_like(pred))
             per_graph_num = residual.pow(2).sum(dim=(-2, -1))
             per_graph_den = valid.to(dtype=pred.dtype).sum(dim=(-2, -1)).clamp_min(1.0)
-            return (per_graph_num / per_graph_den).mean()
-        return frobenius_mse(pred, target).mean()
+            per_sample = per_graph_num / per_graph_den
+            self.per_sample_loss = per_sample.detach()
+            return per_sample.mean()
+        per_sample = frobenius_mse(pred, target)
+        self.per_sample_loss = per_sample.detach()
+        return per_sample.mean()
 
     def extra_repr(self) -> str:
         """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
