@@ -60,7 +60,7 @@ import torch
 from nvalchemi._typing import BatchIndices
 
 if TYPE_CHECKING:
-    from jaxtyping import Float
+    from jaxtyping import Float, Num
 
 _NumGraphs: TypeAlias = int | torch.Tensor
 
@@ -95,7 +95,7 @@ def _resolve_batch_indices(
 
 
 def _check_leading_dim(
-    values: torch.Tensor,
+    values: Float[torch.Tensor, "V ..."],  # noqa: F722
     batch_idx: BatchIndices,
     *,
     name: str,
@@ -109,7 +109,7 @@ def _check_leading_dim(
 
 
 def _prep_reduction(
-    values: torch.Tensor,
+    values: Float[torch.Tensor, "V ..."],  # noqa: F722
     batch_idx: BatchIndices,
     num_graphs: int | None,
     *,
@@ -121,14 +121,16 @@ def _prep_reduction(
 
 
 def _per_graph_sum_resolved(
-    values: torch.Tensor,
+    values: Float[torch.Tensor, "V ..."],  # noqa: F722
     batch_idx: BatchIndices,
     num_graphs: _NumGraphs,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "B ..."]:  # noqa: F722
     """Sum per-node values after ``batch_idx`` and ``num_graphs`` are resolved."""
     out_shape = (num_graphs, *values.shape[1:])
     out = torch.zeros(out_shape, dtype=values.dtype, device=values.device)
-    index = batch_idx.view(-1, *([1] * (values.ndim - 1))).expand_as(values)
+    idx_shape = [1] * (values.ndim - 1)
+    index = batch_idx.view(-1, *idx_shape).expand_as(values)
+    # TODO: refactor to use warp kernels when backwards ready
     out.scatter_add_(0, index, values)
     return out
 
@@ -139,7 +141,7 @@ def _num_nodes_per_graph(
     *,
     dtype: torch.dtype,
     device: torch.device,
-) -> torch.Tensor:
+) -> Num[torch.Tensor, "B"]:  # noqa: F722
     """Count nodes per graph via :func:`torch.bincount` (single kernel, no scratch)."""
     minlength = int(num_graphs) if isinstance(num_graphs, int) else num_graphs
     counts = torch.bincount(batch_idx, minlength=minlength)
