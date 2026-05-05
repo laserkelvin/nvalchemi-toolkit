@@ -106,11 +106,10 @@ finite-looking but meaningless scalar. Keep the explicit trailing
 `1` on per-graph tensors.
 ```
 
-Every leaf accepts `step=` and `epoch=` keyword arguments. Leaves
-ignore them; they are plumbed through by
-{py:class}`~nvalchemi.training.ComposedLossFunction` for
-schedule-driven weights (see
-[Composition weights and schedules](composition_weights)).
+Leaf losses do not receive schedule counters. `step=` and `epoch=`
+belong to {py:class}`~nvalchemi.training.ComposedLossFunction`, which
+uses them to resolve schedule-driven weights before calling each leaf
+(see [Composition weights and schedules](composition_weights)).
 
 (passing_graph_metadata)=
 
@@ -546,7 +545,7 @@ validation and `create_model_spec` round-tripping for checkpoints.
 
 Writing a custom loss is a matter of subclassing
 {py:class}`~nvalchemi.training.BaseLossFunction` and implementing
-`forward(pred, target, *, step=0, epoch=None, **kwargs) -> torch.Tensor`.
+`forward(pred, target, **kwargs) -> torch.Tensor`.
 `forward` is the sole override point — the base class is abstract and
 does no pre- or post-processing. Weight scheduling lives on
 `ComposedLossFunction`, so your `forward` returns the unweighted loss
@@ -554,9 +553,9 @@ value only.
 
 Four conventions worth knowing:
 
-1. **Accept `**kwargs`.** `ComposedLossFunction` forwards every kwarg
-   to every component. Swallowing the ones you don't use keeps your
-   loss composable with any other loss in the mix.
+1. **Accept `**kwargs`.** `ComposedLossFunction` forwards extra metadata
+   kwargs to every component. Swallowing the ones you don't use keeps
+   your loss composable with any other loss in the mix.
 2. **Define `target_key` and `prediction_key`.** These attributes tell
    `ComposedLossFunction` which slots in the prediction/target mappings
    to wire into your `forward`. Without them, your loss works
@@ -599,9 +598,6 @@ class HuberEnergyLoss(BaseLossFunction):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        *,
-        step: int = 0,           # noqa: ARG002 — unused; accepted for composition
-        epoch: int | None = None,  # noqa: ARG002
         **kwargs: Any,            # noqa: ARG002 — swallow composition kwargs
     ) -> torch.Tensor:
         assert_same_shape(
@@ -659,8 +655,6 @@ class MaskedEnergyLoss(BaseLossFunction):
         pred: torch.Tensor,
         target: torch.Tensor,
         *,
-        step: int = 0,           # noqa: ARG002
-        epoch: int | None = None,  # noqa: ARG002
         num_nodes_per_graph: torch.Tensor | None = None,
         **kwargs: Any,            # noqa: ARG002
     ) -> torch.Tensor:
