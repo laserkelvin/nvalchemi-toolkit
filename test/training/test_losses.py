@@ -55,9 +55,6 @@ class _ToyLoss(BaseLossFunction):
         self,
         pred: torch.Tensor,  # noqa: ARG002
         target: torch.Tensor,  # noqa: ARG002
-        *,
-        step: int = 0,  # noqa: ARG002
-        epoch: int | None = None,  # noqa: ARG002
         **kwargs: Any,  # noqa: ARG002
     ) -> torch.Tensor:
         return torch.tensor(self.value)
@@ -76,9 +73,6 @@ class _PositionsLoss(BaseLossFunction):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,  # noqa: ARG002
-        *,
-        step: int = 0,  # noqa: ARG002
-        epoch: int | None = None,  # noqa: ARG002
         **kwargs: Any,  # noqa: ARG002
     ) -> torch.Tensor:
         return self.scale * pred.sum()
@@ -291,13 +285,12 @@ class TestBaseLossFunction:
         loss = _ToyLoss(value=2.5)
         assert torch.allclose(loss(*_dummy_loss_tensors()), torch.tensor(2.5))
 
-    def test_baseloss_forward_accepts_and_ignores_step_and_epoch(self) -> None:
-        # ``step`` / ``epoch`` are part of the abstract signature only so
-        # :class:`ComposedLossFunction` can forward them uniformly; the
-        # base contract does not apply a schedule.
+    def test_baseloss_forward_accepts_extra_kwargs(self) -> None:
+        # Leaves accept arbitrary kwargs so composed losses can forward
+        # shared graph metadata without forcing every component to consume it.
         loss = _ToyLoss(value=4.0)
         assert torch.allclose(
-            loss(*_dummy_loss_tensors(), step=7, epoch=3), torch.tensor(4.0)
+            loss(*_dummy_loss_tensors(), unused_metadata=7), torch.tensor(4.0)
         )
 
     def test_baseloss_to_device_smoke(self) -> None:
@@ -608,6 +601,27 @@ class TestComposedLossFunction:
         out = composed(*_dummy_loss_mappings(), step=0, epoch=0)
         # 2.5 (schedule) * 4.0 (forward) = 10.0
         assert torch.allclose(out["total_loss"], torch.tensor(10.0), atol=1e-6)
+
+    def test_schedule_counters_are_not_forwarded_to_leaf(self) -> None:
+        class _StrictLoss(BaseLossFunction):
+            prediction_key = "prediction"
+            target_key = "target"
+
+            def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+                return pred + target
+
+        composed = ComposedLossFunction(
+            (_StrictLoss(),),
+            weights=[LinearWeight(start=0.0, end=1.0, num_steps=10)],
+            normalize_weights=False,
+        )
+        out = composed(
+            {"prediction": torch.tensor(2.0)},
+            {"target": torch.tensor(3.0)},
+            step=5,
+            epoch=7,
+        )
+        assert torch.allclose(out["total_loss"], torch.tensor(2.5), atol=1e-6)
 
     def test_linear_schedule_on_component_in_composition(self) -> None:
         leaf = _ToyLoss(value=1.0)
@@ -1606,12 +1620,9 @@ class TestPerSampleLoss:
                 self,
                 pred: torch.Tensor,
                 target: torch.Tensor,
-                *,
-                step: int = 0,
-                epoch: int | None = None,
                 **kwargs: Any,
             ) -> torch.Tensor:
-                out = super().forward(pred, target, step=step, epoch=epoch, **kwargs)
+                out = super().forward(pred, target, **kwargs)
                 self.per_sample_loss = self._value
                 return out
 

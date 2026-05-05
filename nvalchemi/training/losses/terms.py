@@ -241,8 +241,6 @@ class EnergyLoss(BaseLossFunction):
         pred: Energy,
         target: Energy,
         *,
-        step: int = 0,  # noqa: ARG002
-        epoch: int | None = None,  # noqa: ARG002
         batch: Batch | None = None,
         num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
         **kwargs: Any,  # noqa: ARG002
@@ -255,11 +253,6 @@ class EnergyLoss(BaseLossFunction):
             Predicted per-graph energies of shape ``(B, 1)``.
         target : Energy
             Target per-graph energies of shape ``(B, 1)``.
-        step : int, default 0
-            Ignored; accepted so :class:`ComposedLossFunction` can
-            forward training counters uniformly to every component.
-        epoch : int | None, default None
-            Ignored; accepted for the same reason as ``step``.
         batch : Batch | None, optional
             Source for missing graph metadata. Explicit metadata kwargs
             override batch-derived values when both are provided.
@@ -405,8 +398,6 @@ class ForceLoss(BaseLossFunction):
         pred: _ForceTensor,
         target: _ForceTensor,
         *,
-        step: int = 0,  # noqa: ARG002
-        epoch: int | None = None,  # noqa: ARG002
         batch: Batch | None = None,
         batch_idx: BatchIndices | None = None,
         num_graphs: int | None = None,
@@ -422,11 +413,6 @@ class ForceLoss(BaseLossFunction):
             is ``(B, V_max, 3)``.
         target : Forces | Float[torch.Tensor, "B V_max 3"]
             Target forces with the same shape as ``pred``.
-        step : int, default 0
-            Ignored; accepted so :class:`ComposedLossFunction` can
-            forward training counters uniformly to every component.
-        epoch : int | None, default None
-            Ignored; accepted for the same reason as ``step``.
         batch : Batch | None, optional
             Source for missing graph metadata. Explicit metadata kwargs
             override batch-derived values when both are provided.
@@ -687,9 +673,6 @@ class StressLoss(BaseLossFunction):
         self,
         pred: Stress,
         target: Stress,
-        *,
-        step: int = 0,  # noqa: ARG002
-        epoch: int | None = None,  # noqa: ARG002
         **kwargs: Any,  # noqa: ARG002
     ) -> Scalar:
         """Return the mean per-graph Frobenius MSE of the stress tensor.
@@ -700,11 +683,6 @@ class StressLoss(BaseLossFunction):
             Predicted per-graph stress tensors of shape ``(B, 3, 3)``.
         target : Stress
             Target per-graph stress tensors of shape ``(B, 3, 3)``.
-        step : int, default 0
-            Ignored; accepted so :class:`ComposedLossFunction` can
-            forward training counters uniformly to every component.
-        epoch : int | None, default None
-            Ignored; accepted for the same reason as ``step``.
         **kwargs : Any
             Ignored keyword arguments accepted for the common loss-call
             interface.

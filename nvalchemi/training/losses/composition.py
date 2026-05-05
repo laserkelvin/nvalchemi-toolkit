@@ -164,16 +164,12 @@ class BaseLossFunction(nn.Module, abc.ABC):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        *,
-        step: int = 0,
-        epoch: int | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Return the unweighted loss tensor.
 
-        ``step`` and ``epoch`` are part of the signature so
-        :class:`ComposedLossFunction` can forward them uniformly to every
-        component; most leaves ignore them.
+        Extra keyword arguments carry optional graph metadata or
+        loss-specific configuration supplied by :class:`ComposedLossFunction`.
         """
 
     # Arithmetic dunders — return ComposedLossFunction.
@@ -494,7 +490,8 @@ class ComposedLossFunction(nn.Module):
         """Return the weighted total loss and per-component diagnostics.
 
         Each component is called with the routed ``pred`` / ``target``
-        tensors and the effective weight for this step. The output's
+        tensors, then its raw loss is scaled by the effective weight for
+        this step. The output's
         ``per_component_total`` contains ``effective_weight * raw_loss``
         per component; ``per_component_weight`` holds the scalar weights
         that were applied (after normalization, if enabled);
@@ -557,7 +554,7 @@ class ComposedLossFunction(nn.Module):
                 )
             # Guard against stale diagnostics from custom leaves that forget to clear.
             comp.per_sample_loss = None
-            raw = comp(pred, target, step=step, epoch=epoch, **kwargs)
+            raw = comp(pred, target, **kwargs)
             if not isinstance(raw, torch.Tensor):
                 raise TypeError(
                     f"{type(comp).__name__} returned "
