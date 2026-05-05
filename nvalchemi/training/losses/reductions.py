@@ -193,7 +193,8 @@ def per_graph_mean(
         device=totals.device,
     ).clamp_min(1.0)
     # Broadcast counts across trailing dims of totals.
-    counts = counts.view(-1, *([1] * (totals.ndim - 1)))
+    count_shape = [1] * (totals.ndim - 1)
+    counts = counts.view(-1, *count_shape)
     return totals / counts
 
 
@@ -215,10 +216,12 @@ def per_graph_mse(
     Float[torch.Tensor, "B"]
         Per-graph MSE values.
     """
-    if pred.shape != target.shape:
-        raise ValueError(
-            f"pred shape {tuple(pred.shape)} must equal target shape "
-            f"{tuple(target.shape)}"
+    try:
+        torch.broadcast_shapes(pred.shape, target.shape)
+    except RuntimeError:
+        raise RuntimeError(
+            "Prediction and target shapes are not broadcast-compatible."
+            f"Got pred: {pred.shape}, target: {target.shape}"
         )
     batch_idx, resolved = _prep_reduction(pred, batch_idx, num_graphs, name="pred")
     squared_error = (pred - target).pow(2)
