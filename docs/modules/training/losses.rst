@@ -66,7 +66,9 @@ Pydantic ``frozen`` models satisfying :class:`~nvalchemi.training.LossWeightSche
 Reduction helpers
 -----------------
 
-Scatter-based per-graph reductions, importable for use in custom losses.
+Per-graph reduction helpers — scatter reductions (``V ... → B ...``)
+and matrix reductions (``B ... m n → B ...``) — importable for use in
+custom losses.
 
 .. currentmodule:: nvalchemi.training.losses.reductions
 
@@ -76,5 +78,4 @@ Scatter-based per-graph reductions, importable for use in custom losses.
 
    per_graph_sum
    per_graph_mean
-   per_graph_mse
    frobenius_mse

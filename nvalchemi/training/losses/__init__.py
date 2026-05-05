@@ -38,7 +38,6 @@ from nvalchemi.training.losses.composition import (
 from nvalchemi.training.losses.reductions import (
     frobenius_mse,
     per_graph_mean,
-    per_graph_mse,
     per_graph_sum,
 )
 from nvalchemi.training.losses.schedules import (
@@ -68,6 +67,5 @@ __all__ = [
     "assert_same_shape",
     "frobenius_mse",
     "per_graph_mean",
-    "per_graph_mse",
     "per_graph_sum",
 ]

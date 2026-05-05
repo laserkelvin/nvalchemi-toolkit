@@ -38,7 +38,6 @@ from nvalchemi.training.losses import (
     assert_same_shape,
     frobenius_mse,
     per_graph_mean,
-    per_graph_mse,
     per_graph_sum,
 )
 
@@ -180,58 +179,6 @@ class TestReductions:
         got = per_graph_mean(vals, self.batch_idx)
         assert torch.allclose(got, torch.tensor([1.5, 4.0, 6.0]))
 
-    def test_per_graph_mse_matches_manual(self) -> None:
-        pred = torch.tensor([1.0, 3.0, 5.0, 7.0, 9.0, 11.0])
-        target = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-        # squared diffs per node: [0, 1, 4, 9, 16, 25]
-        # per-graph sums: [1, 29, 25]; per-graph counts: [2, 3, 1]
-        got = per_graph_mse(pred, target, self.batch_idx)
-        expected = torch.tensor([0.5, 29.0 / 3.0, 25.0])
-        assert torch.allclose(got, expected)
-
-    def test_per_graph_mse_3d_matches_reference(self, fixed_torch_seed: None) -> None:
-        pred = torch.randn(6, 3)
-        target = torch.randn(6, 3)
-        got = per_graph_mse(pred, target, self.batch_idx)
-        ref = torch.stack(
-            [
-                ((pred[:2] - target[:2]) ** 2).mean(),
-                ((pred[2:5] - target[2:5]) ** 2).mean(),
-                ((pred[5:6] - target[5:6]) ** 2).mean(),
-            ]
-        )
-        assert torch.allclose(got, ref, atol=1e-6)
-
-    def test_per_graph_mse_preserves_grad(self) -> None:
-        pred = torch.randn(6, 3, requires_grad=True)
-        target = torch.randn(6, 3)
-        got = per_graph_mse(pred, target, self.batch_idx)
-        assert got.grad_fn is not None
-        got.sum().backward()
-        assert pred.grad is not None
-        assert pred.grad.shape == pred.shape
-
-    def test_per_graph_mse_shape_mismatch(self) -> None:
-        with pytest.raises(ValueError, match="must equal target shape"):
-            per_graph_mse(
-                torch.zeros(6, 3),
-                torch.zeros(6, 2),
-                self.batch_idx,
-            )
-
-    def test_per_graph_mse_num_graphs_too_small(self) -> None:
-        # When ``num_graphs`` is supplied, reductions trust it without
-        # scanning ``batch_idx`` (to avoid GPU syncs in the training hot
-        # path). An overflowing index is caught downstream by
-        # ``scatter_add_`` itself, which raises ``RuntimeError``.
-        with pytest.raises(RuntimeError, match="out of bounds"):
-            per_graph_mse(
-                torch.zeros(6),
-                torch.zeros(6),
-                self.batch_idx,
-                num_graphs=2,
-            )
-
     def test_frobenius_mse_matches_manual(self) -> None:
         pred = torch.tensor(
             [
@@ -290,18 +237,6 @@ class TestReductionsCompile:
                     3,
                 ),
                 id="per_graph_mean",
-            ),
-            pytest.param(
-                per_graph_mse,
-                lambda device, batch_idx: (
-                    torch.arange(18, dtype=torch.float32, device=device).reshape(6, 3),
-                    torch.arange(18, dtype=torch.float32, device=device)
-                    .reshape(6, 3)
-                    .flip(0),
-                    batch_idx,
-                    3,
-                ),
-                id="per_graph_mse",
             ),
             pytest.param(
                 frobenius_mse,

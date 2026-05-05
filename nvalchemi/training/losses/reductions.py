@@ -12,47 +12,59 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Graph-aware scatter-based reduction primitives for loss functions.
+"""Graph-aware reduction primitives for loss functions.
 
-All helpers operate on flat per-node tensors with a ``batch_idx`` mapping
-each node to its graph and reduce via :func:`torch.Tensor.scatter_add_`
-into a pre-allocated output tensor: no Python-level iteration over
-graphs, and autograd flows through the scatter. Per-graph denominators
-are counted with :func:`torch.bincount` (single kernel, no auxiliary
-allocation).
+Scatter reductions (``V ... → B ...``)
+--------------------------------------
 
-Common parameters
------------------
+:func:`per_graph_sum` and :func:`per_graph_mean` take a flat per-node
+tensor with a ``batch_idx`` mapping each node to its graph and reduce
+the leading node dim into a per-graph output, preserving trailing dims
+verbatim.
 
-All public reductions share the following signature:
+Matrix reductions (``B ... m n → B ...``)
+-----------------------------------------
 
-- ``values`` (or ``pred`` / ``target``): per-node tensor whose leading
-  dim indexes nodes; trailing dims are reduced or preserved depending on
-  the specific helper.
+:func:`frobenius_mse` is *not* a scatter reduction: it operates on an
+already-per-graph tensor and averages the squared residual over the
+trailing two matrix dims. It takes neither ``batch_idx`` nor
+``num_graphs``.
+
+Common parameters for scatter reductions
+----------------------------------------
+
+- ``values``: per-node tensor whose leading dim indexes nodes; trailing
+  dims are preserved.
 - ``batch_idx``: 1-D ``BatchIndices`` mapping each node to its graph.
-  For the GPU hot path, callers should ensure ``batch_idx`` is already a
-  CUDA ``long`` tensor; the defensive ``.to(device=..., dtype=long)``
-  cast below is a no-op for well-formed inputs.
-- ``num_graphs`` (optional): when supplied, the helpers trust it and
-  perform no validation scan of ``batch_idx``. This is the
-  recommended hot-path calling convention because it avoids any
-  GPU→CPU synchronization. When omitted, ``num_graphs`` is inferred
-  as ``batch_idx.max().item() + 1``, which forces a device sync and
-  should be avoided inside per-step training loops. Empty
-  ``batch_idx`` always requires ``num_graphs`` to be supplied.
+- ``num_graphs`` (optional): when supplied, trusted without scanning
+  ``batch_idx`` — the recommended hot-path convention (avoids a GPU→CPU
+  sync). When omitted, inferred as ``batch_idx.max().item() + 1``.
+  Empty ``batch_idx`` always requires ``num_graphs``.
 
-All public reductions raise :class:`ValueError` on shape mismatch, on
+Scatter reductions raise :class:`ValueError` on shape mismatch, on
 non-positive ``num_graphs``, or on inability to infer ``num_graphs``.
 
-Note
-----
-Currently the methods use ``torch.scatter_*``; the goal is to use
-``nvalchemiops`` segment operations once they support backwards.
+Migrating from ``per_graph_mse``
+--------------------------------
+
+The former ``per_graph_mse`` helper has been removed. The direct
+replacement composes :func:`per_graph_mean` with a pointwise squared
+error::
+
+    per_graph_mean((pred - target).pow(2), batch_idx, num_graphs)
+
+Hot-path callers that want a scalar-per-graph MSE should reduce
+trailing dims before scattering::
+
+    per_graph_mean(
+        (pred - target).pow(2).mean(dim=tuple(range(1, pred.ndim))),
+        batch_idx,
+        num_graphs,
+    )
 """
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, TypeAlias
 
 import torch
@@ -155,9 +167,8 @@ def per_graph_sum(
 ) -> Float[torch.Tensor, "B ..."]:  # noqa: F722
     """Sum per-node values into per-graph values via ``scatter_add_``.
 
-    Trailing dims of ``values`` are preserved in the output. See the
-    module docstring for ``batch_idx`` / ``num_graphs`` semantics and
-    error conditions.
+    See the module docstring for ``batch_idx`` / ``num_graphs``
+    semantics and error conditions.
 
     Returns
     -------
@@ -198,67 +209,20 @@ def per_graph_mean(
     return totals / counts
 
 
-def per_graph_mse(
-    pred: Float[torch.Tensor, "V ..."],  # noqa: F722
-    target: Float[torch.Tensor, "V ..."],  # noqa: F722
-    batch_idx: BatchIndices,
-    num_graphs: int | None = None,
-) -> Float[torch.Tensor, "B"]:  # noqa: F722
-    """Per-graph MSE of ``pred`` vs ``target``.
-
-    Computes ``sum squared error per graph / element count per graph``,
-    where the denominator is ``nodes_in_graph * prod(trailing_dims)``.
-    See the module docstring for shared parameter / error semantics;
-    additionally raises :class:`ValueError` if ``pred.shape != target.shape``.
-
-    Returns
-    -------
-    Float[torch.Tensor, "B"]
-        Per-graph MSE values.
-    """
-    try:
-        torch.broadcast_shapes(pred.shape, target.shape)
-    except RuntimeError:
-        raise RuntimeError(
-            "Prediction and target shapes are not broadcast-compatible."
-            f"Got pred: {pred.shape}, target: {target.shape}"
-        )
-    batch_idx, resolved = _prep_reduction(pred, batch_idx, num_graphs, name="pred")
-    squared_error = (pred - target).pow(2)
-    # Collapse trailing dims to one scalar per node, then scatter.
-    squared_error_per_node = (
-        squared_error.flatten(1).sum(dim=1) if squared_error.ndim > 1 else squared_error
-    )
-    squared_error_per_graph = _per_graph_sum_resolved(
-        squared_error_per_node, batch_idx, resolved
-    )
-    trailing = math.prod(pred.shape[1:]) if pred.ndim > 1 else 1
-    num_entries_per_graph = (
-        _num_nodes_per_graph(
-            batch_idx,
-            resolved,
-            dtype=squared_error_per_graph.dtype,
-            device=squared_error_per_graph.device,
-        )
-        .mul(trailing)
-        .clamp_min_(1.0)
-    )
-    return squared_error_per_graph / num_entries_per_graph
-
-
 def frobenius_mse(
     pred: Float[torch.Tensor, "B 3 3"],  # noqa: F722
     target: Float[torch.Tensor, "B 3 3"],  # noqa: F722
 ) -> Float[torch.Tensor, "B"]:  # noqa: F722
-    """Per-graph squared-Frobenius MSE over the last two dims.
+    """Per-graph Frobenius MSE over the trailing two matrix dims.
 
     Returns ``((pred - target) ** 2).mean(dim=(-2, -1))`` — the squared
     Frobenius norm of the residual matrix, averaged over its entries.
+    Canonical use is on stress tensors of shape ``(B, 3, 3)``.
 
     Parameters
     ----------
     pred, target
-        Same-shape matrix-valued tensors (e.g. stress of shape ``(B, 3, 3)``).
+        Same-shape per-graph matrix tensors.
 
     Returns
     -------
@@ -268,7 +232,8 @@ def frobenius_mse(
     Raises
     ------
     ValueError
-        If shapes differ or input has fewer than three dims.
+        If shapes differ or input is not at least a batched matrix
+        tensor (``ndim >= 3``).
     """
     if pred.shape != target.shape:
         raise ValueError(
