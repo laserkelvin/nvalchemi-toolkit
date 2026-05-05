@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Graph-aware reduction primitives for loss functions.
+r"""Graph-aware reduction primitives for loss functions.
 
 Scatter reductions (``V ... → B ...``)
 --------------------------------------
@@ -21,6 +21,11 @@ Scatter reductions (``V ... → B ...``)
 tensor with a ``batch_idx`` mapping each node to its graph and reduce
 the leading node dim into a per-graph output, preserving trailing dims
 verbatim.
+
+These helpers only produce per-graph tensors. They do not choose the
+final scalar weighting across graphs. For per-graph values :math:`x_i`,
+a graph-balanced scalar is :math:`B^{-1} \sum_i x_i`, while an
+atom-weighted scalar is :math:`(\sum_i N_i x_i) / (\sum_i N_i)`.
 
 Matrix reductions (``B ... m n → B ...``)
 -----------------------------------------
@@ -184,7 +189,14 @@ def per_graph_mean(
     batch_idx: BatchIndices,
     num_graphs: int | None = None,
 ) -> Float[torch.Tensor, "B ..."]:  # noqa: F722
-    """Mean of per-node values across each graph.
+    r"""Mean of per-node values across each graph.
+
+    This divides each graph's sum by that graph's node count and returns
+    one value per graph. It does not choose how those graph values are
+    weighted in a later scalar reduction. For per-graph values
+    :math:`x_i`, the graph-balanced scalar is :math:`B^{-1} \sum_i x_i`;
+    the atom-weighted scalar is
+    :math:`(\sum_i N_i x_i) / (\sum_i N_i)`.
 
     Empty graphs (zero nodes) are safe: their sum is zero and their
     count is clamped to ``1`` before the division, so they yield zero.

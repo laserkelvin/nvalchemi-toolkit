@@ -91,8 +91,8 @@ def _node_counts(
     ----------
     num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None
         Either one integer count per graph or a padded node-validity mask.
-        ``None`` raises because per-atom energy normalization requires
-        graph sizes.
+        ``None`` raises because per-atom energy residuals require graph
+        sizes.
     ref : Energy
         Energy tensor of shape ``(B, 1)`` whose device and dtype are used
         for the returned counts.
@@ -165,14 +165,27 @@ def _padded_node_mask(
 
 
 class EnergyLoss(BaseLossFunction):
-    """Mean-squared-error loss on per-graph total energy.
+    r"""Mean-squared-error loss on per-graph total energy.
 
-    Energy is already a per-graph quantity of shape ``(B, 1)``, so no
-    scatter reduction is needed: :meth:`forward` returns a plain MSE
-    over the inputs. When ``per_atom=True``, both prediction and target
-    are divided by the per-graph node count before the MSE, so large
-    graphs don't dominate the loss. Counts may be supplied directly as
-    ``(B,)`` or recovered from a padded node mask of shape ``(B, V_max)``.
+    Energies enter this loss as one total-energy value per graph, with
+    canonical shape ``(B, 1)``. With ``per_atom=False`` the scalar is the
+    graph-balanced MSE of total-energy residuals, so every graph has equal
+    weight regardless of size.
+
+    With ``per_atom=True``, prediction and target are first divided by
+    each graph's atom count. The squared residual is therefore measured in
+    energy-per-atom units, then reduced with atom-count weights:
+
+    .. math::
+
+        L = \frac{\sum_i N_i
+        \left(\frac{E_i^\mathrm{pred} - E_i^\mathrm{target}}{N_i}\right)^2}
+        {\sum_i N_i}.
+
+    This makes contributions proportional to graph size while
+    keeping the error quantity in per-atom energy units. Counts may be
+    supplied directly as ``(B,)`` or recovered from a padded node mask of
+    shape ``(B, V_max)``.
 
     Tensor Contract
     ---------------
@@ -195,14 +208,17 @@ class EnergyLoss(BaseLossFunction):
     prediction_key : str, default "predicted_energy"
         Prediction container key for the model output.
     per_atom : bool, default False
-        Divide both energies by ``num_nodes_per_graph`` before MSE.
+        Measure residuals in energy-per-atom units and reduce them with
+        atom-count weights: larger graphs contribute in proportion to
+        their atom counts.
     ignore_nan : bool, default False
         When ``True``, target entries equal to ``NaN`` are excluded from
         both loss value and gradient (a "nanmean"-style reduction).
         Intended for inputs where some samples lack an energy label.
         Implemented with branch-free tensor ops for ``torch.compile``
-        compatibility. When every target entry is ``NaN`` the loss is
-        ``0.0``.
+        compatibility. When ``per_atom=True``, atom-count weights for
+        invalid targets are also excluded from the denominator. When
+        every target entry is ``NaN`` the loss is ``0.0``.
     """
 
     def __init__(
@@ -213,7 +229,7 @@ class EnergyLoss(BaseLossFunction):
         per_atom: bool = False,
         ignore_nan: bool = False,
     ) -> None:
-        """Configure attribute keys and per-atom normalization."""
+        """Configure attribute keys and energy reduction semantics."""
         super().__init__()
         self.target_key = target_key
         self.prediction_key = prediction_key
@@ -231,7 +247,7 @@ class EnergyLoss(BaseLossFunction):
         num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
         **kwargs: Any,  # noqa: ARG002
     ) -> Scalar:
-        """Return the optionally per-atom-normalized energy MSE.
+        """Return the energy MSE using the configured reduction semantics.
 
         Parameters
         ----------
@@ -269,20 +285,33 @@ class EnergyLoss(BaseLossFunction):
         )
         if batch is not None and self.per_atom and num_nodes_per_graph is None:
             num_nodes_per_graph = getattr(batch, "num_nodes_per_graph", None)
+        weights = None
         if self.per_atom:
             counts = _node_counts(num_nodes_per_graph, pred).unsqueeze(-1)
             pred = pred / counts
             target = target / counts
+            weights = counts
         if self.ignore_nan:
             valid = ~target.isnan()
             residual = torch.where(valid, pred - target, torch.zeros_like(pred))
             residual_sq = residual.pow(2)
-            scalar = residual_sq.sum() / valid.to(dtype=pred.dtype).sum().clamp_min(1.0)
+            valid_weights = valid.to(dtype=pred.dtype)
+            if weights is not None:
+                valid_weights = valid_weights * weights.expand_as(residual_sq)
+            scalar = residual_sq.mul(
+                valid_weights
+            ).sum() / valid_weights.sum().clamp_min(1.0)
         else:
             residual_sq = (pred - target).pow(2)
-            scalar = residual_sq.mean()
+            if weights is None:
+                scalar = residual_sq.mean()
+            else:
+                sample_weights = weights.expand_as(residual_sq)
+                scalar = residual_sq.mul(sample_weights).sum() / sample_weights.sum()
         # Only populate when the residual has a recognizable per-graph
         # shape; broadcast-trap shapes leave ``per_sample_loss`` cleared.
+        # For ``per_atom=True`` this remains the per-graph squared
+        # per-atom residual; the scalar applies the atom-count weights.
         if residual_sq.ndim == 1:
             self.per_sample_loss = residual_sq.detach()
         elif residual_sq.ndim == 2 and residual_sq.shape[-1] == 1:
@@ -302,8 +331,10 @@ class EnergyLoss(BaseLossFunction):
 class ForceLoss(BaseLossFunction):
     """Mean-squared-error loss on per-atom forces.
 
-    Both branches return the mean-squared force *component* and differ
-    only in whether each graph is weighted equally or each atom is:
+    Forces enter this loss as per-atom vector quantities, unlike energy
+    totals. The ``normalize_by_atom_count`` flag therefore does not
+    convert total quantities into per-atom units; it controls how
+    per-atom force residuals are reduced across a mixed-size batch.
 
     Dense force tensors use shape ``(V, 3)``. Padded force tensors use
     shape ``(B, V_max, 3)`` and ignore padding entries according to
@@ -311,9 +342,12 @@ class ForceLoss(BaseLossFunction):
     a ``(B, V_max)`` node mask.
 
     - ``normalize_by_atom_count=True`` (default): per-graph mean of
-      squared-component error, then mean over graphs. Small and large
-      graphs contribute equally.
+      squared-component error, then mean over graphs. This is a
+      graph-balanced reduction: small and large graph contributions
+      are somewhat normalized.
     - ``normalize_by_atom_count=False``: elementwise mean over all valid
+      force components. This is an atom/component-weighted reduction:
+      graph contributions are proportional to their number of valid
       force components.
 
     Tensor Contract
@@ -337,7 +371,11 @@ class ForceLoss(BaseLossFunction):
     prediction_key : str, default "predicted_forces"
         Prediction container key for the model output.
     normalize_by_atom_count : bool, default True
-        Divide per-graph force MSE by number of atoms before mean.
+        Control the batch reduction for already-per-atom force
+        residuals. ``True`` computes a graph-balanced mean by dividing
+        each graph's force-error sum by its valid component count before
+        averaging over graphs. ``False`` computes one global elementwise
+        mean over all valid force components.
     ignore_nan : bool, default False
         When ``True``, target force components equal to ``NaN`` are
         excluded from both loss value and gradient. Intended for batches

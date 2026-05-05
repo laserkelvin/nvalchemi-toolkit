@@ -914,15 +914,15 @@ class TestConcreteLosses:
         assert pred.grad is not None
         assert torch.allclose(pred.grad, expected_grad, atol=1e-6)
 
-    def test_energy_loss_per_atom_divides_both(self) -> None:
+    def test_energy_loss_per_atom_weights_by_atom_count(self) -> None:
         target = torch.tensor([[3.0], [10.0], [4.0]])  # per-graph energies
         pred = torch.tensor([[6.0], [15.0], [8.0]])
         got = EnergyLoss(per_atom=True)(
             pred, target, num_nodes_per_graph=self.num_nodes_per_graph
         )
         # Per-atom pred: [2, 3, 4]; target: [1, 2, 2]; diffs: [1, 1, 2].
-        # Mean of squared diffs over B=3: (1 + 1 + 4) / 3 = 2.0.
-        assert torch.allclose(got, torch.tensor(2.0), atol=1e-6)
+        # Atom-count weighted MSE: (3*1 + 5*1 + 2*4) / (3 + 5 + 2) = 1.6.
+        assert torch.allclose(got, torch.tensor(1.6), atol=1e-6)
 
     def test_energy_loss_per_atom_accepts_padded_node_mask(self) -> None:
         target = torch.tensor([[3.0], [10.0], [4.0]])  # per-graph energies
@@ -936,7 +936,7 @@ class TestConcreteLosses:
         )
         got = EnergyLoss(per_atom=True)(pred, target, num_nodes_per_graph=node_mask)
         # The padded mask has row counts [3, 5, 2], matching the dense-count test.
-        assert torch.allclose(got, torch.tensor(2.0), atol=1e-6)
+        assert torch.allclose(got, torch.tensor(1.6), atol=1e-6)
 
     def test_energy_loss_per_atom_accepts_cpu_counts_on_cuda(
         self, gpu_device: str
@@ -948,7 +948,7 @@ class TestConcreteLosses:
         )
 
         assert got.device.type == "cuda"
-        assert torch.allclose(got, torch.tensor(2.0, device=gpu_device), atol=1e-6)
+        assert torch.allclose(got, torch.tensor(1.6, device=gpu_device), atol=1e-6)
 
     def test_force_loss_matches_hand_computed(self) -> None:
         # 2 graphs with 3 and 2 atoms for a small hand-traceable case.
@@ -1355,7 +1355,7 @@ class TestPerSampleLoss:
                 lambda pred, target, counts: (
                     ((pred - target) / counts.to(pred).unsqueeze(-1)).pow(2).squeeze(-1)
                 ),
-                id="per_atom_normalizes_before_squaring",
+                id="per_atom_residuals",
             ),
         ],
     )
@@ -1374,8 +1374,14 @@ class TestPerSampleLoss:
         scalar = loss(pred, target, **extra)
         ps = self._assert_per_sample(loss, (b,))
         torch.testing.assert_close(ps, expected_fn(pred, target, counts))
-        # Canonical ``(B, 1)`` path: mean over graphs matches scalar.
-        torch.testing.assert_close(ps.mean(), scalar)
+        if counts is None:
+            # Default energy MSE is graph-balanced.
+            torch.testing.assert_close(ps.mean(), scalar)
+        else:
+            # ``per_atom=True`` stores per-graph squared per-atom residuals
+            # for diagnostics, while the scalar is atom-count weighted.
+            weights = counts.to(ps)
+            torch.testing.assert_close(ps.mul(weights).sum() / weights.sum(), scalar)
 
     def test_energy_loss_per_sample_ignore_nan_populates(self) -> None:
         """``ignore_nan`` populates ``(B,)`` with zero on all-NaN rows.
@@ -1677,7 +1683,7 @@ class TestIgnoreNaN:
         assert pred.grad is not None
         assert torch.all(pred.grad == 0.0)
 
-    def test_energy_loss_ignore_nan_per_atom_applies_normalization_first(self) -> None:
+    def test_energy_loss_ignore_nan_per_atom_weights_valid_counts(self) -> None:
         # Per-atom normalization must be applied before masking so the
         # valid-entry MSE is computed on per-atom values, not raw energies.
         target = torch.tensor([[3.0], [float("nan")], [4.0]])  # per-atom: 1, -, 2
@@ -1685,8 +1691,9 @@ class TestIgnoreNaN:
         got = EnergyLoss(per_atom=True, ignore_nan=True)(
             pred, target, num_nodes_per_graph=self.num_nodes_per_graph
         )
-        # Valid per-atom diffs: (2-1)=1 and (4-2)=2; MSE over 2 entries.
-        expected = torch.tensor((1.0 + 4.0) / 2.0)
+        # Valid per-atom diffs: (2-1)=1 and (4-2)=2. Only valid graph
+        # counts enter the denominator: (3*1 + 2*4) / (3 + 2).
+        expected = torch.tensor(11.0 / 5.0)
         assert torch.allclose(got, expected, atol=1e-6)
 
     def test_energy_loss_ignore_nan_off_matches_baseline(self) -> None:
