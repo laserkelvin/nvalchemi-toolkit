@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -24,9 +24,10 @@ import torch
 if TYPE_CHECKING:
     from nvalchemi.data.batch import Batch
     from nvalchemi.models.base import BaseModelMixin
+    from nvalchemi.training.losses.composition import ComposedLossOutput
 
 
-@dataclass
+@dataclass(init=False)
 class HookContext:
     """Context object passed to hooks at each stage.
 
@@ -37,9 +38,25 @@ class HookContext:
     step_count : int
         Current step number in the workflow.
     model : BaseModelMixin | None
-        Model being used (if applicable).
+        Backwards-compatible alias for ``models["main"]`` when present,
+        otherwise the first model in insertion order.
+    models : dict[str, BaseModelMixin]
+        Named models visible to hooks. Training strategies populate this for
+        multi-model workflows; single-model and dynamics code can continue to
+        use ``model``.
     loss : torch.Tensor | None
-        Current loss value (training only).
+        Total scalar loss value produced by the training step. When
+        ``losses`` is populated, this equals ``losses["total_loss"]``; see
+        ``losses`` for the per-component breakdown.
+    losses : ComposedLossOutput | None
+        Per-component loss contributions produced by a ComposedLossFunction.
+        Populated by training strategies from AFTER_LOSS onward so hooks can
+        log or monitor individual loss terms without re-running the loss
+        forward pass. Tensors are autograd-connected through BEFORE_BACKWARD,
+        then detached from AFTER_BACKWARD onward. ``None`` for non-training
+        contexts (e.g. dynamics). Hooks must not retain live tensors across
+        steps, and calling ``.item()`` on CUDA tensors forces a host-device
+        sync.
     optimizer : torch.optim.Optimizer | None
         Optimizer being used (training only).
     lr_scheduler : object | None
@@ -60,8 +77,10 @@ class HookContext:
 
     batch: Batch
     step_count: int
-    model: BaseModelMixin | None = None
+    model: BaseModelMixin | None
+    models: dict[str, BaseModelMixin] = field(default_factory=dict)
     loss: torch.Tensor | None = None
+    losses: ComposedLossOutput | None = None
     optimizer: torch.optim.Optimizer | None = None
     lr_scheduler: object | None = None
     gradients: dict[str, torch.Tensor] | None = None
@@ -69,3 +88,50 @@ class HookContext:
     epoch: int | None = None
     global_rank: int = 0
     workflow: Any = None
+
+    def __init__(
+        self,
+        batch: Batch,
+        step_count: int,
+        model: BaseModelMixin | None = None,
+        models: dict[str, BaseModelMixin] | None = None,
+        loss: torch.Tensor | None = None,
+        losses: ComposedLossOutput | None = None,
+        optimizer: torch.optim.Optimizer | None = None,
+        lr_scheduler: object | None = None,
+        gradients: dict[str, torch.Tensor] | None = None,
+        converged_mask: torch.Tensor | None = None,
+        epoch: int | None = None,
+        global_rank: int = 0,
+        workflow: Any = None,
+    ) -> None:
+        """Initialize context state while preserving legacy ``model=`` input."""
+        self.batch = batch
+        self.step_count = step_count
+        self.models = models if models is not None else {}
+        if model is not None:
+            self.model = model
+        self.loss = loss
+        self.losses = losses
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self.gradients = gradients
+        self.converged_mask = converged_mask
+        self.epoch = epoch
+        self.global_rank = global_rank
+        self.workflow = workflow
+
+    def _get_model(self) -> BaseModelMixin | None:
+        """Return the primary model from the named model dictionary."""
+        if "main" in self.models:
+            return self.models["main"]
+        return next(iter(self.models.values()), None)
+
+    def _set_model(self, value: BaseModelMixin) -> None:
+        """Assign the backwards-compatible primary model alias."""
+        self.models["main"] = value
+
+    # ``model`` is also a dataclass field above so existing runtime
+    # introspection sees ``__dataclass_fields__["model"]`` while this property
+    # keeps the alias live with ``models["main"]``.
+    model = property(_get_model, _set_model)

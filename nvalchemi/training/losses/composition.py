@@ -34,6 +34,7 @@ from typing import Any, TypedDict, cast
 import torch
 from torch import nn
 
+from nvalchemi.training._spec import BaseSpec, create_model_spec
 from nvalchemi.training.losses.base import LossWeightSchedule
 
 
@@ -63,6 +64,61 @@ class ComposedLossOutput(TypedDict):
     per_component_weight: dict[str, float]
     per_component_raw_weight: dict[str, float]
     per_component_sample: dict[str, torch.Tensor]
+
+
+def loss_component_to_spec(component: BaseLossFunction) -> BaseSpec:
+    """Serialize a leaf loss component to a :class:`BaseSpec`.
+
+    Parameters
+    ----------
+    component : BaseLossFunction
+        Loss component to serialize. Constructor attributes are recovered by
+        signature introspection, and nested weight schedules are serialized as
+        nested specs when present.
+
+    Returns
+    -------
+    BaseSpec
+        JSON-ready spec that rebuilds ``component``.
+
+    Raises
+    ------
+    TypeError
+        If ``component`` is a composed loss or is not a leaf
+        :class:`BaseLossFunction`.
+    """
+    if isinstance(component, ComposedLossFunction):
+        raise TypeError(
+            "loss_component_to_spec accepts only leaf BaseLossFunction objects; "
+            "use ComposedLossFunction spec serialization for composed losses."
+        )
+    if not isinstance(component, BaseLossFunction):
+        raise TypeError(
+            "loss_component_to_spec accepts only leaf BaseLossFunction objects; "
+            f"got {type(component).__name__}."
+        )
+    kwargs = _extract_module_init_kwargs(component)
+    weight = kwargs.get("weight")
+    if weight is not None and hasattr(weight, "model_dump"):
+        kwargs["weight"] = create_model_spec(type(weight), **weight.model_dump())
+    return create_model_spec(type(component), **kwargs)
+
+
+def _extract_module_init_kwargs(module: nn.Module) -> dict[str, Any]:
+    """Extract constructor kwargs from ``module`` by signature introspection."""
+    import inspect
+
+    sig = inspect.signature(type(module).__init__)
+    kwargs: dict[str, Any] = {}
+    for name, param in sig.parameters.items():
+        if name == "self" or param.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
+        if hasattr(module, name):
+            kwargs[name] = getattr(module, name)
+    return kwargs
 
 
 def assert_same_shape(
