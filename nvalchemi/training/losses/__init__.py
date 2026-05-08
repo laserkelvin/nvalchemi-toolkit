@@ -48,6 +48,8 @@ from nvalchemi.training.losses.schedules import (
 )
 from nvalchemi.training.losses.terms import (
     EnergyLoss,
+    EnergyMAELoss,
+    ForceL2NormLoss,
     ForceLoss,
     StressLoss,
 )
@@ -58,7 +60,9 @@ __all__ = [
     "ComposedLossOutput",
     "ConstantWeight",
     "CosineWeight",
+    "EnergyMAELoss",
     "EnergyLoss",
+    "ForceL2NormLoss",
     "ForceLoss",
     "LinearWeight",
     "LossWeightSchedule",

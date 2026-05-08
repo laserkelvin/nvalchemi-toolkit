@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Concrete loss terms: :class:`EnergyLoss`, :class:`ForceLoss`, :class:`StressLoss`.
+"""Concrete loss terms for energy, forces, and stress.
 
 All three accept prediction and target tensors directly. The configurable
 ``target_key`` / ``prediction_key`` names are used by
@@ -36,7 +36,6 @@ from nvalchemi.training.losses.reductions import frobenius_mse, per_graph_sum
 if TYPE_CHECKING:
     from nvalchemi.data.batch import Batch
 
-_AnyFloatTensor: TypeAlias = Float[torch.Tensor, "..."]
 _NodeCounts: TypeAlias = Integer[torch.Tensor, "B"]
 _PaddedNodeMask: TypeAlias = Bool[torch.Tensor, "B V_max"]
 _PaddedForces: TypeAlias = Float[torch.Tensor, "B V_max 3"]
@@ -44,35 +43,6 @@ _ForceTensor: TypeAlias = Forces | _PaddedForces
 _DenseForceMask: TypeAlias = Bool[torch.Tensor, "V 3"]
 _PaddedForceMask: TypeAlias = Bool[torch.Tensor, "B V_max 3"]
 _PerGraphValues: TypeAlias = Float[torch.Tensor, "B"]
-
-
-def _masked_mse(pred: _AnyFloatTensor, target: _AnyFloatTensor) -> Scalar:
-    """Return mean-squared-error over finite target entries only.
-
-    Uses branch-free tensor ops so the loss is safe under ``torch.compile``:
-    no Python ``if`` on tensor values, no boolean indexing, no ``.item()``.
-    Target positions with ``NaN`` contribute zero to both numerator and
-    denominator; predictions at those positions receive zero gradient.
-    When every target entry is ``NaN`` the denominator is clamped to ``1``
-    so the loss is ``0.0`` rather than ``NaN``.
-
-    Parameters
-    ----------
-    pred : Float[torch.Tensor, "..."]
-        Prediction tensor of any floating shape. Expected to be fully finite.
-    target : Float[torch.Tensor, "..."]
-        Target tensor with the same shape as ``pred``; may contain ``NaN``
-        at positions representing missing labels.
-
-    Returns
-    -------
-    Scalar
-        Scalar mean of squared residuals over valid target entries.
-    """
-    valid = ~target.isnan()
-    residual = torch.where(valid, pred - target, torch.zeros_like(pred))
-    denom = valid.to(dtype=pred.dtype).sum().clamp_min(1.0)
-    return residual.pow(2).sum() / denom
 
 
 def _require_metadata(value: Any, name: str, *, loss_name: str) -> Any:
@@ -83,35 +53,24 @@ def _require_metadata(value: Any, name: str, *, loss_name: str) -> Any:
 
 
 def _node_counts(
-    num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None, ref: Energy
+    num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None,
+    ref: Energy,
 ) -> Float[torch.Tensor, "B"]:
-    """Return per-graph node counts from explicit counts or a padded mask.
-
-    Parameters
-    ----------
-    num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None
-        Either one integer count per graph or a padded node-validity mask.
-        ``None`` raises because per-atom energy residuals require graph
-        sizes.
-    ref : Energy
-        Energy tensor of shape ``(B, 1)`` whose device and dtype are used
-        for the returned counts.
-
-    Returns
-    -------
-    Float[torch.Tensor, "B"]
-        Per-graph node counts, clamped to at least one.
-
-    Raises
-    ------
-    ValueError
-        If ``num_nodes_per_graph`` is ``None``.
-    """
+    """Return per-graph node counts from counts or a padded node mask."""
     nodes = _require_metadata(
         num_nodes_per_graph,
         "num_nodes_per_graph",
-        loss_name="EnergyLoss(per_atom=True)",
+        loss_name="per-atom energy loss",
     ).to(ref)
+    if nodes.ndim not in (1, 2):
+        raise ValueError(
+            "num_nodes_per_graph must be a 1-D count tensor or a 2-D padded node mask."
+        )
+    if nodes.shape[0] != ref.shape[0]:
+        raise ValueError(
+            "num_nodes_per_graph leading dimension "
+            f"({nodes.shape[0]}) must match energy batch size ({ref.shape[0]})."
+        )
     if nodes.ndim == 1:
         return nodes.clamp_min(1)
     return nodes.sum(dim=-1).clamp_min(1)
@@ -122,42 +81,32 @@ def _padded_node_mask(
     ref: _PaddedForces,
     max_nodes: int,
 ) -> _PaddedNodeMask:
-    """Return a padded node-validity mask for padded force layouts.
-
-    Parameters
-    ----------
-    num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None
-        Either one integer count per graph or an existing padded
-        node-validity mask. ``None`` raises because padded forces require
-        padding metadata.
-    ref : Float[torch.Tensor, "B V_max 3"]
-        Padded force tensor whose leading dimensions define the expected
-        mask shape and whose device is used for generated masks.
-    max_nodes : int
-        Expected padded node dimension, equal to ``ref.shape[1]``.
-
-    Returns
-    -------
-    Bool[torch.Tensor, "B V_max"]
-        Boolean mask indicating valid, non-padding nodes.
-
-    Raises
-    ------
-    ValueError
-        If ``num_nodes_per_graph`` is ``None`` or if a supplied mask has
-        width different from ``max_nodes``.
-    """
+    """Return a padded node-validity mask for padded force tensors."""
     nodes = _require_metadata(
-        num_nodes_per_graph, "num_nodes_per_graph", loss_name="ForceLoss"
+        num_nodes_per_graph, "num_nodes_per_graph", loss_name="padded force loss"
     )
     if nodes.ndim == 2:
         mask = nodes.to(device=ref.device, dtype=torch.bool)
+        if mask.shape[0] != ref.shape[0]:
+            raise ValueError(
+                f"padded node mask batch dimension ({mask.shape[0]}) "
+                f"must match force batch size ({ref.shape[0]})."
+            )
         if mask.shape[1] != max_nodes:
             raise ValueError(
                 f"padded node mask width ({mask.shape[1]}) must match "
-                f"force max nodes ({max_nodes})"
+                f"force max nodes ({max_nodes}) for padded force tensors."
             )
         return mask
+    if nodes.ndim != 1:
+        raise ValueError(
+            "num_nodes_per_graph must be a 1-D count tensor or a 2-D padded node mask."
+        )
+    if nodes.shape[0] != ref.shape[0]:
+        raise ValueError(
+            f"num_nodes_per_graph length ({nodes.shape[0]}) "
+            f"must match force batch size ({ref.shape[0]})."
+        )
     counts = nodes.to(device=ref.device)
     return torch.arange(max_nodes, device=ref.device).unsqueeze(0) < counts.unsqueeze(
         -1
@@ -191,12 +140,8 @@ class EnergyLoss(BaseLossFunction):
     ---------------
     pred, target : Energy
         Per-graph energy tensors of shape ``(B, 1)``. Shape validation
-        uses :func:`torch.broadcast_shapes`, so broadcast-compatible
-        pairs pass the check, but callers should provide both tensors
-        at the canonical ``(B, 1)`` layout. In particular, pairing a
-        ``(B, 1)`` prediction with a ``(B,)`` target broadcasts to
-        ``(B, B)`` and silently computes pairwise residuals across the
-        batch rather than per-graph residuals.
+        requires exact equality; ``(B, 1)`` and ``(B,)`` are rejected
+        even though they are broadcast-compatible.
     num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"], optional
         Required only when ``per_atom=True``. May be explicit per-graph
         counts or a padded node-validity mask.
@@ -322,6 +267,118 @@ class EnergyLoss(BaseLossFunction):
         )
 
 
+class EnergyMAELoss(BaseLossFunction):
+    """Mean-absolute-error loss for per-graph energy targets.
+
+    This loss operates on per-graph total energies with identical
+    prediction and target shapes, commonly ``(B, 1)`` or ``(B,)``. With
+    ``per_atom=True`` (default), prediction and target energies are first
+    divided by each graph's atom count, then absolute residuals are
+    averaged with a simple mean over valid graph entries. The reduction is
+    not atom-count weighted.
+
+    Parameters
+    ----------
+    target_key : str, default "energy"
+        Target container key for the target tensor.
+    prediction_key : str, default "predicted_energy"
+        Prediction container key for the model output.
+    per_atom : bool, default True
+        Divide prediction and target by ``num_nodes_per_graph`` before
+        computing absolute residuals.
+    ignore_nonfinite : bool, default True
+        When ``True``, target entries that are ``NaN`` or infinite are
+        excluded from both loss value and gradient using
+        :func:`torch.isfinite`.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_key: str = "energy",
+        prediction_key: str = "predicted_energy",
+        per_atom: bool = True,
+        ignore_nonfinite: bool = True,
+    ) -> None:
+        """Configure attribute keys and energy MAE semantics."""
+        super().__init__()
+        self.target_key = target_key
+        self.prediction_key = prediction_key
+        self.per_atom = per_atom
+        self.ignore_nonfinite = ignore_nonfinite
+
+    def forward(
+        self,
+        pred: Energy,
+        target: Energy,
+        *,
+        batch: Batch | None = None,
+        num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
+        **kwargs: Any,  # noqa: ARG002
+    ) -> Scalar:
+        """Return the energy MAE scalar.
+
+        Parameters
+        ----------
+        pred : Energy
+            Predicted per-graph energies of shape ``(B, 1)`` or ``(B,)``.
+        target : Energy
+            Target per-graph energies with the exact same shape as
+            ``pred``.
+        batch : Batch | None, optional
+            Source for missing graph metadata. Explicit metadata kwargs
+            override batch-derived values when both are provided.
+        num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None, optional
+            Per-graph node counts or padded node-validity mask. Required
+            when ``per_atom=True``.
+        **kwargs : Any
+            Ignored keyword arguments accepted for the common loss-call
+            interface.
+
+        Returns
+        -------
+        Scalar
+            Scalar energy MAE over valid graph entries.
+        """
+        self.per_sample_loss = None
+        assert_same_shape(
+            pred,
+            target,
+            name=type(self).__name__,
+            prediction_key=self.prediction_key,
+            target_key=self.target_key,
+            strict=True,
+        )
+        valid = torch.ones_like(target, dtype=torch.bool)
+        if self.ignore_nonfinite:
+            valid = torch.isfinite(target)
+        if batch is not None and self.per_atom and num_nodes_per_graph is None:
+            num_nodes_per_graph = getattr(batch, "num_nodes_per_graph", None)
+        if self.per_atom:
+            counts = _node_counts(num_nodes_per_graph, pred).reshape(
+                (-1,) + (1,) * (pred.ndim - 1)
+            )
+            pred = pred / counts
+            target = target / counts
+        residual = torch.where(valid, pred - target, torch.zeros_like(pred)).abs()
+        valid_weights = valid.to(dtype=pred.dtype)
+        scalar = residual.sum() / valid_weights.sum().clamp_min(1.0)
+        if residual.ndim == 1:
+            self.per_sample_loss = residual.detach()
+        elif residual.ndim == 2 and residual.shape[-1] == 1:
+            self.per_sample_loss = residual.squeeze(-1).detach()
+        return scalar
+
+    def extra_repr(self) -> str:
+        """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
+        return (
+            f"target_key={self.target_key!r}, "
+            f"prediction_key={self.prediction_key!r}, "
+            f"per_atom={self.per_atom!r}, "
+            f"ignore_nonfinite={self.ignore_nonfinite!r}"
+        )
+
+
 class ForceLoss(BaseLossFunction):
     """Mean-squared-error loss on per-atom forces.
 
@@ -348,9 +405,8 @@ class ForceLoss(BaseLossFunction):
     ---------------
     pred, target : Forces | Float[torch.Tensor, "B V_max 3"]
         Dense per-node forces of shape ``(V, 3)`` or padded per-graph
-        forces of shape ``(B, V_max, 3)``. Shape validation accepts any
-        broadcast-compatible ``pred`` / ``target`` pair, but the
-        canonical contract remains the dense or padded layout above.
+        forces of shape ``(B, V_max, 3)``. Shape validation requires
+        exact equality.
     batch_idx : BatchIndices, optional
         Required for dense ``(V, 3)`` forces when
         ``normalize_by_atom_count=True``. Ignored for padded forces.
@@ -629,6 +685,172 @@ class ForceLoss(BaseLossFunction):
         )
 
 
+class ForceL2NormLoss(BaseLossFunction):
+    """Mean per-atom force-vector L2 loss.
+
+    The per-atom residual is the vector norm
+    ``torch.linalg.vector_norm(pred - target, ord=2, dim=-1)``. Dense
+    ``(V, 3)`` inputs can be graph-balanced with ``batch_idx`` and
+    ``num_graphs``. Padded ``(B, V_max, 3)`` inputs require
+    ``num_nodes_per_graph`` counts or a node mask so padding can be
+    excluded from the atom-level reduction.
+
+    Parameters
+    ----------
+    target_key : str, default "forces"
+        Target container key for the target tensor.
+    prediction_key : str, default "predicted_forces"
+        Prediction container key for the model output.
+    normalize_by_atom_count : bool, default True
+        When ``True``, compute a mean atom L2 norm per graph, then mean
+        over graphs. When ``False``, compute one global mean over valid
+        atom L2 norms.
+    ignore_nonfinite : bool, default True
+        When ``True``, atoms whose target vector contains ``NaN`` or
+        infinity are excluded from both loss value and gradient using
+        :func:`torch.isfinite`.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_key: str = "forces",
+        prediction_key: str = "predicted_forces",
+        normalize_by_atom_count: bool = True,
+        ignore_nonfinite: bool = True,
+    ) -> None:
+        """Configure attribute keys and force L2 semantics."""
+        super().__init__()
+        self.target_key = target_key
+        self.prediction_key = prediction_key
+        self.normalize_by_atom_count = normalize_by_atom_count
+        self.ignore_nonfinite = ignore_nonfinite
+
+    def forward(
+        self,
+        pred: _ForceTensor,
+        target: _ForceTensor,
+        *,
+        batch: Batch | None = None,
+        batch_idx: BatchIndices | None = None,
+        num_graphs: int | None = None,
+        num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None = None,
+        **kwargs: Any,  # noqa: ARG002
+    ) -> Scalar:
+        """Return the force-vector L2 scalar.
+
+        Parameters
+        ----------
+        pred : Forces | Float[torch.Tensor, "B V_max 3"]
+            Predicted forces. Dense layout is ``(V, 3)``; padded layout
+            is ``(B, V_max, 3)``.
+        target : Forces | Float[torch.Tensor, "B V_max 3"]
+            Target forces with the same shape as ``pred``.
+        batch : Batch | None, optional
+            Source for missing graph metadata. Explicit metadata kwargs
+            override batch-derived values when both are provided.
+        batch_idx : BatchIndices | None, optional
+            Dense-layout graph index for each node, shape ``(V,)``.
+            Required for dense graph-balanced reduction.
+        num_graphs : int | None, optional
+            Number of graphs represented by ``batch_idx``. Required for
+            dense graph-balanced reduction.
+        num_nodes_per_graph : Integer[torch.Tensor, "B"] | Bool[torch.Tensor, "B V_max"] | None, optional
+            Per-graph node counts or padded node-validity mask. Required
+            for padded inputs.
+        **kwargs : Any
+            Ignored keyword arguments accepted for the common loss-call
+            interface.
+
+        Returns
+        -------
+        Scalar
+            Scalar force L2 norm loss.
+        """
+        self.per_sample_loss = None
+        assert_same_shape(
+            pred,
+            target,
+            name=type(self).__name__,
+            prediction_key=self.prediction_key,
+            target_key=self.target_key,
+            strict=True,
+        )
+        if batch is not None:
+            if self.normalize_by_atom_count and pred.ndim == 2:
+                if batch_idx is None:
+                    batch_idx = getattr(batch, "batch_idx", None)
+                if num_graphs is None:
+                    num_graphs = getattr(batch, "num_graphs", None)
+            if pred.ndim == 3 and num_nodes_per_graph is None:
+                num_nodes_per_graph = getattr(batch, "num_nodes_per_graph", None)
+
+        valid_atoms = self._valid_force_atoms(pred, target, num_nodes_per_graph)
+        valid_vectors = valid_atoms.unsqueeze(-1)
+        residual = torch.where(valid_vectors, pred - target, torch.zeros_like(pred))
+        per_atom_l2 = torch.linalg.vector_norm(residual, ord=2, dim=-1)
+        atom_weights = valid_atoms.to(dtype=pred.dtype)
+        if not self.normalize_by_atom_count:
+            if pred.ndim == 3:
+                per_graph_counts = atom_weights.sum(dim=-1).clamp_min(1.0)
+                self.per_sample_loss = (
+                    per_atom_l2.sum(dim=-1) / per_graph_counts
+                ).detach()
+            return per_atom_l2.sum() / atom_weights.sum().clamp_min(1.0)
+        per_graph_sum_l2, per_graph_counts = self._per_graph_atom_terms(
+            per_atom_l2, atom_weights, batch_idx, num_graphs
+        )
+        per_sample = per_graph_sum_l2 / per_graph_counts.clamp_min(1.0)
+        self.per_sample_loss = per_sample.detach()
+        return per_sample.mean()
+
+    def _valid_force_atoms(
+        self,
+        pred: _ForceTensor,
+        target: _ForceTensor,
+        num_nodes_per_graph: _NodeCounts | _PaddedNodeMask | None,
+    ) -> Bool[torch.Tensor, "V"] | _PaddedNodeMask:
+        """Return atom-validity mask for dense or padded forces."""
+        if pred.ndim == 2:
+            if self.ignore_nonfinite:
+                return torch.isfinite(target).all(dim=-1)
+            return torch.ones_like(target[..., 0], dtype=torch.bool)
+        node_mask = _padded_node_mask(num_nodes_per_graph, pred, pred.shape[1])
+        if self.ignore_nonfinite:
+            return node_mask & torch.isfinite(target).all(dim=-1)
+        return node_mask
+
+    def _per_graph_atom_terms(
+        self,
+        per_atom_values: Float[torch.Tensor, "..."],
+        atom_weights: Float[torch.Tensor, "..."],
+        batch_idx: BatchIndices | None,
+        num_graphs: int | None,
+    ) -> tuple[_PerGraphValues, _PerGraphValues]:
+        """Return per-graph atom-value sums and valid atom counts."""
+        if per_atom_values.ndim == 1:
+            batch_idx = _require_metadata(
+                batch_idx, "batch_idx", loss_name="ForceL2NormLoss"
+            )
+            num_graphs = _require_metadata(
+                num_graphs, "num_graphs", loss_name="ForceL2NormLoss"
+            )
+            return (
+                per_graph_sum(per_atom_values, batch_idx, num_graphs=num_graphs),
+                per_graph_sum(atom_weights, batch_idx, num_graphs=num_graphs),
+            )
+        return per_atom_values.sum(dim=-1), atom_weights.sum(dim=-1)
+
+    def extra_repr(self) -> str:
+        """Human-readable hyperparameter summary for :class:`nn.Module`'s repr."""
+        return (
+            f"target_key={self.target_key!r}, "
+            f"prediction_key={self.prediction_key!r}, "
+            f"normalize_by_atom_count={self.normalize_by_atom_count!r}, "
+            f"ignore_nonfinite={self.ignore_nonfinite!r}"
+        )
+
+
 class StressLoss(BaseLossFunction):
     """Mean-squared-error loss on the per-graph stress tensor.
 
@@ -640,8 +862,7 @@ class StressLoss(BaseLossFunction):
     ---------------
     pred, target : Stress
         Per-graph stress tensors of shape ``(B, 3, 3)``. Shape
-        validation accepts any broadcast-compatible ``pred`` / ``target``
-        pair, but the canonical contract remains ``(B, 3, 3)``.
+        validation requires exact equality.
 
     Parameters
     ----------
