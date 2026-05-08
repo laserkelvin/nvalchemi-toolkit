@@ -29,6 +29,8 @@ from nvalchemi.training import (
     ComposedLossOutput,
     ConstantWeight,
     EnergyLoss,
+    EnergyMAELoss,
+    ForceL2NormLoss,
     ForceLoss,
     LinearWeight,
     StressLoss,
@@ -260,6 +262,78 @@ class TestReductionsCompile:
         expected = fn(*args)
 
         assert torch.allclose(got, expected)
+
+
+class TestConcreteLossesCompile:
+    @staticmethod
+    def _compile_kwargs(device: str) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"fullgraph": True}
+        if device == "cuda":
+            kwargs["backend"] = "cudagraphs"
+        return kwargs
+
+    def test_energy_mae_loss_compiles_fullgraph(self, device: str) -> None:
+        loss = EnergyMAELoss()
+        pred = torch.tensor([[6.0], [15.0], [8.0]], device=device)
+        target = torch.tensor([[3.0], [10.0], [4.0]], device=device)
+        counts = torch.tensor([3, 5, 2], dtype=torch.long, device=device)
+
+        def fn(
+            pred: torch.Tensor, target: torch.Tensor, counts: torch.Tensor
+        ) -> torch.Tensor:
+            return loss(pred, target, num_nodes_per_graph=counts)
+
+        compiled = torch.compile(fn, **self._compile_kwargs(device))
+        torch.testing.assert_close(
+            compiled(pred, target, counts), fn(pred, target, counts)
+        )
+
+    def test_force_l2_norm_loss_dense_compiles_fullgraph(self, device: str) -> None:
+        loss = ForceL2NormLoss()
+        pred = torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [1.0, 1.0, 1.0],
+                [2.0, 0.0, 0.0],
+            ],
+            device=device,
+        )
+        target = torch.zeros_like(pred)
+        batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32, device=device)
+
+        def fn(
+            pred: torch.Tensor, target: torch.Tensor, batch_idx: torch.Tensor
+        ) -> torch.Tensor:
+            return loss(pred, target, batch_idx=batch_idx, num_graphs=2)
+
+        compiled = torch.compile(fn, **self._compile_kwargs(device))
+        torch.testing.assert_close(
+            compiled(pred, target, batch_idx), fn(pred, target, batch_idx)
+        )
+
+    def test_force_l2_norm_loss_padded_compiles_fullgraph(self, device: str) -> None:
+        loss = ForceL2NormLoss()
+        pred = torch.tensor(
+            [
+                [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]],
+                [[1.0, 1.0, 1.0], [2.0, 0.0, 0.0], [99.0, 99.0, 99.0]],
+            ],
+            device=device,
+        )
+        target = torch.zeros_like(pred)
+        counts = torch.tensor([3, 2], dtype=torch.long, device=device)
+
+        def fn(
+            pred: torch.Tensor, target: torch.Tensor, counts: torch.Tensor
+        ) -> torch.Tensor:
+            return loss(pred, target, num_nodes_per_graph=counts)
+
+        compiled = torch.compile(fn, **self._compile_kwargs(device))
+        torch.testing.assert_close(
+            compiled(pred, target, counts), fn(pred, target, counts)
+        )
 
 
 class TestBaseLossFunction:
@@ -917,6 +991,41 @@ class TestConcreteLosses:
             **extra,
         )
 
+    @staticmethod
+    def _force_l2_dense_case() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
+        target = torch.zeros(5, 3)
+        pred = torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [1.0, 1.0, 1.0],
+                [2.0, 0.0, 0.0],
+            ]
+        )
+        return pred, target, batch_idx
+
+    @staticmethod
+    def _force_l2_padded_case() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        target = torch.zeros(2, 3, 3)
+        pred = torch.tensor(
+            [
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0],
+                    [0.0, 0.0, 3.0],
+                ],
+                [
+                    [1.0, 1.0, 1.0],
+                    [2.0, 0.0, 0.0],
+                    [99.0, 99.0, 99.0],
+                ],
+            ]
+        )
+        counts = torch.tensor([3, 2], dtype=torch.long)
+        return pred, target, counts
+
     def test_energy_loss_gradient_matches_analytic(
         self, fixed_torch_seed: None
     ) -> None:
@@ -964,6 +1073,63 @@ class TestConcreteLosses:
         assert got.device.type == "cuda"
         assert torch.allclose(got, torch.tensor(1.6, device=gpu_device), atol=1e-6)
 
+    def test_energy_mae_loss_matches_manual_per_atom_mean(self) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]])
+        pred = torch.tensor([[6.0], [15.0], [8.0]])
+        got = EnergyMAELoss()(
+            pred, target, num_nodes_per_graph=self.num_nodes_per_graph
+        )
+        counts = self.num_nodes_per_graph.to(pred).unsqueeze(-1)
+        expected = (pred / counts - target / counts).abs().mean()
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_energy_mae_loss_ignores_nan_and_inf_targets(self) -> None:
+        target = torch.tensor([[3.0], [float("nan")], [float("inf")], [8.0]])
+        pred = torch.tensor([[6.0], [20.0], [30.0], [4.0]])
+        counts = torch.tensor([3, 5, 2, 2], dtype=torch.long)
+        got = EnergyMAELoss()(pred, target, num_nodes_per_graph=counts)
+        expected = (
+            torch.tensor([(6.0 / 3.0 - 3.0 / 3.0), (4.0 / 2.0 - 8.0 / 2.0)])
+            .abs()
+            .mean()
+        )
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_energy_mae_loss_gradient_flows(self) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]])
+        pred = torch.tensor([[6.0], [15.0], [8.0]], requires_grad=True)
+        EnergyMAELoss()(
+            pred, target, num_nodes_per_graph=self.num_nodes_per_graph
+        ).backward()
+        assert pred.grad is not None
+        assert pred.grad.shape == pred.shape
+
+    def test_energy_mae_loss_accepts_vector_shape(self) -> None:
+        target = torch.tensor([3.0, 10.0, 4.0])
+        pred = torch.tensor([6.0, 15.0, 8.0])
+        got = EnergyMAELoss()(
+            pred, target, num_nodes_per_graph=self.num_nodes_per_graph
+        )
+        counts = self.num_nodes_per_graph.to(pred)
+        expected = (pred / counts - target / counts).abs().mean()
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    @pytest.mark.parametrize(
+        "bad_counts",
+        [
+            torch.tensor([3, 5], dtype=torch.long),
+            torch.ones(2, 5, dtype=torch.bool),
+        ],
+        ids=["count_length", "mask_batch"],
+    )
+    def test_energy_mae_loss_rejects_count_batch_mismatch(
+        self, bad_counts: torch.Tensor
+    ) -> None:
+        target = torch.tensor([[3.0], [10.0], [4.0]])
+        pred = torch.tensor([[6.0], [15.0], [8.0]])
+        with pytest.raises(ValueError, match="must match energy batch size"):
+            EnergyMAELoss()(pred, target, num_nodes_per_graph=bad_counts)
+
     def test_force_loss_matches_hand_computed(self) -> None:
         # 2 graphs with 3 and 2 atoms for a small hand-traceable case.
         batch_idx = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
@@ -996,6 +1162,21 @@ class TestConcreteLosses:
         got_global = ForceLoss(normalize_by_atom_count=False)(pred, target)
         assert torch.allclose(got_global, torch.tensor(21.0 / 15.0), atol=1e-6)
 
+    def test_force_l2_norm_loss_dense_matches_manual_per_graph_reduction(self) -> None:
+        pred, target, batch_idx = self._force_l2_dense_case()
+        got = ForceL2NormLoss()(pred, target, batch_idx=batch_idx, num_graphs=2)
+        per_atom = torch.linalg.vector_norm(pred - target, ord=2, dim=-1)
+        graph0 = per_atom[:3].mean()
+        graph1 = per_atom[3:].mean()
+        expected = torch.stack((graph0, graph1)).mean()
+        assert torch.allclose(got, expected, atol=1e-6)
+
+    def test_force_l2_norm_loss_dense_global_mean_when_not_normalized(self) -> None:
+        pred, target, _ = self._force_l2_dense_case()
+        got = ForceL2NormLoss(normalize_by_atom_count=False)(pred, target)
+        expected = torch.linalg.vector_norm(pred - target, ord=2, dim=-1).mean()
+        assert torch.allclose(got, expected, atol=1e-6)
+
     def test_force_loss_padded_layout_matches_flat_hand_computed(self) -> None:
         target = torch.zeros(2, 3, 3)
         pred = torch.tensor(
@@ -1025,6 +1206,43 @@ class TestConcreteLosses:
         )
         assert torch.allclose(got_global, torch.tensor(21.0 / 15.0), atol=1e-6)
 
+    def test_force_l2_norm_loss_padded_ignores_padding_and_nonfinite_targets(
+        self,
+    ) -> None:
+        pred, target, num_nodes_per_graph = self._force_l2_padded_case()
+        target[0, 2, 0] = float("inf")
+        target[1, 2] = float("nan")
+
+        got = ForceL2NormLoss()(pred, target, num_nodes_per_graph=num_nodes_per_graph)
+        expected = torch.stack(
+            (
+                torch.tensor([1.0, 2.0]).mean(),
+                torch.tensor([3.0**0.5, 2.0]).mean(),
+            )
+        ).mean()
+        assert torch.allclose(got, expected, atol=1e-6)
+
+        got_global = ForceL2NormLoss(normalize_by_atom_count=False)(
+            pred, target, num_nodes_per_graph=num_nodes_per_graph
+        )
+        expected_global = torch.tensor([1.0, 2.0, 3.0**0.5, 2.0]).mean()
+        assert torch.allclose(got_global, expected_global, atol=1e-6)
+
+    @pytest.mark.parametrize(
+        "bad_counts",
+        [
+            torch.tensor([3], dtype=torch.long),
+            torch.ones(1, 3, dtype=torch.bool),
+        ],
+        ids=["count_length", "mask_batch"],
+    )
+    def test_force_l2_norm_loss_padded_rejects_count_batch_mismatch(
+        self, bad_counts: torch.Tensor
+    ) -> None:
+        pred, target, _ = self._force_l2_padded_case()
+        with pytest.raises(ValueError, match="must match force batch size"):
+            ForceL2NormLoss()(pred, target, num_nodes_per_graph=bad_counts)
+
     def test_force_loss_padded_layout_accepts_node_mask(self) -> None:
         target = torch.zeros(2, 3, 3)
         pred = torch.ones(2, 3, 3)
@@ -1047,6 +1265,18 @@ class TestConcreteLosses:
         pred = torch.randn(self.num_nodes, 3, requires_grad=True)
         target = torch.randn(self.num_nodes, 3)
         ForceLoss()(
+            pred,
+            target,
+            batch_idx=self.batch_idx,
+            num_graphs=self.num_graphs,
+        ).backward()
+        assert pred.grad is not None
+        assert pred.grad.shape == pred.shape
+
+    def test_force_l2_norm_loss_gradient_flows(self) -> None:
+        pred = torch.randn(self.num_nodes, 3, requires_grad=True)
+        target = torch.randn(self.num_nodes, 3)
+        ForceL2NormLoss()(
             pred,
             target,
             batch_idx=self.batch_idx,
