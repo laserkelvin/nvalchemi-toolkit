@@ -89,6 +89,36 @@ def _loss_weight_to_spec(weight: Any) -> Any:
     return weight
 
 
+def _hook_claims_stage(hook: Any, stage: TrainingStage) -> bool:
+    """Return True if ``hook`` claims ``stage`` via stage field or opt-in override.
+
+    A hook "claims" a stage when either its ``stage`` attribute equals
+    ``stage`` exactly, or it defines an ``_runs_on_stage`` override that
+    returns ``True`` for ``stage``. The second path lets hooks that dispatch
+    on multiple stages (e.g. ``MixedPrecisionHook`` spanning
+    ``BEFORE_FORWARD``/``DO_BACKWARD``/``DO_OPTIMIZER_STEP``) still be
+    recognized as claimants of the ``DO_`` stages.
+
+    Parameters
+    ----------
+    hook : Any
+        Hook instance registered on a ``TrainingStrategy``.
+    stage : TrainingStage
+        Stage whose claim status is being evaluated.
+
+    Returns
+    -------
+    bool
+        ``True`` if ``hook`` declares ownership of ``stage``, else ``False``.
+    """
+    if getattr(hook, "stage", None) == stage:
+        return True
+    runs_on_stage = getattr(hook, "_runs_on_stage", None)
+    if runs_on_stage is not None and runs_on_stage(stage):
+        return True
+    return False
+
+
 def default_training_fn(model: BaseModelMixin, batch: Batch) -> dict[str, torch.Tensor]:
     """Run a forward pass and prefix output keys with ``predicted_``.
 
@@ -172,6 +202,8 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     _flat_opts: list[torch.optim.Optimizer] = PrivateAttr(default_factory=list)
     _flat_scheds: list[LRScheduler | None] = PrivateAttr(default_factory=list)
     _ctx: TrainContext | None = PrivateAttr(default=None)
+    _has_do_backward_claim: bool = PrivateAttr(default=False)
+    _has_do_optimizer_step_claim: bool = PrivateAttr(default=False)
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -278,11 +310,26 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
                 "hooks must not contain duplicate hook instances; pass distinct "
                 "hook objects instead."
             )
+        for do_stage in (TrainingStage.DO_BACKWARD, TrainingStage.DO_OPTIMIZER_STEP):
+            claimants = [h for h in self.hooks if _hook_claims_stage(h, do_stage)]
+            if len(claimants) > 1:
+                names = ", ".join(type(h).__name__ for h in claimants)
+                raise ValueError(
+                    f"At most one hook may claim {do_stage.name}; got "
+                    f"{len(claimants)}: {names}. Compose claim semantics are "
+                    "reserved for a future feature."
+                )
         return self
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize hook storage, per-run counters, and cached target keys."""
         self._init_hooks(list(self.hooks))
+        self._has_do_backward_claim = (
+            self._count_claimants(TrainingStage.DO_BACKWARD) == 1
+        )
+        self._has_do_optimizer_step_claim = (
+            self._count_claimants(TrainingStage.DO_OPTIMIZER_STEP) == 1
+        )
         self._last_batch: Batch | None = None
         self._last_losses: ComposedLossOutput | None = None
         self._last_loss: torch.Tensor | None = None
@@ -299,6 +346,25 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             seen_keys.add(key)
             target_keys.append(key)
         self._target_keys: tuple[str, ...] = tuple(target_keys)
+
+    def _count_claimants(self, stage: TrainingStage) -> int:
+        """Count hooks that claim ``stage`` via stage field or opt-in override.
+
+        Uses the same predicate as ``_validate_strategy``: a hook claims
+        ``stage`` when its ``stage`` attribute matches exactly, or when it
+        defines ``_runs_on_stage`` that returns ``True`` for ``stage``.
+
+        Parameters
+        ----------
+        stage : TrainingStage
+            Training stage to count claimants for.
+
+        Returns
+        -------
+        int
+            Number of registered hooks claiming ``stage``.
+        """
+        return sum(1 for h in self.hooks if _hook_claims_stage(h, stage))
 
     def _build_context(self, batch: Batch) -> TrainContext:
         """Build a TrainContext, reusing the per-batch cache when populated.
@@ -393,14 +459,18 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         self._run_hooks(TrainingStage.AFTER_LOSS, batch)
 
         self._run_hooks(TrainingStage.BEFORE_BACKWARD, batch)
-        total_loss.backward()
+        self._run_hooks(TrainingStage.DO_BACKWARD, batch)
+        if not self._has_do_backward_claim:
+            total_loss.backward()
         if self.hooks:
             self._update_hook_snapshot(loss_out=loss_out, detach=True)
         self._run_hooks(TrainingStage.AFTER_BACKWARD, batch)
 
         self._run_hooks(TrainingStage.BEFORE_OPTIMIZER_STEP, batch)
-        step_optimizers(flat_opts)
-        step_lr_schedulers(flat_scheds)
+        self._run_hooks(TrainingStage.DO_OPTIMIZER_STEP, batch)
+        if not self._has_do_optimizer_step_claim:
+            step_optimizers(flat_opts)
+            step_lr_schedulers(flat_scheds)
         self._run_hooks(TrainingStage.AFTER_OPTIMIZER_STEP, batch)
 
         self._run_hooks(TrainingStage.AFTER_BATCH, batch)
