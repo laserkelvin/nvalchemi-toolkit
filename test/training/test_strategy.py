@@ -736,3 +736,148 @@ class TestLiveDetachedLossPreserved:
 
         assert records[TrainingStage.BEFORE_BACKWARD] is True
         assert records[TrainingStage.AFTER_BACKWARD] is False
+
+
+class _RunsOnStageHook:
+    """Minimal hook that claims one or more stages via ``_runs_on_stage``.
+
+    Used by DO_ exclusivity and dispatch tests as a stand-in for the
+    future ``MixedPrecisionHook`` which will span multiple stages.
+    """
+
+    def __init__(
+        self,
+        claimed: set[TrainingStage],
+        callback: Callable[[HookContext, Enum], None] | None = None,
+    ) -> None:
+        self._claimed = set(claimed)
+        self.frequency = 1
+        self.stage = None
+        self._callback = callback
+        self.calls: list[TrainingStage] = []
+
+    def _runs_on_stage(self, stage: Enum) -> bool:
+        return stage in self._claimed
+
+    def __call__(self, ctx: HookContext, stage: Enum) -> None:
+        self.calls.append(stage)
+        if self._callback is not None:
+            self._callback(ctx, stage)
+
+
+class TestDOStageExclusivity:
+    def test_single_do_backward_hook_allowed(self) -> None:
+        hook = _RunsOnStageHook({TrainingStage.DO_BACKWARD})
+        strategy = _make_strategy(hooks=[hook])
+        assert strategy._has_do_backward_claim is True
+        assert strategy._has_do_optimizer_step_claim is False
+
+    def test_two_do_backward_hooks_rejected(self) -> None:
+        h1 = _RunsOnStageHook({TrainingStage.DO_BACKWARD})
+        h2 = _RunsOnStageHook({TrainingStage.DO_BACKWARD})
+        with pytest.raises(ValueError, match="DO_BACKWARD") as exc_info:
+            _make_strategy(hooks=[h1, h2])
+        assert "_RunsOnStageHook" in str(exc_info.value)
+
+    def test_single_do_optimizer_step_hook_allowed(self) -> None:
+        hook = _RunsOnStageHook({TrainingStage.DO_OPTIMIZER_STEP})
+        strategy = _make_strategy(hooks=[hook])
+        assert strategy._has_do_optimizer_step_claim is True
+        assert strategy._has_do_backward_claim is False
+
+    def test_two_do_optimizer_step_hooks_rejected(self) -> None:
+        h1 = _RunsOnStageHook({TrainingStage.DO_OPTIMIZER_STEP})
+        h2 = _RunsOnStageHook({TrainingStage.DO_OPTIMIZER_STEP})
+        with pytest.raises(ValueError, match="DO_OPTIMIZER_STEP") as exc_info:
+            _make_strategy(hooks=[h1, h2])
+        assert "_RunsOnStageHook" in str(exc_info.value)
+
+    def test_no_claim_flags_false_by_default(self) -> None:
+        strategy = _make_strategy()
+        assert strategy._has_do_backward_claim is False
+        assert strategy._has_do_optimizer_step_claim is False
+
+    def test_hook_claims_via_stage_field(self) -> None:
+        hook = _RecordingHook(TrainingStage.DO_BACKWARD, lambda ctx, stage: None)
+        strategy = _make_strategy(hooks=[hook])
+        assert strategy._has_do_backward_claim is True
+
+
+class TestDODispatch:
+    def test_default_backward_runs_when_unclaimed(self) -> None:
+        torch.manual_seed(0)
+        strategy = _make_strategy()
+        strategy.run([_make_batch()])
+        # Default backward ran → at least one model parameter has a grad.
+        assert any(
+            p.grad is not None and torch.any(p.grad != 0)
+            for p in strategy.models["main"].parameters()
+        )
+
+    def test_default_backward_skipped_when_claimed(self) -> None:
+        torch.manual_seed(0)
+        hook = _RunsOnStageHook({TrainingStage.DO_BACKWARD})
+        # Also claim DO_OPTIMIZER_STEP to avoid stepping on uninitialized grads.
+        hook._claimed.add(TrainingStage.DO_OPTIMIZER_STEP)
+        strategy = _make_strategy(hooks=[hook])
+        strategy.run([_make_batch()])
+        # Hook was invoked for DO_BACKWARD at least once.
+        assert TrainingStage.DO_BACKWARD in hook.calls
+        # Since the hook did NOT call .backward(), no parameter should have a grad.
+        assert all(
+            p.grad is None or torch.all(p.grad == 0)
+            for p in strategy.models["main"].parameters()
+        )
+
+    def test_default_step_runs_when_unclaimed(self) -> None:
+        # Baseline: the default optimizer step updates every trainable
+        # parameter by roughly ``lr`` (1e-3). We compare snapshots against
+        # post-step values; ``embedding.weight`` is excluded because
+        # DemoModel mutates it lazily on first forward (unrelated to the
+        # optimizer step).
+        torch.manual_seed(0)
+        snapshots: list[tuple[str, torch.Tensor]] = []
+
+        def _snapshot(ctx: HookContext, stage: Enum) -> None:  # noqa: ARG001
+            snapshots.extend(
+                (name, p.detach().clone())
+                for name, p in ctx.models["main"].named_parameters()
+            )
+
+        snapshotter = _RecordingHook(TrainingStage.BEFORE_BATCH, _snapshot)
+        strategy = _make_strategy(hooks=[snapshotter])
+        strategy.run([_make_batch()])
+        after = dict(strategy.models["main"].named_parameters())
+        changed = [
+            name
+            for name, before in snapshots
+            if name != "model.embedding.weight" and not torch.equal(before, after[name])
+        ]
+        # With the default step, every non-embedding param should move.
+        assert len(changed) == len(snapshots) - 1
+
+    def test_default_step_skipped_when_claimed(self) -> None:
+        # When a hook claims DO_OPTIMIZER_STEP and does nothing, no
+        # trainable parameter should change value (apart from the lazy
+        # ``embedding.weight`` init described in the sibling test).
+        torch.manual_seed(0)
+        claim = _RunsOnStageHook({TrainingStage.DO_OPTIMIZER_STEP})
+        snapshots: list[tuple[str, torch.Tensor]] = []
+
+        def _snapshot(ctx: HookContext, stage: Enum) -> None:  # noqa: ARG001
+            snapshots.extend(
+                (name, p.detach().clone())
+                for name, p in ctx.models["main"].named_parameters()
+            )
+
+        snapshotter = _RecordingHook(TrainingStage.BEFORE_BATCH, _snapshot)
+        strategy = _make_strategy(hooks=[claim, snapshotter])
+        strategy.run([_make_batch()])
+        after = dict(strategy.models["main"].named_parameters())
+        changed = [
+            name
+            for name, before in snapshots
+            if name != "model.embedding.weight" and not torch.equal(before, after[name])
+        ]
+        assert changed == []
+        assert TrainingStage.DO_OPTIMIZER_STEP in claim.calls
