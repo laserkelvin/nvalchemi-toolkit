@@ -169,6 +169,9 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     single_model_input: bool = Field(default=False, exclude=True)
 
     _context_depth: int = PrivateAttr(default=0)
+    _flat_opts: list[torch.optim.Optimizer] = PrivateAttr(default_factory=list)
+    _flat_scheds: list[LRScheduler | None] = PrivateAttr(default_factory=list)
+    _ctx: TrainContext | None = PrivateAttr(default=None)
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -283,9 +286,10 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         self._last_batch: Batch | None = None
         self._last_losses: ComposedLossOutput | None = None
         self._last_loss: torch.Tensor | None = None
-        self._optimizers: list[torch.optim.Optimizer] = []
-        self._lr_schedulers: list[LRScheduler] = []
         self._context_depth = 0
+        self._flat_opts = []
+        self._flat_scheds = []
+        self._ctx = None
         seen_keys: set[str] = set()
         target_keys: list[str] = []
         for component in self.loss_fn.components:
@@ -297,13 +301,21 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         self._target_keys: tuple[str, ...] = tuple(target_keys)
 
     def _build_context(self, batch: Batch) -> TrainContext:
-        """Build a training-specific hook context."""
+        """Build a TrainContext, reusing the per-batch cache when populated.
+
+        When the cache is populated we return it directly so every hook in
+        the batch sees the same object; otherwise we fall back to building a
+        fresh ``TrainContext`` for hook dispatches outside ``_train_one_batch``.
+        """
+        if self._ctx is not None:
+            return self._ctx
         global_rank = (
             dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
         )
+        main_model = self.models.get("main") if self.models else None
         return TrainContext(
             batch=batch,
-            model=self.models.get("main"),
+            model=main_model,
             global_rank=global_rank,
             workflow=self,
             step_count=self.step_count,
@@ -311,8 +323,8 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             epoch=self.epoch,
             loss=self._last_loss,
             losses=self._last_losses,
-            optimizers=self._optimizers,
-            lr_schedulers=self._lr_schedulers,
+            optimizers=self._flat_opts,
+            lr_schedulers=self._flat_scheds,
         )
 
     def _run_hooks(self, stage: TrainingStage, batch: Batch) -> None:
@@ -357,6 +369,11 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         flat_scheds: list[LRScheduler | None],
     ) -> None:
         """Forward-backward-optimize a single batch with hook dispatch."""
+        self._flat_opts = flat_opts
+        self._flat_scheds = flat_scheds
+        # Cache one TrainContext per batch; see _build_context.
+        self._ctx = self._build_context(batch)
+
         self._run_hooks(TrainingStage.BEFORE_BATCH, batch)
         zero_gradients(flat_opts)
         self._run_hooks(TrainingStage.BEFORE_FORWARD, batch)
@@ -387,6 +404,7 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         self._run_hooks(TrainingStage.AFTER_OPTIMIZER_STEP, batch)
 
         self._run_hooks(TrainingStage.AFTER_BATCH, batch)
+        self._ctx = None
         self.step_count += 1
 
     def _assemble_targets(self, batch: Batch) -> dict[str, torch.Tensor]:
@@ -453,6 +471,13 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         else:
             self._last_loss = loss_out["total_loss"]
             self._last_losses = loss_out
+        # Mirror loss state onto the cached per-batch ctx so hooks sharing
+        # the same ctx instance see live / detached transitions immediately.
+        if self._ctx is not None:
+            if batch is not None:
+                self._ctx.batch = batch
+            self._ctx.loss = self._last_loss
+            self._ctx.losses = self._last_losses
 
     def run(
         self,
@@ -487,8 +512,6 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             for opt, sched in pairs:
                 flat_opts.append(opt)
                 flat_scheds.append(sched)
-        self._optimizers = flat_opts
-        self._lr_schedulers = [sched for sched in flat_scheds if sched is not None]
 
         epoch_iter: Iterable[int] = (
             range(self.num_epochs) if self.num_epochs is not None else itertools.count()

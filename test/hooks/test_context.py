@@ -137,6 +137,16 @@ class TestTrainContext:
         assert ctx.loss is None
         assert ctx.losses is None
         assert ctx.models is None
-        assert ctx.optimizers is None
-        assert ctx.lr_schedulers is None
+        assert ctx.optimizers == []
+        assert ctx.lr_schedulers == []
         assert ctx.gradients is None
+
+    def test_optimizers_default_is_independent_per_instance(self):
+        first = TrainContext(batch=MagicMock())
+        second = TrainContext(batch=MagicMock())
+        opt = MagicMock(spec=torch.optim.Optimizer)
+
+        first.optimizers.append(opt)
+
+        assert first.optimizers == [opt]
+        assert second.optimizers == []
