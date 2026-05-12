@@ -20,6 +20,7 @@ are part of the core training workflow (e.g. :class:`MixedPrecisionHook`).
 
 from __future__ import annotations
 
+from nvalchemi.training.hooks.ema import EMAHook
 from nvalchemi.training.hooks.mixed_precision import MixedPrecisionHook
 
-__all__ = ["MixedPrecisionHook"]
+__all__ = ["EMAHook", "MixedPrecisionHook"]
