@@ -28,6 +28,7 @@ from nvalchemi.training._spec import (
     register_type_serializer,
 )
 from nvalchemi.training._stages import TrainingStage
+from nvalchemi.training.hooks import EMAHook
 from nvalchemi.training.losses import (
     BaseLossFunction,
     ComposedLossFunction,
@@ -40,7 +41,22 @@ from nvalchemi.training.losses import (
     LossWeightSchedule,
     PiecewiseWeight,
     StressLoss,
+    loss_component_to_spec,
 )
+from nvalchemi.training.optimizers import (
+    OptimizerConfig,
+    setup_optimizers,
+    step_lr_schedulers,
+    step_optimizers,
+    zero_gradients,
+)
+from nvalchemi.training.runtime import (
+    configure_dataloader,
+    configure_parallelism,
+    freeze_unconfigured_models,
+    move_to_devices,
+)
+from nvalchemi.training.strategy import TrainingStrategy, default_training_fn
 
 __all__ = [
     "BaseLossFunction",
@@ -50,16 +66,29 @@ __all__ = [
     "ComposedLossOutput",
     "ConstantWeight",
     "CosineWeight",
+    "EMAHook",
     "EnergyLoss",
     "ForceLoss",
     "LinearWeight",
     "LossWeightSchedule",
+    "OptimizerConfig",
     "PiecewiseWeight",
     "StressLoss",
     "TrainingStage",
+    "TrainingStrategy",
+    "configure_dataloader",
+    "configure_parallelism",
     "create_model_spec",
     "create_model_spec_from_json",
+    "default_training_fn",
+    "freeze_unconfigured_models",
+    "loss_component_to_spec",
     "load_checkpoint",
+    "move_to_devices",
     "register_type_serializer",
     "save_checkpoint",
+    "setup_optimizers",
+    "step_lr_schedulers",
+    "step_optimizers",
+    "zero_gradients",
 ]
