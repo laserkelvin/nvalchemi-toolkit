@@ -100,6 +100,9 @@ class TrainContext(HookContext):
         schedulers are visible to the current hook dispatch.
     gradients : dict[str, torch.Tensor] | None
         Parameter gradients for the current step.
+    grad_scaler : torch.amp.GradScaler | None
+        AMP gradient scaler shared by mixed precision update hooks, when
+        present.
     """
 
     step_count: int = 0
@@ -110,3 +113,4 @@ class TrainContext(HookContext):
     optimizers: list[torch.optim.Optimizer] = field(default_factory=list)
     lr_schedulers: list[object] = field(default_factory=list)
     gradients: dict[str, torch.Tensor] | None = None
+    grad_scaler: torch.amp.GradScaler | None = None
