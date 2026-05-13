@@ -38,7 +38,7 @@ class HookContext:
     step_count : int
         Current step number in the workflow.
     model : BaseModelMixin | None
-        Backwards-compatible alias for ``models["main"]`` when present.
+        Maps to the ``main`` model if it's presen in ``models``.
         ``None`` when no primary model is registered.
     models : dict[str, BaseModelMixin]
         Named models visible to hooks. Training strategies populate this for
