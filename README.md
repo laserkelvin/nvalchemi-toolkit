@@ -146,7 +146,9 @@ uv sync --extra cu13
 ```
 
 `cu13` is the default development CUDA variant. For CUDA 12 environments, run
-`uv sync --extra cu12` instead. To include documentation dependencies, add
+`uv sync --extra cu12` instead and pass the same extra to `uv run`, for example
+`uv run --extra cu12 pytest test/`. The Makefile does this automatically:
+`make test CUDA_EXTRA=cu12`. To include documentation dependencies, add
 `--group docs`. Avoid `uv sync --all-extras`, because the CUDA variants are
 mutually exclusive.
 

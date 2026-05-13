@@ -83,7 +83,7 @@ groups configured for the project, and uses `uv.lock` for reproducible versions.
 Select exactly one CUDA extra when syncing:
 
 ```bash
-# Default development stack: PhysicsNeMo, PyTorch, and RAPIDS for CUDA 13
+# Default development stack: PhysicsNeMo and PyTorch for CUDA 13
 $ uv sync --extra cu13
 
 # CUDA 12 stack for systems that have not moved to CUDA 13 yet
@@ -93,6 +93,32 @@ $ uv sync --extra cu12
 The CUDA extras are intentionally mutually exclusive. Do not use
 `uv sync --all-extras`, because it requests both `cu12` and `cu13` in the same
 environment.
+
+Use the same CUDA extra when running commands through `uv run`. By default,
+`uv run` checks and syncs the project environment before executing the command;
+bare `uv run ...` does not remember that the environment was previously synced
+with `cu12`.
+
+```bash
+# Default CUDA 13 stack
+$ uv run --extra cu13 pytest test/
+
+# CUDA 12 stack
+$ uv run --extra cu12 pytest test/
+```
+
+The Makefile threads the selected extra through both `uv sync` and `uv run`:
+
+```bash
+# Default CUDA 13 stack
+$ make test
+
+# CUDA 12 stack
+$ make test CUDA_EXTRA=cu12
+```
+
+After a known-good sync, `uv run --no-sync ...` can run without modifying the
+environment, but it also skips uv's normal environment check.
 
 Additional dependency groups can be layered onto the selected CUDA stack:
 
