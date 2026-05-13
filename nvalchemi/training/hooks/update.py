@@ -16,11 +16,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+import operator
+from collections.abc import Sequence
+from functools import reduce
+from typing import TYPE_CHECKING, Any, Literal
 
 import plum
 
 from nvalchemi.hooks._context import TrainContext
+from nvalchemi.hooks._protocol import Hook
 from nvalchemi.training._stages import TrainingStage
 from nvalchemi.training.optimizers import (
     step_lr_schedulers,
@@ -38,6 +42,53 @@ _TRAINING_UPDATE_STAGES: tuple[TrainingStage, ...] = (
     TrainingStage.DO_OPTIMIZER_STEP,
     TrainingStage.AFTER_OPTIMIZER_STEP,
 )
+
+
+_MULTIPLE_ORCHESTRATOR_MSG = (
+    "Only one TrainingUpdateOrchestrator is allowed; compose update hooks "
+    "with `+` before registration."
+)
+
+
+def _hook_claims_stage(hook: Any, stage: TrainingStage) -> bool:
+    """Return True if hook fires on stage (mirrors _registry._call_hooks dispatch)."""
+    runs_on_stage = getattr(hook, "_runs_on_stage", None)
+    if runs_on_stage is not None:
+        return runs_on_stage(stage)
+    return getattr(hook, "stage", None) == stage
+
+
+def _fold_training_update_hooks(
+    hooks: Sequence[Hook | TrainingUpdateHook | TrainingUpdateOrchestrator],
+) -> list[Hook | TrainingUpdateOrchestrator]:
+    """Fold TrainingUpdateHook/Orchestrator instances into a single orchestrator."""
+    others: list[Hook] = []
+    update_hooks: list[TrainingUpdateHook | TrainingUpdateOrchestrator] = []
+    orch_insertion_index: int | None = None
+    n_orch = 0
+    for h in hooks:
+        if isinstance(h, TrainingUpdateOrchestrator):
+            if orch_insertion_index is None:
+                orch_insertion_index = len(others)
+            update_hooks.append(h)
+            n_orch += 1
+        elif isinstance(h, TrainingUpdateHook):
+            update_hooks.append(h)
+        else:
+            others.append(h)
+    if not update_hooks:
+        return list(hooks)
+    if n_orch > 1:
+        raise ValueError(_MULTIPLE_ORCHESTRATOR_MSG)
+    folded = reduce(operator.add, update_hooks)
+    if not isinstance(folded, TrainingUpdateOrchestrator):
+        folded = TrainingUpdateOrchestrator(folded)
+    insert_at = (
+        orch_insertion_index if orch_insertion_index is not None else len(others)
+    )
+    result: list[Hook | TrainingUpdateOrchestrator] = list(others)
+    result.insert(insert_at, folded)
+    return result
 
 
 def _check_veto(decision: object, hook: object, stage: TrainingStage) -> None:
