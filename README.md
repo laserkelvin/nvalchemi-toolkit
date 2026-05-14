@@ -149,8 +149,8 @@ uv sync --extra cu13
 `uv sync --extra cu12` instead and pass the same extra to `uv run`, for example
 `uv run --extra cu12 pytest test/`. The Makefile does this automatically:
 `make test CUDA_EXTRA=cu12`. CUDA-aligned optional extras follow the same
-pattern, for example `uv sync --extra cu12 --extra mace-cu12` or
-`make test CUDA_EXTRA=cu12 OPTIONAL_EXTRAS=mace-cu12`. To include documentation
+pattern, for example `uv sync --extra cu12 --extra mace` or
+`make test CUDA_EXTRA=cu12 OPTIONAL_EXTRAS=mace`. To include documentation
 dependencies, add `--group docs`. Avoid `uv sync --all-extras`, because the
 CUDA variants are mutually exclusive.
 
@@ -164,15 +164,11 @@ pip install \
 pip install \
   --extra-index-url https://download.pytorch.org/whl/cu130 \
   --extra-index-url https://pypi.nvidia.com \
-  'nvalchemi-toolkit[mace]'               # MACE model support, default CUDA 13
-pip install \
-  --extra-index-url https://download.pytorch.org/whl/cu130 \
-  --extra-index-url https://pypi.nvidia.com \
-  'nvalchemi-toolkit[mace-cu13]'          # MACE model support, explicit CUDA 13
+  'nvalchemi-toolkit[cu13,mace]'          # MACE model support, CUDA 13
 pip install \
   --extra-index-url https://download.pytorch.org/whl/cu128 \
   --extra-index-url https://pypi.nvidia.com \
-  'nvalchemi-toolkit[mace-cu12]'          # MACE model support, CUDA 12
+  'nvalchemi-toolkit[cu12,mace]'          # MACE model support, CUDA 12
 ```
 
 See the [Installation Guide](docs/userguide/about/install.md) for
