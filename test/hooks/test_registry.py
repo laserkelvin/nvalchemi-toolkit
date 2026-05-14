@@ -192,6 +192,8 @@ class TestHookRegistryMixin:
 
         assert isinstance(ctx, HookContext)
         assert ctx.batch is mock_batch
+        assert ctx.global_rank == 0
+        assert ctx.workflow is engine
         assert not hasattr(ctx, "step_count")
 
     def test_build_context_includes_model_if_present(self):

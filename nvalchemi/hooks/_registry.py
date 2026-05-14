@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from torch import distributed as dist
+
 from nvalchemi.data import Batch
 from nvalchemi.hooks._context import HookContext
 from nvalchemi.hooks._protocol import Hook
@@ -136,7 +138,16 @@ class HookRegistryMixin:
         HookContext
             Context object for hooks.
         """
-        return HookContext(batch=batch, model=getattr(self, "model", None))
+        if dist.is_available() and dist.is_initialized():
+            global_rank = dist.get_rank()
+        else:
+            global_rank = 0
+        return HookContext(
+            batch=batch,
+            model=getattr(self, "model", None),
+            global_rank=global_rank,
+            workflow=self,
+        )
 
     def _call_hooks(self, stage: Enum, batch: Batch) -> None:
         """Call hooks registered for the given stage, gated by frequency.

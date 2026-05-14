@@ -99,7 +99,7 @@ class TrainContext(HookContext):
     epoch: int = 0
     loss: torch.Tensor | None = None
     losses: dict[str, torch.Tensor] | None = None
-    models: dict[str, BaseModelMixin] | ModuleDict[str, BaseModelMixin] | None = None
+    models: dict[str, BaseModelMixin] | ModuleDict | None = None
     optimizers: list[torch.optim.Optimizer] | None = None
     lr_schedulers: list[object] | None = None
     gradients: dict[str, torch.Tensor] | None = None
