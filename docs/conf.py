@@ -69,6 +69,7 @@ extensions = [
     "sphinx.ext.viewcode",
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
+    "sphinx_multiversion",
     "sphinx_favicon",
     "myst_parser",
     "sphinx_design",
@@ -175,3 +176,12 @@ sphinx_gallery_conf = {
 
 # mapping for other packages
 intersphinx_mapping = {"torch": ("https://pytorch.org/docs/stable/", None)}
+
+# -- Versioned documentation -------------------------------------------------
+# Build the development docs from main and immutable release docs from v* tags.
+smv_branch_whitelist = r"^main$"
+smv_remote_whitelist = r"^origin$"
+smv_tag_whitelist = r"^v\d+\.\d+\.\d+.*$"
+smv_released_pattern = r"^refs/tags/v.*$"
+smv_outputdir_format = "{ref.name}"
+smv_prefer_remote_refs = True

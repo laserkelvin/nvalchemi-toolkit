@@ -171,10 +171,15 @@ docs-install-examples:  ## Install example dependencies
 docs: docs-install-examples  ## Build documentation
 	cd docs && make html
 
+.PHONY: docs-versioned
+docs-versioned: docs-install-examples  ## Build versioned documentation site
+	uv run --group docs python docs/build_versioned.py
+
 .PHONY: docs-clean
 docs-clean:  ## Clean documentation build
 	cd docs && make clean
 	rm -rf docs/examples/
+	rm -rf docs/_build/site
 
 
 .PHONY: docs-rebuild
