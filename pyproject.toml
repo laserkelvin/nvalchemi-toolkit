@@ -66,14 +66,12 @@ ase = [
 cu12 = [
     "nvidia-physicsnemo[cu12]>=2.0.0; sys_platform != 'darwin'",
     "cuml-cu12>=25.6.0; sys_platform != 'darwin'",
-    "torch==2.11.0+cu128; sys_platform != 'darwin'",
-    "torchvision==0.26.0+cu128; sys_platform != 'darwin'",
+    "torch; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu12>=0.8.0; sys_platform != 'darwin'",
 ]
 cu13 = [
     "nvidia-physicsnemo[cu13]>=2.0.0; sys_platform != 'darwin'",
-    "torch==2.12.0+cu130; sys_platform != 'darwin'",
-    "torchvision==0.27.0+cu130; sys_platform != 'darwin'",
+    "torch; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu13>=0.8.0; sys_platform != 'darwin'",
 ]
 pymatgen = [
@@ -106,11 +104,7 @@ override-dependencies = [
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cu128", extra = "cu12" },
-  { index = "pytorch-cu130", extra = "cu13" },
-]
-torchvision = [
-  { index = "pytorch-cu128", extra = "cu12" },
-  { index = "pytorch-cu130", extra = "cu13" },
+  { index = "pytorch-cu132", extra = "cu13" },
 ]
 
 # these are intended to be developer facing
@@ -170,8 +164,8 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.ruff]
