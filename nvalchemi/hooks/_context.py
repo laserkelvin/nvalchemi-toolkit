@@ -85,8 +85,13 @@ class TrainContext(HookContext):
         Aggregate loss for the current step.
     losses : dict[str, torch.Tensor] | None
         Named loss components for the current step.
-    models : dict[str, BaseModelMixin] | ModuleDict[str, BaseModelMixin] | None
-        Models participating in the training step.
+    models : dict[str, BaseModelMixin] | ModuleDict | None
+        Models participating in the training step; this differs
+        from the ``model`` attribute which is intended to
+        represent a 'main' model in multi-model workflows. The
+        key/model mapping should be semantic, e.g. 'student' and
+        'teacher' in distillation workflows, with 'student' being
+        the intended 'main' model.
     optimizers : list[torch.optim.Optimizer] | None
         Optimizers participating in the training step.
     lr_schedulers : list[object] | None
