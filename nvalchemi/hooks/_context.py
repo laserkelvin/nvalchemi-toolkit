@@ -20,13 +20,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from torch.nn import ModuleDict
 
 if TYPE_CHECKING:
     from nvalchemi.data.batch import Batch
     from nvalchemi.models.base import BaseModelMixin
 
 
-@dataclass
+@dataclass(init=False)
 class HookContext:
     """Context object passed to hooks at each stage.
 
@@ -59,13 +60,24 @@ class HookContext:
     """
 
     batch: Batch
-    step_count: int
     model: BaseModelMixin | None = None
-    loss: torch.Tensor | None = None
-    optimizer: torch.optim.Optimizer | None = None
-    lr_scheduler: object | None = None
-    gradients: dict[str, torch.Tensor] | None = None
-    converged_mask: torch.Tensor | None = None
-    epoch: int | None = None
     global_rank: int = 0
     workflow: Any = None
+
+
+@dataclass(init=False)
+class DynamicsContext(HookContext):
+    step_count: int = 0
+    converged_mask: torch.Tensor | None = None
+
+
+@dataclass(init=False)
+class TrainContext(HookContext):
+    step_count: int = 0
+    epoch: int = 0
+    loss: torch.Tensor | None = None
+    losses: dict[str, torch.Tensor] | None = None
+    models: dict[str, BaseModelMixin] | ModuleDict[str, BaseModelMixin] | None = None
+    optimizers: list[torch.optim.Optimizer] | None = None
+    lr_schedulers: list[object] | None = None
+    gradients: dict[str, torch.Tensor] | None = None
