@@ -160,7 +160,7 @@ Optional extras:
 pip install \
   --extra-index-url https://download.pytorch.org/whl/cu128 \
   --extra-index-url https://pypi.nvidia.com \
-  'nvalchemi-toolkit[cu12]'               # PhysicsNeMo CUDA 12 support
+  'nvalchemi-toolkit[cu12]'               # Specify CUDA 12 version
 pip install \
   --extra-index-url https://download.pytorch.org/whl/cu130 \
   --extra-index-url https://pypi.nvidia.com \
