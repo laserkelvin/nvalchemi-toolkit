@@ -3673,7 +3673,7 @@ requires-dist = [
     { name = "pymatgen", marker = "extra == 'pymatgen'", specifier = ">=2025.10.7" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "tensordict", specifier = ">=0.11.0" },
-    { name = "torch", specifier = ">=2.5.1" },
+    { name = "torch", specifier = ">=2.8" },
     { name = "torch", marker = "sys_platform != 'darwin' and extra == 'cu12'", specifier = "==2.11.0+cu128", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "nvalchemi-toolkit", extra = "cu12" } },
     { name = "torch", marker = "sys_platform != 'darwin' and extra == 'cu13'", specifier = "==2.12.0+cu130", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "nvalchemi-toolkit", extra = "cu13" } },
     { name = "torchvision", marker = "sys_platform != 'darwin' and extra == 'cu12'", specifier = "==0.26.0+cu128", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "nvalchemi-toolkit", extra = "cu12" } },
