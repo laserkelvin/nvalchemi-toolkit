@@ -34,8 +34,9 @@ from nvalchemi.dynamics.hooks import (
     SnapshotHook,
 )
 from nvalchemi.dynamics.sinks import HostMemory
-from nvalchemi.hooks import DynamicsContext, Hook
+from nvalchemi.hooks import Hook
 from nvalchemi.models.demo import DemoModel, DemoModelWrapper
+from test.dynamics.conftest import make_dynamics_context
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,25 +76,7 @@ def _make_dynamics(device: str = "cpu") -> BaseDynamics:
     return BaseDynamics(model, device_type=device)
 
 
-def _make_ctx(
-    batch: Batch, dynamics: BaseDynamics, converged: torch.Tensor | None = None
-) -> DynamicsContext:
-    """Build a DynamicsContext from a batch and dynamics instance."""
-    raw = converged if converged is not None else dynamics._last_converged
-    if raw is not None:
-        mask = torch.zeros(
-            batch.num_graphs, dtype=torch.bool, device=batch.positions.device
-        )
-        mask[raw] = True
-    else:
-        mask = None
-    return DynamicsContext(
-        batch=batch,
-        step_count=dynamics.step_count,
-        model=dynamics.model,
-        converged_mask=mask,
-        global_rank=dynamics.global_rank,
-    )
+_make_ctx = make_dynamics_context
 
 
 # ---------------------------------------------------------------------------
