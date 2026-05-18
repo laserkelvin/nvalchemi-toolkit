@@ -26,6 +26,7 @@ import torch
 from nvalchemi._serialization import _extract_init_kwargs_from_attrs
 from nvalchemi.models.base import BaseModelMixin
 from nvalchemi.training._spec import (
+    BaseSpec,
     create_model_spec,
     create_model_spec_from_json,
 )
@@ -110,9 +111,14 @@ def _model_specs_from_models(
     specs: dict[str, dict[str, Any]] = {}
     for key, model in models.items():
         try:
-            specs[key] = create_model_spec(
-                type(model), **_extract_init_kwargs_from_attrs(model)
-            ).model_dump()
+            spec = _module_spec_from_attrs(model)
+            rebuilt = create_model_spec_from_json(spec.model_dump()).build()
+            if not isinstance(rebuilt, BaseModelMixin):
+                raise TypeError(
+                    f"rebuilt {type(rebuilt).__name__}, expected BaseModelMixin"
+                )
+            rebuilt.to(torch.device("cpu"))
+            specs[key] = spec.model_dump()
         except (TypeError, ValueError, AttributeError) as exc:
             warnings.warn(
                 f"Omitting model spec for {key!r}: {exc}",
@@ -120,6 +126,15 @@ def _model_specs_from_models(
                 stacklevel=2,
             )
     return specs
+
+
+def _module_spec_from_attrs(module: torch.nn.Module) -> BaseSpec:
+    """Build a recursive spec from constructor-matching module attributes."""
+    kwargs = _extract_init_kwargs_from_attrs(module)
+    for name, value in list(kwargs.items()):
+        if isinstance(value, torch.nn.Module):
+            kwargs[name] = _module_spec_from_attrs(value)
+    return create_model_spec(type(module), **kwargs)
 
 
 def _models_from_spec_dict(

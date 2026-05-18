@@ -614,6 +614,15 @@ class TestTrainingStrategySpecRoundTrip:
         restored._train_one_batch(_make_batch(), [], [])
         assert seen_args == [restored.models["main"]]
 
+    def test_model_spec_roundtrip_restores_runnable_demo_model(self) -> None:
+        strategy = _make_strategy(training_fn=default_training_fn)
+        restored = TrainingStrategy.from_spec_dict(strategy.to_spec_dict(), hooks=[])
+
+        assert restored.models["main"] is not strategy.models["main"]
+        restored.run([_make_batch()])
+
+        assert restored.step_count == 1
+
     def test_runtime_model_override_merges_over_spec_models(self) -> None:
         torch.manual_seed(0)
         spec = _make_strategy(
