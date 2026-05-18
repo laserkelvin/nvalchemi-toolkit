@@ -219,7 +219,7 @@ class OptimizerConfig(BaseModel):
 
 
 def setup_optimizers(
-    models: torch.nn.Module | dict[str, torch.nn.Module],
+    models: torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict,
     optimizer_configs: OptimizerConfig
     | list[OptimizerConfig]
     | dict[str, list[OptimizerConfig]],
@@ -228,7 +228,7 @@ def setup_optimizers(
 
     Parameters
     ----------
-    models : torch.nn.Module | dict[str, torch.nn.Module]
+    models : torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict
     optimizer_configs : OptimizerConfig | list[OptimizerConfig] | dict[str, list[OptimizerConfig]]
 
     Returns
@@ -241,9 +241,10 @@ def setup_optimizers(
         If a config key is not present in ``models`` or a configured model has
         no trainable parameters.
     """
-    named_models = {"main": models} if not isinstance(models, dict) else models
+    named_model_input = isinstance(models, (dict, torch.nn.ModuleDict))
+    named_models = dict(models.items()) if named_model_input else {"main": models}
     configs = _normalize_optimizer_configs(
-        optimizer_configs, single_model_input=not isinstance(models, dict)
+        optimizer_configs, single_model_input=not named_model_input
     )
     result: dict[str, list[OptSchedPair]] = {}
     for key, cfgs in configs.items():
