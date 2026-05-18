@@ -40,6 +40,20 @@ from nvalchemi.training.losses import (
     LossWeightSchedule,
     PiecewiseWeight,
     StressLoss,
+    loss_component_to_spec,
+)
+from nvalchemi.training.optimizers import (
+    OptimizerConfig,
+    setup_optimizers,
+    step_lr_schedulers,
+    step_optimizers,
+    zero_gradients,
+)
+from nvalchemi.training.runtime import (
+    configure_dataloader,
+    configure_parallelism,
+    freeze_unconfigured_models,
+    move_to_devices,
 )
 
 __all__ = [
@@ -54,12 +68,22 @@ __all__ = [
     "ForceLoss",
     "LinearWeight",
     "LossWeightSchedule",
+    "OptimizerConfig",
     "PiecewiseWeight",
     "StressLoss",
     "TrainingStage",
+    "configure_dataloader",
+    "configure_parallelism",
     "create_model_spec",
     "create_model_spec_from_json",
+    "freeze_unconfigured_models",
+    "loss_component_to_spec",
     "load_checkpoint",
+    "move_to_devices",
     "register_type_serializer",
     "save_checkpoint",
+    "setup_optimizers",
+    "step_lr_schedulers",
+    "step_optimizers",
+    "zero_gradients",
 ]
