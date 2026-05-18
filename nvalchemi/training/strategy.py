@@ -14,12 +14,13 @@
 # limitations under the License.
 """Training strategy lifecycle and default forward-pass helper.
 
-``TrainingStrategy`` wires one named model (``"main"``) or a dictionary of
-named models through a user-supplied ``training_fn``. Single-model strategies
-call ``training_fn(model, batch)``; dictionary strategies call
-``training_fn(models, batch)`` for distillation or multi-model workflows.
+``TrainingStrategy`` wires one named model (``"main"``) or a dictionary-like
+collection of named models through a user-supplied ``training_fn``.
+Single-model strategies call ``training_fn(model, batch)``; named-model
+strategies call ``training_fn(models, batch)`` for distillation or multi-model
+workflows.
 Models omitted from optimizer configs are temporarily set to eval mode and
-frozen during ``run``. Dict-mode training functions that use omitted models as
+frozen during ``run``. Named-model training functions that use omitted models as
 teacher/auxiliary networks must run those forward passes under
 ``torch.no_grad()`` or detach returned tensors unless autograd through those
 outputs is intentionally required.
@@ -36,7 +37,7 @@ import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any, TypeAlias
 
 import torch
 from pydantic import (
@@ -80,6 +81,8 @@ if TYPE_CHECKING:
 
 __all__ = ["TrainingStrategy", "default_training_fn"]
 
+OptimizerConfigList: TypeAlias = Annotated[list[OptimizerConfig], Field(min_length=1)]
+
 
 def default_training_fn(model: BaseModelMixin, batch: Batch) -> dict[str, torch.Tensor]:
     """Run a forward pass and prefix output keys with ``predicted_``.
@@ -110,7 +113,8 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     ----------
     models : dict[str, BaseModelMixin]
         Named models visible to ``training_fn`` and hooks. Single-model inputs
-        are stored under ``"main"``.
+        are stored under ``"main"``; :class:`torch.nn.ModuleDict` inputs are
+        accepted and normalized to a plain ``dict``.
     optimizer_configs : dict[str, list[OptimizerConfig]]
         Optimizer/scheduler configs keyed by model name. Keys may target a
         subset of ``models``; omitted models are frozen/eval during ``run``.
@@ -125,13 +129,13 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         manager has been entered.
     training_fn : Callable[..., Mapping[str, torch.Tensor]]
         Explicit forward-pass callable. Single-model strategies call
-        ``(model, batch)``; dict-model strategies call ``(models, batch)``.
+        ``(model, batch)``; named-model strategies call ``(models, batch)``.
     loss_fn : ComposedLossFunction
         Composed loss whose components drive target collection. Leaf losses are
         accepted and normalized to one-component composed losses.
     devices : list[torch.device]
         One device shared by all models, or one device per model for helper
-        placement. Dict-mode ``run`` currently supports one device only.
+        placement. Named-model ``run`` currently supports one device only.
     step_count : int
         Runtime batch counter, excluded from specs.
     epoch : int
@@ -146,14 +150,16 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     ``hooks`` and ``step_count`` remain runtime-only.
     """
 
-    models: dict[str, BaseModelMixin]
-    optimizer_configs: dict[str, list[OptimizerConfig]] = Field(default_factory=dict)
-    num_epochs: int | None = None
-    num_steps: int | None = None
+    models: dict[str, BaseModelMixin] = Field(min_length=1)
+    optimizer_configs: dict[str, OptimizerConfigList] = Field(default_factory=dict)
+    num_epochs: int | None = Field(default=None, ge=1)
+    num_steps: int | None = Field(default=None, ge=1)
     hooks: list[Hook] = Field(default_factory=list)
     training_fn: Callable[..., Mapping[str, torch.Tensor]] | None = None
     loss_fn: ComposedLossFunction
-    devices: list[torch.device] = Field(default_factory=lambda: [torch.device("cpu")])
+    devices: list[torch.device] = Field(
+        default_factory=lambda: [torch.device("cpu")], min_length=1
+    )
     step_count: int = Field(default=0, exclude=True)
     epoch: int = Field(default=0, exclude=True)
     single_model_input: bool = Field(default=False, exclude=True)
@@ -221,10 +227,6 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     @model_validator(mode="after")
     def _validate_strategy(self) -> TrainingStrategy:
         """Enforce model, duration, optimizer, and device consistency."""
-        if len(self.models) == 0:
-            raise ValueError(
-                "models must contain at least one BaseModelMixin; got an empty dict."
-            )
         have_epochs = self.num_epochs is not None
         have_steps = self.num_steps is not None
         if have_epochs == have_steps:
@@ -232,20 +234,6 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
                 "Exactly one of num_epochs or num_steps must be set; "
                 f"got num_epochs={self.num_epochs!r}, num_steps={self.num_steps!r}."
             )
-        for value, name in (
-            (self.num_epochs, "num_epochs"),
-            (self.num_steps, "num_steps"),
-        ):
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be positive; got {value!r}.")
-        for idx, cfgs in self.optimizer_configs.items():
-            if not cfgs:
-                raise ValueError(
-                    f"optimizer_configs[{idx}] must contain at least one "
-                    "OptimizerConfig; got an empty list. Pass "
-                    "[OptimizerConfig(...)] or omit the model if it is "
-                    "intentionally frozen."
-                )
         for idx in self.optimizer_configs:
             if idx not in self.models:
                 raise ValueError(
@@ -462,13 +450,13 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         Raises
         ------
         ValueError
-            If dict-mode training is configured with multiple devices, or if
+            If named-model training is configured with multiple devices, or if
             ``num_steps`` is set and the dataloader produces no batches before
             ``num_steps`` is reached.
         """
         if not self.single_model_input and len(self.devices) > 1:
             raise ValueError(
-                "Dict-model training with multiple devices is unsupported: "
+                "Named-model training with multiple devices is unsupported: "
                 "training_fn(models, batch) receives one batch on one device. "
                 "Use a single shared device or pass models=model for "
                 "single-model behavior."
@@ -573,7 +561,7 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         ----------
         spec : Mapping[str, Any]
             A dict produced by :meth:`to_spec_dict`, optionally after a JSON round-trip.
-        models : BaseModelMixin | dict[str, BaseModelMixin] | None, optional
+        models : BaseModelMixin | dict[str, BaseModelMixin] | torch.nn.ModuleDict | None, optional
             Runtime model override(s).
         hooks : Sequence[Hook] | None, optional
             Runtime hooks; defaults to an empty list.

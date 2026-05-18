@@ -17,13 +17,13 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 import warnings
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
 
+from nvalchemi._serialization import _extract_init_kwargs_from_attrs
 from nvalchemi.models.base import BaseModelMixin
 from nvalchemi.training._spec import (
     create_model_spec,
@@ -103,21 +103,6 @@ def _callable_dotted_path(fn: Callable[..., Any]) -> str:
     return f"{module}.{qualname}"
 
 
-def _extract_module_init_kwargs(module: torch.nn.Module) -> dict[str, Any]:
-    """Extract constructor kwargs from ``module`` by signature introspection."""
-    sig = inspect.signature(type(module).__init__)
-    kwargs: dict[str, Any] = {}
-    for name, param in sig.parameters.items():
-        if name == "self" or param.kind in {
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        }:
-            continue
-        if hasattr(module, name):
-            kwargs[name] = getattr(module, name)
-    return kwargs
-
-
 def _model_specs_from_models(
     models: dict[str, BaseModelMixin],
 ) -> dict[str, dict[str, Any]]:
@@ -126,7 +111,7 @@ def _model_specs_from_models(
     for key, model in models.items():
         try:
             specs[key] = create_model_spec(
-                type(model), **_extract_module_init_kwargs(model)
+                type(model), **_extract_init_kwargs_from_attrs(model)
             ).model_dump()
         except (TypeError, ValueError, AttributeError) as exc:
             warnings.warn(

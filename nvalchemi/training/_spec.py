@@ -56,6 +56,7 @@ from nvalchemi._serialization import (
     _TYPE_SERIALIZERS,
     SerializableTaggedClass,
     _cls_path_of,
+    _constructor_signature,
     _deserialize_tagged_type,
     _import_cls,
     _is_serializable_class_annotation,
@@ -91,7 +92,7 @@ def _ensure_importable(cls_path: str) -> str:
 
 def _signature(cls_: type) -> inspect.Signature:
     """Return the (string-annotation-resolved) signature of ``cls_.__init__``."""
-    return inspect.signature(cls_, eval_str=True)
+    return _constructor_signature(cls_)
 
 
 def _check_no_positional_only(cls_: type) -> None:

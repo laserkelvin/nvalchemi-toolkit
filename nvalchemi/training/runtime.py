@@ -33,14 +33,14 @@ __all__ = [
 
 @contextmanager
 def freeze_unconfigured_models(
-    models: dict[str, torch.nn.Module],
+    models: dict[str, torch.nn.Module] | torch.nn.ModuleDict,
     optimizer_configs: Mapping[str, object],
 ) -> Iterator[None]:
     """Temporarily eval/freeze models omitted from optimizer configs.
 
     Parameters
     ----------
-    models : dict[str, torch.nn.Module]
+    models : dict[str, torch.nn.Module] | torch.nn.ModuleDict
         Named models participating in a training run.
     optimizer_configs : Mapping[str, object]
         Optimizer configuration keyed by model name. Models absent from this
@@ -74,16 +74,16 @@ def freeze_unconfigured_models(
 
 
 def move_to_devices(
-    models: torch.nn.Module | dict[str, torch.nn.Module],
+    models: torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict,
     devices: Sequence[torch.device],
     *,
     non_blocking: bool = False,
-) -> torch.nn.Module | dict[str, torch.nn.Module]:
+) -> torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict:
     """Move one model or named models to device(s), preserving input shape.
 
     Parameters
     ----------
-    models : torch.nn.Module | dict[str, torch.nn.Module]
+    models : torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict
         Single module or named modules. Named modules are assigned devices in
         insertion order.
     devices : Sequence[torch.device]
@@ -94,7 +94,7 @@ def move_to_devices(
 
     Returns
     -------
-    torch.nn.Module | dict[str, torch.nn.Module]
+    torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict
         The same input shape after in-place ``.to(...)`` calls.
 
     Raises
@@ -102,7 +102,7 @@ def move_to_devices(
     ValueError
         If ``devices`` has length other than ``1`` or the number of models.
     """
-    if isinstance(models, dict):
+    if isinstance(models, (dict, torch.nn.ModuleDict)):
         if len(devices) not in (1, len(models)):
             raise ValueError(
                 f"devices must have length 1 or len(models)={len(models)}; "
@@ -171,20 +171,20 @@ def configure_dataloader(
 
 
 def configure_parallelism(
-    models: torch.nn.Module | dict[str, torch.nn.Module],
+    models: torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict,
     *,
     strategy: str = "none",
-) -> torch.nn.Module | dict[str, torch.nn.Module]:
+) -> torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict:
     """Configure model parallelism, preserving input shape.
 
     Parameters
     ----------
-    models : torch.nn.Module | dict[str, torch.nn.Module]
+    models : torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict
     strategy : str, optional
 
     Returns
     -------
-    torch.nn.Module | dict[str, torch.nn.Module]
+    torch.nn.Module | dict[str, torch.nn.Module] | torch.nn.ModuleDict
 
     Raises
     ------

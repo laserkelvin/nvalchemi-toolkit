@@ -85,14 +85,14 @@ def _normalize_optimizer_configs(
         if not single_model_input and value is not None:
             raise ValueError(
                 "Unkeyed optimizer_configs require single-model input; pass "
-                "{'model_name': [OptimizerConfig(...)]} for dict models."
+                "{'model_name': [OptimizerConfig(...)]} for named models."
             )
         return {"main": [value]}
     if isinstance(value, list):
         if not single_model_input:
             raise ValueError(
                 "Unkeyed optimizer_configs require single-model input; pass "
-                "{'model_name': [...]} for dict models."
+                "{'model_name': [...]} for named models."
             )
         return {"main": value}
     if isinstance(value, dict):

@@ -177,12 +177,16 @@ class _RecordingHook:
 
 _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
     (
-        "models must contain",
+        "at least 1",
         {"models": {}, "optimizer_configs": {}},
     ),
     (
-        r"optimizer_configs\[main\] must contain",
+        "at least 1",
         {"optimizer_configs": {"main": []}},
+    ),
+    (
+        "models must map names",
+        {"models": {"main": torch.nn.Linear(1, 1)}, "optimizer_configs": {}},
     ),
     (
         "not present in models",
@@ -197,6 +201,10 @@ _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
         {"devices": [torch.device("cpu"), torch.device("cpu")]},
     ),
     (
+        "at least 1",
+        {"devices": []},
+    ),
+    (
         "Exactly one of num_epochs or num_steps",
         {"num_epochs": 1, "num_steps": 1},
     ),
@@ -204,7 +212,8 @@ _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
         "Exactly one of num_epochs or num_steps",
         {"num_epochs": None, "num_steps": None},
     ),
-    ("num_epochs must be positive", {"num_epochs": -1}),
+    ("greater than or equal to 1", {"num_epochs": -1}),
+    ("greater than or equal to 1", {"num_steps": -1, "num_epochs": None}),
     (
         "no attribute",
         {"training_fn": "nvalchemi.training.strategy.not_a_real_fn"},
@@ -219,11 +228,14 @@ class TestTrainingStrategyValidators:
         ids=[
             "empty_models",
             "empty_per_model_list",
+            "invalid_model_value",
             "optimizer_key_missing",
             "devices_wrong_length",
+            "devices_empty",
             "both_num_epochs_and_num_steps",
             "neither_num_epochs_nor_num_steps",
             "negative_num_epochs",
+            "negative_num_steps",
             "training_fn_bad_dotted_path",
         ],
     )
@@ -304,9 +316,24 @@ class TestTrainingStrategyRun:
             devices=[torch.device("cpu"), torch.device("cpu")],
         )
         with pytest.raises(
-            ValueError, match="Dict-model training with multiple devices"
+            ValueError, match="Named-model training with multiple devices"
         ):
             strategy.run([_make_batch()])
+
+    def test_moduledict_models_are_accepted_as_named_models(self) -> None:
+        strategy = _make_strategy(
+            models=torch.nn.ModuleDict(
+                {"student": _make_demo_model(), "teacher": _make_demo_model()}
+            ),
+            optimizer_configs={
+                "student": [OptimizerConfig(optimizer_cls=torch.optim.Adam)]
+            },
+            training_fn=dict_demo_training_fn,
+        )
+        assert isinstance(strategy.models, dict)
+        assert set(strategy.models) == {"student", "teacher"}
+        strategy.run([_make_batch()])
+        assert strategy.step_count == 1
 
     def test_omitted_model_is_temporarily_frozen_and_eval(self) -> None:
         teacher = _make_demo_model()
