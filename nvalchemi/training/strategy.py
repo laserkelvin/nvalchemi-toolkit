@@ -37,7 +37,7 @@ import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from types import TracebackType
-from typing import TYPE_CHECKING, Annotated, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import torch
 from pydantic import (
@@ -80,8 +80,6 @@ if TYPE_CHECKING:
     from nvalchemi.data.batch import Batch
 
 __all__ = ["TrainingStrategy", "default_training_fn"]
-
-OptimizerConfigList: TypeAlias = Annotated[list[OptimizerConfig], Field(min_length=1)]
 
 
 def _loss_weight_to_spec(weight: Any) -> Any:
@@ -158,16 +156,14 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     is supplied. ``hooks`` and ``step_count`` remain runtime-only.
     """
 
-    models: dict[str, BaseModelMixin] = Field(min_length=1)
-    optimizer_configs: dict[str, OptimizerConfigList] = Field(default_factory=dict)
+    models: dict[str, BaseModelMixin]
+    optimizer_configs: dict[str, list[OptimizerConfig]] = Field(default_factory=dict)
     num_epochs: int | None = Field(default=None, ge=1)
     num_steps: int | None = Field(default=None, ge=1)
     hooks: list[Hook] = Field(default_factory=list)
     training_fn: Callable[..., Mapping[str, torch.Tensor]] | None = None
     loss_fn: ComposedLossFunction
-    devices: list[torch.device] = Field(
-        default_factory=lambda: [torch.device("cpu")], min_length=1
-    )
+    devices: list[torch.device] = Field(default_factory=lambda: [torch.device("cpu")])
     step_count: int = Field(default=0, exclude=True)
     epoch: int = Field(default=0, exclude=True)
     single_model_input: bool = Field(default=False, exclude=True)
@@ -242,17 +238,26 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
                 "Exactly one of num_epochs or num_steps must be set; "
                 f"got num_epochs={self.num_epochs!r}, num_steps={self.num_steps!r}."
             )
+        if not self.models:
+            raise ValueError("models must contain at least one BaseModelMixin.")
         if not self.optimizer_configs:
             raise ValueError(
                 "optimizer_configs must configure at least one model; "
                 "got an empty mapping."
             )
-        for idx in self.optimizer_configs:
+        for idx, cfgs in self.optimizer_configs.items():
             if idx not in self.models:
                 raise ValueError(
                     f"optimizer_configs key {idx!r} is not present in models; "
                     f"available model keys: {sorted(self.models)}."
                 )
+            if not cfgs:
+                raise ValueError(
+                    f"optimizer_configs[{idx!r}] must contain at least one "
+                    "OptimizerConfig."
+                )
+        if not self.devices:
+            raise ValueError("devices must contain at least one torch.device.")
         n_devices = len(self.devices)
         if n_devices not in (1, len(self.models)):
             raise ValueError(

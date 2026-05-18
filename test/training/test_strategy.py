@@ -185,7 +185,7 @@ class _RecordingHook:
 
 _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
     (
-        "at least 1",
+        "models must contain at least one BaseModelMixin",
         {"models": {}, "optimizer_configs": {}},
     ),
     (
@@ -193,7 +193,7 @@ _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
         {"optimizer_configs": {}},
     ),
     (
-        "at least 1",
+        r"optimizer_configs\['main'\] must contain",
         {"optimizer_configs": {"main": []}},
     ),
     (
@@ -213,7 +213,7 @@ _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
         {"devices": [torch.device("cpu"), torch.device("cpu")]},
     ),
     (
-        "at least 1",
+        "devices must contain at least one torch.device",
         {"devices": []},
     ),
     (
