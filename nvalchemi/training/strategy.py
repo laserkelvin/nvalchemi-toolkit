@@ -84,6 +84,13 @@ __all__ = ["TrainingStrategy", "default_training_fn"]
 OptimizerConfigList: TypeAlias = Annotated[list[OptimizerConfig], Field(min_length=1)]
 
 
+def _loss_weight_to_spec(weight: Any) -> Any:
+    """Serialize a composed-loss weight schedule while leaving scalars unchanged."""
+    if hasattr(weight, "model_dump"):
+        return create_model_spec(type(weight), **weight.model_dump())
+    return weight
+
+
 def default_training_fn(model: BaseModelMixin, batch: Batch) -> dict[str, torch.Tensor]:
     """Run a forward pass and prefix output keys with ``predicted_``.
 
@@ -524,7 +531,12 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         component_specs = [
             loss_component_to_spec(comp) for comp in self.loss_fn.components
         ]
-        loss_fn_spec = create_model_spec(type(self.loss_fn), components=component_specs)
+        loss_fn_spec = create_model_spec(
+            type(self.loss_fn),
+            components=component_specs,
+            weights=[_loss_weight_to_spec(weight) for weight in self.loss_fn._weights],
+            normalize_weights=self.loss_fn.normalize_weights,
+        )
         spec = {
             "optimizer_configs": {
                 key: [cfg.to_spec().model_dump() for cfg in cfgs]

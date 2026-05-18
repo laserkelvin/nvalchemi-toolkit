@@ -32,6 +32,7 @@ from nvalchemi.training import (
     ComposedLossFunction,
     EnergyLoss,
     ForceLoss,
+    LinearWeight,
     TrainingStage,
 )
 from nvalchemi.training.optimizers import OptimizerConfig
@@ -578,6 +579,30 @@ class TestTrainingStrategySpecRoundTrip:
         assert isinstance(leaves[1], ForceLoss)
         assert leaves[0].per_atom is True
         assert leaves[1].normalize_by_atom_count is False
+
+    def test_roundtrip_preserves_loss_weights_and_normalization(self) -> None:
+        loss_fn = ComposedLossFunction(
+            [
+                EnergyLoss(),
+                ForceLoss(normalize_by_atom_count=False),
+            ],
+            weights=[0.25, LinearWeight(start=0.1, end=0.5, num_steps=10)],
+            normalize_weights=False,
+        )
+        strategy = _make_strategy(loss_fn=loss_fn)
+
+        spec = json.loads(json.dumps(strategy.to_spec_dict()))
+        restored = TrainingStrategy.from_spec_dict(
+            spec, models=_make_demo_model(), hooks=[]
+        )
+
+        assert restored.loss_fn.normalize_weights is False
+        assert restored.loss_fn._weights[0] == pytest.approx(0.25)
+        assert isinstance(restored.loss_fn._weights[1], LinearWeight)
+        schedule = restored.loss_fn._weights[1]
+        assert schedule.start == pytest.approx(0.1)
+        assert schedule.end == pytest.approx(0.5)
+        assert schedule.num_steps == 10
 
     def test_missing_optimizer_configs_key_raises(self) -> None:
         torch.manual_seed(0)
