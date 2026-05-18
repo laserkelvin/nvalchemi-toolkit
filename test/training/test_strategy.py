@@ -69,6 +69,13 @@ def mapping_annotated_training_fn(
     return demo_training_fn(models["main"], batch)
 
 
+def moduledict_annotated_training_fn(
+    models: torch.nn.ModuleDict, batch: Batch
+) -> dict[str, torch.Tensor]:
+    """ModuleDict-annotated training function for validation tests."""
+    return demo_training_fn(models["main"], batch)
+
+
 def single_model_training_fn(
     model: BaseModelMixin, batch: Batch
 ) -> dict[str, torch.Tensor]:
@@ -225,6 +232,19 @@ _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
     ),
 ]
 
+_DELETE = object()
+
+_FROM_SPEC_REJECTION_CASES: list[tuple[str, Any, str]] = [
+    ("optimizer_configs", [], "optimizer_configs"),
+    ("optimizer_configs", {"main": [1]}, "optimizer_configs"),
+    ("devices", "cpu", "devices"),
+    ("loss_fn_spec", [], "loss_fn_spec"),
+    ("model_specs", [], "model_specs"),
+    ("training_fn", _DELETE, "no training_fn"),
+    ("training_fn", 123, "training_fn"),
+    ("single_model_input", "yes", "single_model_input"),
+]
+
 
 class TestTrainingStrategyValidators:
     @pytest.mark.parametrize(
@@ -270,6 +290,10 @@ class TestTrainingStrategyValidators:
     def test_single_model_rejects_mapping_annotation(self) -> None:
         with pytest.raises(ValueError, match="single-model"):
             _make_strategy(training_fn=mapping_annotated_training_fn)
+
+    def test_single_model_rejects_moduledict_annotation(self) -> None:
+        with pytest.raises(ValueError, match="single-model"):
+            _make_strategy(training_fn=moduledict_annotated_training_fn)
 
     def test_dict_models_reject_single_model_annotation(self) -> None:
         with pytest.raises(ValueError, match="models=model"):
@@ -615,6 +639,32 @@ class TestTrainingStrategySpecRoundTrip:
         spec = _make_strategy().to_spec_dict()
         del spec["optimizer_configs"]
         with pytest.raises(ValueError, match="optimizer_configs"):
+            TrainingStrategy.from_spec_dict(spec, models=_make_demo_model(), hooks=[])
+
+    @pytest.mark.parametrize(
+        ("key", "value", "match"),
+        _FROM_SPEC_REJECTION_CASES,
+        ids=[
+            "optimizer_configs_not_mapping",
+            "optimizer_config_entries_not_specs",
+            "devices_not_list",
+            "loss_fn_spec_not_mapping",
+            "model_specs_not_mapping",
+            "missing_training_fn",
+            "training_fn_not_string",
+            "single_model_input_not_bool",
+        ],
+    )
+    def test_from_spec_rejects_malformed_fields(
+        self, key: str, value: Any, match: str
+    ) -> None:
+        spec = _make_strategy().to_spec_dict()
+        if value is _DELETE:
+            del spec[key]
+        else:
+            spec[key] = value
+
+        with pytest.raises(ValueError, match=match):
             TrainingStrategy.from_spec_dict(spec, models=_make_demo_model(), hooks=[])
 
     def test_integer_optimizer_key_migrates_to_main(self) -> None:
