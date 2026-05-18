@@ -251,6 +251,8 @@ def _training_fn_from_spec(
 def _models_from_spec_and_overrides(
     spec_models_raw: Any,
     runtime_models: ModelInput | None,
+    *,
+    single_model_input: bool | None = None,
 ) -> ModelInput:
     """Build spec models, apply runtime overrides, and preserve call mode."""
     if not isinstance(spec_models_raw, Mapping):
@@ -266,6 +268,24 @@ def _models_from_spec_and_overrides(
     # ``models={"main": model}`` means ``training_fn(models, batch)``.
     if isinstance(runtime_models, BaseModelMixin) and set(merged) == {"main"}:
         return merged["main"]
-    if runtime_models is None and set(merged) == {"main"}:
+    if runtime_models is not None:
+        return merged
+    if single_model_input is True and set(merged) == {"main"}:
+        return merged["main"]
+    if single_model_input is False:
+        return merged
+    if set(merged) == {"main"}:
         return merged["main"]
     return merged
+
+
+def _single_model_input_from_spec(raw: Any) -> bool | None:
+    """Return serialized call mode or ``None`` for legacy specs."""
+    if raw is None:
+        return None
+    if not isinstance(raw, bool):
+        raise ValueError(
+            "from_spec_dict: 'single_model_input' must be a bool when present; "
+            f"got {type(raw).__name__}."
+        )
+    return raw

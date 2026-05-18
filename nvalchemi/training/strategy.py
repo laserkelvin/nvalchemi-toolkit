@@ -154,7 +154,8 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     Optimizer configs, loss specs, devices, importable training functions, and
     best-effort model specs are serialized. Runtime ``models`` and
     ``training_fn`` overrides passed to :meth:`from_spec_dict` take precedence;
-    ``hooks`` and ``step_count`` remain runtime-only.
+    the serialized model call mode is used only when no runtime model override
+    is supplied. ``hooks`` and ``step_count`` remain runtime-only.
     """
 
     models: dict[str, BaseModelMixin] = Field(min_length=1)
@@ -547,6 +548,7 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             "devices": [str(device) for device in self.devices],
             "loss_fn_spec": loss_fn_spec.model_dump(),
             "model_specs": strategy_spec._model_specs_from_models(self.models),
+            "single_model_input": self.single_model_input,
         }
         try:
             spec["training_fn"] = strategy_spec._callable_dotted_path(self.training_fn)
@@ -593,7 +595,11 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
                 f"Expected keys: {list(required)}."
             )
         model_input = strategy_spec._models_from_spec_and_overrides(
-            spec.get("model_specs", {}), models
+            spec.get("model_specs", {}),
+            models,
+            single_model_input=strategy_spec._single_model_input_from_spec(
+                spec.get("single_model_input")
+            ),
         )
         return cls(
             models=model_input,

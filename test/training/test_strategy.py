@@ -567,6 +567,7 @@ class TestTrainingStrategySpecRoundTrip:
         assert restored.devices == [torch.device("cpu")]
         assert restored.training_fn is demo_training_fn
         assert "main" in spec["model_specs"]
+        assert spec["single_model_input"] is True
         restored_cfg = restored.optimizer_configs["main"][0]
         assert restored_cfg.optimizer_cls is torch.optim.Adam
         assert restored_cfg.optimizer_kwargs["lr"] == pytest.approx(1e-3)
@@ -638,6 +639,21 @@ class TestTrainingStrategySpecRoundTrip:
         )
         restored._train_one_batch(_make_batch(), [], [])
         assert seen_args == [restored.models["main"]]
+
+    def test_single_main_named_spec_restores_named_call_mode(self) -> None:
+        strategy = _make_strategy(
+            models={"main": _make_demo_model()},
+            optimizer_configs=_adam_optimizer_configs(),
+            training_fn=mapping_annotated_training_fn,
+        )
+
+        spec = strategy.to_spec_dict()
+        restored = TrainingStrategy.from_spec_dict(spec, hooks=[])
+
+        assert spec["single_model_input"] is False
+        assert restored.single_model_input is False
+        restored.run([_make_batch()])
+        assert restored.step_count == 1
 
     def test_model_spec_roundtrip_restores_runnable_demo_model(self) -> None:
         strategy = _make_strategy(training_fn=default_training_fn)
