@@ -34,7 +34,7 @@ import pytest
 import torch
 
 from nvalchemi.data import AtomicData, Batch
-from nvalchemi.hooks._context import HookContext
+from nvalchemi.hooks._context import TrainContext
 from nvalchemi.hooks._protocol import Hook
 from nvalchemi.models.base import BaseModelMixin
 from nvalchemi.training import (
@@ -131,11 +131,11 @@ def _make_strategy(**overrides: Any) -> TrainingStrategy:
     return TrainingStrategy(**kwargs)
 
 
-def _make_ctx(loss: torch.Tensor | None = None) -> HookContext:
+def _make_ctx(loss: torch.Tensor | None = None) -> TrainContext:
     if loss is None:
         loss = torch.tensor(1.0)
     batch = _make_batch()
-    return HookContext(batch=batch, step_count=0, loss=loss)
+    return TrainContext(batch=batch, step_count=0, loss=loss)
 
 
 def _single_orchestrator(strategy: TrainingStrategy) -> TrainingUpdateOrchestrator:
@@ -199,7 +199,7 @@ class _RecordingUpdateHook(TrainingUpdateHook):
 
     def __call__(
         self,
-        ctx: HookContext,
+        ctx: TrainContext,
         stage: TrainingStage,
         will_skip: bool,
     ) -> tuple[bool, torch.Tensor]:
@@ -215,7 +215,7 @@ class _VetoHook(TrainingUpdateHook):
 
     def __call__(
         self,
-        ctx: HookContext,
+        ctx: TrainContext,
         stage: TrainingStage,
         will_skip: bool,
     ) -> tuple[bool, torch.Tensor]:
@@ -230,7 +230,7 @@ class _BadProceedHook(TrainingUpdateHook):
 
     def __call__(
         self,
-        ctx: HookContext,
+        ctx: TrainContext,
         stage: TrainingStage,
         will_skip: bool,
     ) -> tuple[bool, torch.Tensor]:
@@ -244,7 +244,7 @@ class _LossTransformHook(TrainingUpdateHook):
 
     def __call__(
         self,
-        ctx: HookContext,
+        ctx: TrainContext,
         stage: TrainingStage,
         will_skip: bool,
     ) -> tuple[bool, torch.Tensor]:
@@ -263,7 +263,7 @@ class _GradScalerSetHook(TrainingUpdateHook):
 
     def __call__(
         self,
-        ctx: HookContext,
+        ctx: TrainContext,
         stage: TrainingStage,
         will_skip: bool,
     ) -> tuple[bool, torch.Tensor]:
@@ -282,7 +282,7 @@ class _GradScalerReadHook(TrainingUpdateHook):
 
     def __call__(
         self,
-        ctx: HookContext,
+        ctx: TrainContext,
         stage: TrainingStage,
         will_skip: bool,
     ) -> tuple[bool, torch.Tensor]:
@@ -309,7 +309,7 @@ class _FakeEqHook:
     def __hash__(self) -> int:
         return id(self)
 
-    def __call__(self, ctx: HookContext, stage: TrainingStage) -> None:
+    def __call__(self, ctx: TrainContext, stage: TrainingStage) -> None:
         return None
 
 
@@ -318,7 +318,7 @@ class _StageOnlyHook:
         self.stage = stage
         self.frequency = 1
 
-    def __call__(self, ctx: HookContext, stage: TrainingStage) -> None:
+    def __call__(self, ctx: TrainContext, stage: TrainingStage) -> None:
         return None
 
 
@@ -914,14 +914,14 @@ class TestDoStageConflict:
         assert strategy._has_do_backward_claim is True
 
 
-class TestHookContextGradScaler:
+class TestTrainContextGradScaler:
     def test_default_grad_scaler_is_none(self) -> None:
         ctx = _make_ctx()
         assert ctx.grad_scaler is None
 
     def test_grad_scaler_accepts_mocked_instance(self) -> None:
         scaler = Mock(spec=torch.amp.GradScaler)
-        ctx = HookContext(
+        ctx = TrainContext(
             batch=_make_batch(),
             step_count=0,
             grad_scaler=scaler,
