@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -92,12 +92,17 @@ class TrainContext(HookContext):
         key/model mapping should be semantic, e.g. 'student' and
         'teacher' in distillation workflows, with 'student' being
         the intended 'main' model.
-    optimizers : list[torch.optim.Optimizer] | None
-        Optimizers participating in the training step.
-    lr_schedulers : list[object] | None
-        Learning rate schedulers participating in the training step.
+    optimizers : list[torch.optim.Optimizer]
+        Optimizers participating in the training step. Empty when no
+        optimizers are visible to the current hook dispatch.
+    lr_schedulers : list[object]
+        Learning rate schedulers aligned with ``optimizers``. Empty when no
+        schedulers are visible to the current hook dispatch.
     gradients : dict[str, torch.Tensor] | None
         Parameter gradients for the current step.
+    grad_scaler : torch.amp.GradScaler | None
+        AMP gradient scaler shared by mixed precision update hooks, when
+        present.
     """
 
     step_count: int = 0
@@ -105,6 +110,7 @@ class TrainContext(HookContext):
     loss: torch.Tensor | None = None
     losses: dict[str, torch.Tensor] | None = None
     models: dict[str, BaseModelMixin] | ModuleDict | None = None
-    optimizers: list[torch.optim.Optimizer] | None = None
-    lr_schedulers: list[object] | None = None
+    optimizers: list[torch.optim.Optimizer] = field(default_factory=list)
+    lr_schedulers: list[object] = field(default_factory=list)
     gradients: dict[str, torch.Tensor] | None = None
+    grad_scaler: torch.amp.GradScaler | None = None
