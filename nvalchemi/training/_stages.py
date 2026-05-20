@@ -49,13 +49,26 @@ class TrainingStage(Enum):
     AFTER_LOSS : TrainingStage
         Fires after the loss computation; the loss tensor is populated.
     BEFORE_BACKWARD : TrainingStage
-        Fires before the backward pass; typical slot for loss scaling.
+        Fires before the backward pass.
+    DO_BACKWARD : TrainingStage
+        Replacement slot for the backward pass. At most one hook may claim
+        this stage; when claimed, ``TrainingStrategy`` skips its default
+        ``loss.backward()`` and the claiming hook is responsible for
+        performing (and scaling, if needed) the backward. Observers should
+        use ``BEFORE_BACKWARD``/``AFTER_BACKWARD``.
     AFTER_BACKWARD : TrainingStage
         Fires after the backward pass and before the optimizer step;
         typical slot for gradient clipping or gradient-norm logging.
     BEFORE_OPTIMIZER_STEP : TrainingStage
         Fires immediately before the optimizer step; typical slot for
-        gradient unscaling.
+        observers that need to see unscaled gradients (see ``DO_BACKWARD``).
+    DO_OPTIMIZER_STEP : TrainingStage
+        Replacement slot for the optimizer and LR-scheduler step. At most
+        one hook may claim this stage; when claimed, ``TrainingStrategy``
+        skips its default optimizer and scheduler stepping and the claiming
+        hook must step each optimizer in ``ctx.optimizers`` (and its
+        corresponding scheduler if present). Observers should use
+        ``BEFORE_OPTIMIZER_STEP``/``AFTER_OPTIMIZER_STEP``.
     AFTER_OPTIMIZER_STEP : TrainingStage
         Fires after the optimizer step; typical slot for LR-scheduler
         step, EMA update, and post-step logging.
@@ -75,8 +88,10 @@ class TrainingStage(Enum):
     BEFORE_LOSS = auto()
     AFTER_LOSS = auto()
     BEFORE_BACKWARD = auto()
+    DO_BACKWARD = auto()
     AFTER_BACKWARD = auto()
     BEFORE_OPTIMIZER_STEP = auto()
+    DO_OPTIMIZER_STEP = auto()
     AFTER_OPTIMIZER_STEP = auto()
     AFTER_BATCH = auto()
     AFTER_EPOCH = auto()
