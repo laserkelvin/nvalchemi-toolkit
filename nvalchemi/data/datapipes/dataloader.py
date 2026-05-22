@@ -114,6 +114,9 @@ class DataLoader:
 
         Raises
         ------
+        TypeError
+            If ``batch_sampler`` is a one-shot iterator instead of a
+            re-iterable object.
         ValueError
             If batch_size < 1, or if ``batch_sampler`` conflicts with
             loader-level batching arguments.
@@ -121,6 +124,8 @@ class DataLoader:
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         if batch_sampler is not None:
+            if isinstance(batch_sampler, Iterator):
+                raise TypeError("batch_sampler must be re-iterable, not an iterator.")
             if batch_size != 1:
                 raise ValueError(
                     "batch_size must be left at 1 when batch_sampler is provided."

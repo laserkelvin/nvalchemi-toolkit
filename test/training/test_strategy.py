@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import operator
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from enum import Enum
 from typing import Any
 
@@ -181,6 +181,28 @@ class _RecordingHook:
 
     def __call__(self, ctx: HookContext, stage: Enum) -> None:
         self._callback(ctx, stage)
+
+
+class _EpochRecordingLoader:
+    """Re-iterable batch source that records ``set_epoch`` calls.
+
+    Attributes
+    ----------
+    epochs : list[int]
+        Epoch values received through ``set_epoch``.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the loader."""
+        self.epochs: list[int] = []
+
+    def set_epoch(self, epoch: int) -> None:
+        """Record the epoch supplied by TrainingStrategy."""
+        self.epochs.append(epoch)
+
+    def __iter__(self) -> Iterator[Batch]:
+        """Yield one training batch."""
+        yield _make_batch()
 
 
 _VALIDATOR_REJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
@@ -424,6 +446,16 @@ class TestTrainingStrategyRun:
         assert strategy.step_count == 2 * len(dataset)
         assert strategy.epoch == 2
         assert after_loss_calls == list(range(2 * len(dataset)))
+
+    def test_run_calls_dataloader_set_epoch(self) -> None:
+        """TrainingStrategy propagates epoch numbers to epoch-aware loaders."""
+        strategy = _make_strategy(num_epochs=3)
+        dataloader = _EpochRecordingLoader()
+
+        strategy.run(dataloader)
+
+        assert dataloader.epochs == [0, 1, 2]
+        assert strategy.step_count == 3
 
 
 _EXPECTED_STAGE_ORDER: tuple[TrainingStage, ...] = (

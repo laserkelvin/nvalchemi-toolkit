@@ -192,6 +192,21 @@ class TestSizeAwareBatchSampler:
         with pytest.raises(TypeError, match="length is unavailable"):
             len(sampler)
 
+    def test_schedule_receives_epoch_argument(self) -> None:
+        """Epoch updates are visible to capacity schedules."""
+        samples = [(1, 0), (1, 0), (1, 0)]
+        sampler = SizeAwareBatchSampler(
+            SizeOnlyDataset(samples),
+            max_atoms=10,
+            max_batch_size=lambda step, epoch: 1 if epoch == 0 else 3,
+        )
+
+        assert list(sampler) == [[0], [1], [2]]
+
+        sampler.set_epoch(1)
+
+        assert list(sampler) == [[0, 1, 2]]
+
     def test_atom_and_graph_schedules_compose(self) -> None:
         """The first binding scheduled limit closes the current batch."""
         samples = [(3, 0), (3, 0), (3, 0), (3, 0)]
@@ -349,6 +364,14 @@ class TestDataLoaderBatchSamplerIntegration:
 
         with pytest.raises(TypeError, match="length is unavailable"):
             len(loader)
+        dataset.close()
+
+    def test_dataloader_rejects_one_shot_batch_sampler(self) -> None:
+        """A one-shot batch sampler cannot be reused across epochs."""
+        dataset = Dataset(AtomicListReader([2, 2]), device="cpu")
+
+        with pytest.raises(TypeError, match="re-iterable"):
+            DataLoader(dataset, batch_sampler=iter([[0], [1]]), use_streams=False)
         dataset.close()
 
     @pytest.mark.parametrize(

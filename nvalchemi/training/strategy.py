@@ -500,6 +500,8 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             freeze_unconfigured_models(self.models, self.optimizer_configs),
         ):
             for _epoch_idx in epoch_iter:
+                if hasattr(dataloader, "set_epoch"):
+                    dataloader.set_epoch(self.epoch)
                 epoch_started = False
                 for batch in dataloader:
                     batch = batch.to(primary_device, non_blocking=True)

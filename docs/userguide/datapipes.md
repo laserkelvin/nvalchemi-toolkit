@@ -156,8 +156,10 @@ prefetching, and `Batch.from_data_list` collation.
 ### Capacity schedules
 
 Both `max_atoms` and `max_batch_size` may be either integers or callables with
-signature `(step: int, epoch: int) -> int`. This allows warmup schedules similar
-to learning-rate schedules:
+signature `(step: int, epoch: int) -> int`. The `step` argument is the batch index
+within the current epoch, and `epoch` is advanced through `set_epoch(epoch)` by
+training loops that support epoch-aware loaders. This allows epoch-local warmup
+schedules:
 
 ```python
 from nvalchemi.data.datapipes import LinearCapacitySchedule, SizeAwareBatchSampler
