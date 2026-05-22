@@ -19,9 +19,13 @@ from nvalchemi.data.batch import Batch
 from nvalchemi.data.datapipes import (
     AtomicDataZarrReader,
     AtomicDataZarrWriter,
+    CosineCapacitySchedule,
     DataLoader,
     Dataset,
+    LinearCapacitySchedule,
+    PiecewiseCapacitySchedule,
     Reader,
+    SizeAwareBatchSampler,
 )
 
 __all__ = [
@@ -32,4 +36,8 @@ __all__ = [
     "AtomicDataZarrReader",
     "Dataset",
     "DataLoader",
+    "SizeAwareBatchSampler",
+    "LinearCapacitySchedule",
+    "CosineCapacitySchedule",
+    "PiecewiseCapacitySchedule",
 ]

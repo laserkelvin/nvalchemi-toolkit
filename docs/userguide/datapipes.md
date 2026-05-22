@@ -121,49 +121,68 @@ Key parameters:
 | `prefetch_factor` | How many **batches** to load ahead of the current one |
 | `num_streams` | Number of CUDA streams used for overlapping transfers |
 | `sampler` | Controls index ordering (defaults to sequential or random) |
+| `batch_sampler` | Controls full batch boundaries by yielding lists of indices |
 
 Unlike PyTorch's `torch.utils.data.DataLoader`, this implementation returns
 {py:class}`nvalchemi.data.Batch` objects (disjoint graphs with proper node-index
 offsets) rather than generic collated tensors.
 
-## SizeAwareSampler: memory-safe batching
+## SizeAwareBatchSampler: memory-safe training batches
 
 For datasets where systems vary widely in size --- a common situation in atomistic
 ML --- a fixed `batch_size` can either waste GPU memory (when graphs are small) or
 cause out-of-memory errors (when a few large graphs land in the same batch).
 
-{py:class}`~nvalchemi.dynamics.sampler.SizeAwareSampler` solves this with
-capacity-aware bin-packing:
+{py:class}`~nvalchemi.data.datapipes.SizeAwareBatchSampler` solves this for
+training-style dataloading with capacity-aware batch sampling:
 
 ```python
-from nvalchemi.dynamics.sampler import SizeAwareSampler
+from nvalchemi.data.datapipes import DataLoader, SizeAwareBatchSampler
 
-sampler = SizeAwareSampler(
+batch_sampler = SizeAwareBatchSampler(
     dataset=dataset,
     max_atoms=4096,
-    max_edges=32768,
     max_batch_size=64,
 )
+
+loader = DataLoader(dataset=dataset, batch_sampler=batch_sampler)
 ```
 
 Instead of grouping a fixed count of graphs, the sampler fills each batch until
-adding the next sample would exceed one of the capacity constraints (`max_atoms`,
-`max_edges`, or `max_batch_size`). Internally it uses bin-packing by atom count: it
-sorts samples into bins of similar size, then draws from bins in a way that
-maximises GPU utilisation while respecting the limits.
+adding another sample would exceed `max_atoms` or `max_batch_size`. It yields
+lists of dataset indices; the DataLoader still owns sample loading, stream
+prefetching, and `Batch.from_data_list` collation.
 
-### GPU memory heuristic
+### Capacity schedules
 
-If you omit `max_atoms`, the sampler can estimate a safe limit from the GPU's
-available memory fraction. This is useful for workloads where the optimal batch size
-depends on the hardware.
+Both `max_atoms` and `max_batch_size` may be either integers or callables with
+signature `(step: int, epoch: int) -> int`. This allows warmup schedules similar
+to learning-rate schedules:
 
-### Inflight replacement
+```python
+from nvalchemi.data.datapipes import LinearCapacitySchedule, SizeAwareBatchSampler
 
-In dynamics pipelines, systems converge and leave the batch at different times.
-{py:meth}`~nvalchemi.dynamics.sampler.SizeAwareSampler.request_replacement` finds a
-new sample whose size fits the memory slot left by a graduated system, keeping the
-batch full without reallocation.
+batch_sampler = SizeAwareBatchSampler(
+    dataset=dataset,
+    max_atoms=LinearCapacitySchedule(start=1024, end=4096, num_steps=1000),
+    max_batch_size=LinearCapacitySchedule(start=8, end=64, num_steps=1000),
+    shuffle=True,
+    seed=123,
+)
+```
+
+When either capacity is scheduled per iteration, `len(batch_sampler)` and
+`len(loader)` raise `TypeError` because the number of batches is no longer a
+cheap static property. Training loops should iterate over the loader directly.
+
+### Difference from dynamics sampling
+
+The dynamics
+{py:class}`~nvalchemi.dynamics.sampler.SizeAwareSampler` is a stateful inflight
+replacement sampler. It stamps `system_id`, initializes `status`, and replaces
+systems as simulations finish. The datapipes `SizeAwareBatchSampler` is a
+re-iterable epoch sampler for training and does not mutate samples or manage
+inflight replacement.
 
 ## Putting it all together
 
@@ -172,23 +191,26 @@ A typical end-to-end setup:
 ```python
 from nvalchemi.data.datapipes.backends.zarr import AtomicDataZarrReader
 from nvalchemi.data.datapipes.dataset import Dataset
-from nvalchemi.data.datapipes.dataloader import DataLoader
-from nvalchemi.dynamics.sampler import SizeAwareSampler
+from nvalchemi.data.datapipes import DataLoader, SizeAwareBatchSampler
 
 reader = AtomicDataZarrReader("/path/to/store.zarr")
 dataset = Dataset(reader=reader, device="cuda:0", num_workers=4)
-sampler = SizeAwareSampler(dataset=dataset, max_atoms=4096)
+batch_sampler = SizeAwareBatchSampler(
+    dataset=dataset,
+    max_atoms=4096,
+    max_batch_size=64,
+    shuffle=True,
+)
 
 loader = DataLoader(
     dataset=dataset,
-    batch_size=64,      # upper bound; sampler may produce smaller batches
-    sampler=sampler,
+    batch_sampler=batch_sampler,
     prefetch_factor=2,
     num_streams=2,
 )
 
 for batch in loader:
-    # batch.num_atoms <= 4096 guaranteed
+    # batch.num_nodes <= 4096 guaranteed
     outputs = model(batch)
 ```
 

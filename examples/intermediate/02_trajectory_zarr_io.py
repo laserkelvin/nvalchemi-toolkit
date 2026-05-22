@@ -195,7 +195,12 @@ ds = Dataset(reader, device="cpu", num_workers=1)
 loader = DataLoader(ds, batch_size=2)
 
 logging.info("Dataset length: %d samples", len(ds))
-logging.info("DataLoader yields %d batches of size 2", len(loader))
+try:
+    n_loader_batches = len(loader)
+except TypeError:
+    logging.info("DataLoader batch count is dynamic")
+else:
+    logging.info("DataLoader yields %d batches of size 2", n_loader_batches)
 
 # Iterate over all batches and collect.
 loaded_batches: list[Batch] = []

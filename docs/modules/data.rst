@@ -29,7 +29,20 @@ I/O and pipelines
    AtomicDataZarrReader
    Dataset
    DataLoader
+   SizeAwareBatchSampler
    Reader
+
+Capacity schedules
+------------------
+
+.. autosummary::
+   :toctree: generated
+   :template: class.rst
+   :nosignatures:
+
+   LinearCapacitySchedule
+   CosineCapacitySchedule
+   PiecewiseCapacitySchedule
 
 Write configuration
 -------------------

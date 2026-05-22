@@ -28,7 +28,7 @@ workflows.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 import torch
 from torch.utils.data import RandomSampler, Sampler, SequentialSampler
@@ -56,6 +56,8 @@ class DataLoader:
         Drop the last incomplete batch.
     sampler : torch.utils.data.Sampler | None, default=None
         Custom sampler (overrides ``shuffle``).
+    batch_sampler : Iterable[list[int]] | None, default=None
+        Custom batch sampler that yields lists of sample indices.
     prefetch_factor : int, default=2
         How many batches to prefetch ahead.
     num_streams : int, default=4
@@ -81,6 +83,7 @@ class DataLoader:
         shuffle: bool = False,
         drop_last: bool = False,
         sampler: Sampler | None = None,
+        batch_sampler: Iterable[list[int]] | None = None,
         prefetch_factor: int = 2,
         num_streams: int = 4,
         use_streams: bool = True,
@@ -99,6 +102,9 @@ class DataLoader:
             Drop the last incomplete batch.
         sampler : torch.utils.data.Sampler | None, default=None
             Custom sampler (overrides ``shuffle``).
+        batch_sampler : Iterable[list[int]] | None, default=None
+            Custom batch sampler that yields lists of sample indices. When
+            provided, it owns batch boundaries.
         prefetch_factor : int, default=2
             How many batches to prefetch ahead.
         num_streams : int, default=4
@@ -109,21 +115,36 @@ class DataLoader:
         Raises
         ------
         ValueError
-            If batch_size < 1.
+            If batch_size < 1, or if ``batch_sampler`` conflicts with
+            loader-level batching arguments.
         """
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        if batch_sampler is not None:
+            if batch_size != 1:
+                raise ValueError(
+                    "batch_size must be left at 1 when batch_sampler is provided."
+                )
+            if shuffle:
+                raise ValueError("shuffle=True is incompatible with batch_sampler.")
+            if sampler is not None:
+                raise ValueError("sampler is incompatible with batch_sampler.")
+            if drop_last:
+                raise ValueError("drop_last=True is incompatible with batch_sampler.")
 
         # Set up attributes directly (standalone class)
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self.batch_sampler = batch_sampler
         self.prefetch_factor = prefetch_factor
         self.num_streams = num_streams
         self.use_streams = use_streams and torch.cuda.is_available()
 
         # Handle sampler
-        if sampler is not None:
+        if batch_sampler is not None:
+            self.sampler = None
+        elif sampler is not None:
             self.sampler = sampler
         elif shuffle:
             self.sampler = RandomSampler(dataset)
@@ -144,6 +165,8 @@ class DataLoader:
         int
             Number of batches in the dataloader.
         """
+        if self.batch_sampler is not None:
+            return len(self.batch_sampler)  # type: ignore[arg-type]
         n_samples = len(self.dataset)
         if self.drop_last:
             return n_samples // self.batch_size
@@ -173,6 +196,14 @@ class DataLoader:
         list[int]
             List of sample indices for each batch.
         """
+        if self.batch_sampler is not None:
+            for batch_indices in self.batch_sampler:
+                batch = list(batch_indices)
+                if not batch:
+                    raise ValueError("batch_sampler yielded an empty batch")
+                yield batch
+            return
+
         batch: list[int] = []
         for idx in self.sampler:
             batch.append(idx)
@@ -261,5 +292,8 @@ class DataLoader:
         epoch : int
             Current epoch number.
         """
-        if hasattr(self.sampler, "set_epoch"):
-            self.sampler.set_epoch(epoch)
+        epoch_target = (
+            self.batch_sampler if self.batch_sampler is not None else self.sampler
+        )
+        if hasattr(epoch_target, "set_epoch"):
+            epoch_target.set_epoch(epoch)
