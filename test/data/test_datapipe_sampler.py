@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -419,4 +420,41 @@ class TestDataLoaderBatchSamplerIntegration:
         strategy.run(loader)
 
         assert strategy.step_count == 2
+        dataset.close()
+
+    def test_batch_sampler_prefetch_path_uses_variable_batches(self) -> None:
+        """Stream prefetching consumes variable batch-sampler index lists."""
+        dataset = Dataset(AtomicListReader([2, 2, 2, 2, 2]), device="cpu")
+        sampler = SizeAwareBatchSampler(
+            dataset,
+            max_atoms=10,
+            max_batch_size=lambda step, epoch: step + 1,
+        )
+
+        with patch("torch.cuda.is_available", return_value=True):
+            mock_stream = MagicMock()
+            with patch("torch.cuda.Stream", return_value=mock_stream):
+                loader = DataLoader(
+                    dataset,
+                    batch_sampler=sampler,
+                    use_streams=True,
+                    prefetch_factor=2,
+                )
+
+        prefetch_calls: list[int] = []
+
+        def _record_prefetch(index: int, stream: Any | None = None) -> None:  # noqa: ARG001
+            prefetch_calls.append(index)
+
+        with (
+            patch.object(dataset, "prefetch", side_effect=_record_prefetch),
+            patch.object(
+                dataset, "cancel_prefetch", wraps=dataset.cancel_prefetch
+            ) as cancel,
+        ):
+            batches = list(loader)
+
+        assert [batch.num_graphs for batch in batches] == [1, 2, 2]
+        assert prefetch_calls == [0, 1, 2, 3, 4]
+        cancel.assert_called_once_with()
         dataset.close()
