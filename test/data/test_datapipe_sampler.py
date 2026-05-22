@@ -167,6 +167,18 @@ class TestSizeAwareBatchSampler:
         with pytest.raises(TypeError, match="length is unavailable"):
             len(sampler)
 
+    def test_shuffle_false_preserves_sample_order(self) -> None:
+        """Order-preserving packing does not pull later samples ahead."""
+        samples = [(3, 0), (4, 0), (2, 0)]
+        sampler = SizeAwareBatchSampler(
+            SizeOnlyDataset(samples), max_atoms=5, max_batch_size=3
+        )
+
+        batches = list(sampler)
+
+        assert batches == [[0], [1], [2]]
+        assert [index for batch in batches for index in batch] == [0, 1, 2]
+
     def test_dynamic_graph_schedule_changes_batch_sizes(self) -> None:
         """Scheduled graph budgets are resolved independently of atom budgets."""
         samples = [(2, 0), (2, 0), (2, 0), (2, 0), (2, 0)]
@@ -226,8 +238,8 @@ class TestSizeAwareBatchSampler:
         sampler_a.set_epoch(1)
         assert list(sampler_a) != epoch0
 
-    def test_explicit_rank_partitioning(self) -> None:
-        """Explicit rank and replica settings partition samples deterministically."""
+    def test_explicit_rank_partitioning_groups_equal_steps(self) -> None:
+        """Explicit rank settings produce equal numbers of batches."""
         samples = [(1, 0)] * 5
         dataset = SizeOnlyDataset(samples)
         rank0 = SizeAwareBatchSampler(
@@ -247,8 +259,61 @@ class TestSizeAwareBatchSampler:
             drop_last=True,
         )
 
-        assert list(rank0) == [[0, 2]]
-        assert list(rank1) == [[1, 3]]
+        assert list(rank0) == [[0, 1]]
+        assert list(rank1) == [[2, 3]]
+
+    def test_distributed_size_skew_keeps_rank_step_counts_equal(self) -> None:
+        """Global step grouping prevents different batch counts across ranks."""
+        samples = [(100, 0), (1, 0), (100, 0), (1, 0)]
+        dataset = SizeOnlyDataset(samples)
+        rank0 = SizeAwareBatchSampler(
+            dataset, max_atoms=100, max_batch_size=10, num_replicas=2, rank=0
+        )
+        rank1 = SizeAwareBatchSampler(
+            dataset, max_atoms=100, max_batch_size=10, num_replicas=2, rank=1
+        )
+
+        assert list(rank0) == [[0], [2]]
+        assert list(rank1) == [[1], [3]]
+
+    def test_distributed_padding_repeats_final_batch(self) -> None:
+        """Non-dropping distributed mode pads an incomplete final step."""
+        samples = [(1, 0)] * 5
+        dataset = SizeOnlyDataset(samples)
+        rank0 = SizeAwareBatchSampler(
+            dataset,
+            max_atoms=2,
+            max_batch_size=2,
+            num_replicas=2,
+            rank=0,
+            drop_last=False,
+        )
+        rank1 = SizeAwareBatchSampler(
+            dataset,
+            max_atoms=2,
+            max_batch_size=2,
+            num_replicas=2,
+            rank=1,
+            drop_last=False,
+        )
+
+        assert list(rank0) == [[0, 1], [4]]
+        assert list(rank1) == [[2, 3], [4]]
+
+    def test_drop_last_drops_final_graph_underfilled_batch(self) -> None:
+        """drop_last removes a final batch that does not reach max_batch_size."""
+        samples = [(1, 0), (1, 0), (1, 0)]
+        dataset = SizeOnlyDataset(samples)
+
+        keep_last = SizeAwareBatchSampler(
+            dataset, max_atoms=10, max_batch_size=2, drop_last=False
+        )
+        drop_last = SizeAwareBatchSampler(
+            dataset, max_atoms=10, max_batch_size=2, drop_last=True
+        )
+
+        assert list(keep_last) == [[0, 1], [2]]
+        assert list(drop_last) == [[0, 1]]
 
 
 class TestDataLoaderBatchSamplerIntegration:

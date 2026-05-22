@@ -316,6 +316,7 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
         self.num_replicas = resolved_num_replicas
         self.rank = resolved_rank
         self.epoch = 0
+        self._len_cache: dict[int, int] = {}
 
         if hasattr(dataset, "get_size_metadata"):
             self._sample_meta = list(dataset.get_size_metadata())
@@ -361,7 +362,11 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
                 "SizeAwareBatchSampler length is unavailable when max_atoms or "
                 "max_batch_size is scheduled per iteration."
             )
-        return sum(1 for _ in self._pack_batches(self._epoch_indices()))
+        if self.epoch not in self._len_cache:
+            self._len_cache[self.epoch] = sum(
+                1 for _ in self._pack_batches(self._epoch_indices())
+            )
+        return self._len_cache[self.epoch]
 
     @property
     def _has_dynamic_capacity(self) -> bool:
@@ -371,16 +376,18 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
     @staticmethod
     def _validate_capacity(capacity: CapacitySchedule, *, name: str) -> None:
         """Validate a static capacity or callable schedule."""
-        if isinstance(capacity, int):
+        if callable(capacity):
+            return
+        try:
             _coerce_positive_int(capacity, name=name)
-        elif not callable(capacity):
-            raise TypeError(f"{name} must be an integer or callable schedule")
+        except TypeError as exc:
+            raise TypeError(f"{name} must be an integer or callable schedule") from exc
 
     def _capacity_upper_bound(self, capacity: CapacitySchedule | None) -> int | None:
         """Return a known capacity upper bound if one is available."""
         if capacity is None:
             return None
-        if isinstance(capacity, int):
+        if not callable(capacity):
             return _coerce_positive_int(capacity, name="capacity")
         if hasattr(capacity, "max_value"):
             return _coerce_positive_int(capacity.max_value, name="capacity.max_value")
@@ -422,74 +429,108 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
 
     def _epoch_indices(self) -> list[int]:
         """Return this rank's sample indices for the current epoch."""
-        indices = list(range(len(self.dataset)))
-        if self.shuffle and indices:
+        if self.shuffle and len(self.dataset) > 0:
             generator = torch.Generator()
             generator.manual_seed(self.seed + self.epoch)
-            order = torch.randperm(len(indices), generator=generator).tolist()
-            indices = [indices[index] for index in order]
+            return torch.randperm(len(self.dataset), generator=generator).tolist()
+        return list(range(len(self.dataset)))
 
-        if self.num_replicas == 1 or not indices:
-            return indices
+    def _next_batch(
+        self,
+        indices: list[int],
+        cursor: int,
+        *,
+        step: int,
+    ) -> tuple[list[int], int, int]:
+        """Return the next order-preserving batch and updated cursor."""
+        atom_budget = self._resolve_capacity(
+            self.max_atoms, step=step, name="max_atoms"
+        )
+        graph_budget = self._resolve_graph_budget(
+            step=step, remaining_count=len(indices) - cursor
+        )
+        batch: list[int] = []
+        total_atoms = 0
 
-        if self.drop_last:
-            total_size = len(indices) - (len(indices) % self.num_replicas)
-            indices = indices[:total_size]
-        else:
-            total_size = math.ceil(len(indices) / self.num_replicas) * self.num_replicas
-            padding_size = total_size - len(indices)
-            if padding_size > 0:
-                repeats = math.ceil(padding_size / len(indices))
-                indices.extend((indices * repeats)[:padding_size])
+        while cursor < len(indices) and len(batch) < graph_budget:
+            index = indices[cursor]
+            num_atoms, _num_edges = self._sample_meta[index]
+            if num_atoms > atom_budget:
+                if batch:
+                    break
+                raise RuntimeError(
+                    f"No remaining sample fits max_atoms={atom_budget} at "
+                    f"step={step}, epoch={self.epoch}; next sample has "
+                    f"{num_atoms} atoms."
+                )
+            if total_atoms + num_atoms > atom_budget:
+                break
+            batch.append(index)
+            total_atoms += num_atoms
+            cursor += 1
 
-        return indices[self.rank : len(indices) : self.num_replicas]
+        return batch, cursor, graph_budget
+
+    def _should_drop_final_batch(
+        self,
+        batch: list[int],
+        *,
+        cursor: int,
+        graph_budget: int,
+        total_count: int,
+    ) -> bool:
+        """Return whether a final under-filled graph-count batch should be dropped."""
+        return (
+            self.drop_last
+            and self.max_batch_size is not None
+            and cursor >= total_count
+            and len(batch) < graph_budget
+        )
 
     def _pack_batches(self, indices: list[int]) -> Iterator[list[int]]:
         """Pack indices into batches under the current capacity schedules."""
-        remaining = indices
+        cursor = 0
         step = 0
 
-        while remaining:
-            atom_budget = self._resolve_capacity(
-                self.max_atoms, step=step, name="max_atoms"
-            )
-            graph_budget = self._resolve_graph_budget(
-                step=step, remaining_count=len(remaining)
-            )
-            batch: list[int] = []
-            selected_positions: set[int] = set()
-            total_atoms = 0
-
-            for position, index in enumerate(remaining):
-                if len(batch) >= graph_budget:
-                    break
-                num_atoms, _num_edges = self._sample_meta[index]
-                if num_atoms > atom_budget:
-                    continue
-                if total_atoms + num_atoms <= atom_budget:
-                    batch.append(index)
-                    selected_positions.add(position)
-                    total_atoms += num_atoms
-
-            if not batch:
-                smallest_atoms = min(self._sample_meta[index][0] for index in remaining)
-                raise RuntimeError(
-                    f"No remaining sample fits max_atoms={atom_budget} at "
-                    f"step={step}, epoch={self.epoch}; smallest remaining sample "
-                    f"has {smallest_atoms} atoms."
+        if self.num_replicas == 1:
+            while cursor < len(indices):
+                batch, cursor, graph_budget = self._next_batch(
+                    indices, cursor, step=step
                 )
+                if not batch:
+                    break
+                if self._should_drop_final_batch(
+                    batch,
+                    cursor=cursor,
+                    graph_budget=graph_budget,
+                    total_count=len(indices),
+                ):
+                    break
+                yield batch
+                step += 1
+            return
 
-            remaining = [
-                index
-                for position, index in enumerate(remaining)
-                if position not in selected_positions
-            ]
-            if (
-                self.drop_last
-                and self.max_batch_size is not None
-                and not remaining
-                and len(batch) < graph_budget
+        while cursor < len(indices):
+            group: list[list[int]] = []
+            graph_budget = 0
+            for _ in range(self.num_replicas):
+                if cursor >= len(indices):
+                    break
+                batch, cursor, graph_budget = self._next_batch(
+                    indices, cursor, step=step
+                )
+                if not batch:
+                    break
+                group.append(batch)
+
+            if not group:
+                break
+            if self.drop_last and (
+                len(group) < self.num_replicas
+                or any(len(batch) < graph_budget for batch in group)
             ):
                 break
-            yield batch
+            while len(group) < self.num_replicas:
+                group.append(group[-1])
+            yield group[self.rank]
             step += 1
