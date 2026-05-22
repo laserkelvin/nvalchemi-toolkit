@@ -38,6 +38,10 @@ class _SizedDataset(Protocol):
         """Return ``(num_atoms, num_edges)`` for a sample."""
         ...
 
+    def get_size_metadata(self) -> list[tuple[int, int]]:
+        """Return ``(num_atoms, num_edges)`` for all samples."""
+        ...
+
 
 CapacitySchedule: TypeAlias = int | Callable[[int, int], int]
 
@@ -313,9 +317,17 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
         self.rank = resolved_rank
         self.epoch = 0
 
-        self._sample_meta = [
-            dataset.get_metadata(index) for index in range(len(dataset))
-        ]
+        if hasattr(dataset, "get_size_metadata"):
+            self._sample_meta = list(dataset.get_size_metadata())
+        else:
+            self._sample_meta = [
+                dataset.get_metadata(index) for index in range(len(dataset))
+            ]
+        if len(self._sample_meta) != len(dataset):
+            raise RuntimeError(
+                "size metadata length must match dataset length; got "
+                f"{len(self._sample_meta)} metadata rows for {len(dataset)} samples"
+            )
         self._validate_sample_sizes()
 
     def set_epoch(self, epoch: int) -> None:

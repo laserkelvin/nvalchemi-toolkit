@@ -370,9 +370,9 @@ class Dataset:
     def get_metadata(self, index: int) -> tuple[int, int]:
         """Return lightweight metadata for a sample without full construction.
 
-        Loads the raw tensor dictionary from the reader and extracts shape
-        information for atom and edge counts, avoiding the overhead of full
-        ``AtomicData`` construction and validation.
+        Delegates to the reader's size-metadata hook. Backends with pointer
+        metadata can answer this without loading full sample tensors; generic
+        readers may fall back to loading one raw sample.
 
         Parameters
         ----------
@@ -391,12 +391,27 @@ class Dataset:
         KeyError
             If the sample dict does not contain ``"atomic_numbers"``.
         """
+        if hasattr(self.reader, "_get_sample_size"):
+            return self.reader._get_sample_size(index)
+
         data_dict = self.reader._load_sample(index)
         num_atoms = len(data_dict["atomic_numbers"])
         num_edges = 0
         if "neighbor_list" in data_dict and data_dict["neighbor_list"] is not None:
             num_edges = data_dict["neighbor_list"].shape[0]
         return num_atoms, num_edges
+
+    def get_size_metadata(self) -> list[tuple[int, int]]:
+        """Return lightweight size metadata for all samples.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            ``(num_atoms, num_edges)`` for each sample.
+        """
+        if hasattr(self.reader, "_get_all_sample_sizes"):
+            return self.reader._get_all_sample_sizes()
+        return [self.get_metadata(index) for index in range(len(self))]
 
     def __iter__(self) -> Iterator[tuple[AtomicData, dict[str, Any]]]:
         """Iterate over all samples in the dataset.

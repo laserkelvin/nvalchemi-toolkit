@@ -1388,6 +1388,45 @@ class AtomicDataZarrReader(Reader):
 
         return data
 
+    def _get_sample_size(self, index: int) -> tuple[int, int]:
+        """Return atom and edge counts for one active sample.
+
+        Parameters
+        ----------
+        index : int
+            Logical sample index.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(num_atoms, num_edges)`` for the sample.
+        """
+        physical_idx = int(self._active_indices[index].item())
+        num_atoms = int(
+            (self._atoms_ptr[physical_idx + 1] - self._atoms_ptr[physical_idx]).item()
+        )
+        num_edges = int(
+            (self._edges_ptr[physical_idx + 1] - self._edges_ptr[physical_idx]).item()
+        )
+        return num_atoms, num_edges
+
+    def _get_all_sample_sizes(self) -> list[tuple[int, int]]:
+        """Return atom and edge counts for all active samples.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            ``(num_atoms, num_edges)`` for each active sample.
+        """
+        physical_indices = self._active_indices
+        atom_counts = (
+            self._atoms_ptr[physical_indices + 1] - self._atoms_ptr[physical_indices]
+        )
+        edge_counts = (
+            self._edges_ptr[physical_indices + 1] - self._edges_ptr[physical_indices]
+        )
+        return list(zip(atom_counts.tolist(), edge_counts.tolist(), strict=True))
+
     def __len__(self) -> int:
         """Return the number of active (non-deleted) samples.
 

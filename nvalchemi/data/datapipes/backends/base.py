@@ -133,6 +133,45 @@ class Reader(ABC):
         """
         return {}
 
+    def _get_sample_size(self, index: int) -> tuple[int, int]:
+        """Return atom and edge counts for a sample.
+
+        The base implementation derives sizes from :meth:`_load_sample`.
+        Storage backends with compact pointer metadata should override this
+        method to avoid loading full sample payloads.
+
+        Parameters
+        ----------
+        index : int
+            Sample index.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(num_atoms, num_edges)`` for the sample.
+
+        Raises
+        ------
+        KeyError
+            If the sample dict does not contain ``"atomic_numbers"``.
+        """
+        data = self._load_sample(index)
+        num_atoms = len(data["atomic_numbers"])
+        num_edges = 0
+        if "neighbor_list" in data and data["neighbor_list"] is not None:
+            num_edges = data["neighbor_list"].shape[0]
+        return num_atoms, num_edges
+
+    def _get_all_sample_sizes(self) -> list[tuple[int, int]]:
+        """Return atom and edge counts for all active samples.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            ``(num_atoms, num_edges)`` for each sample.
+        """
+        return [self._get_sample_size(index) for index in range(len(self))]
+
     @property
     def field_names(self) -> list[str]:
         """Field names available in each sample.

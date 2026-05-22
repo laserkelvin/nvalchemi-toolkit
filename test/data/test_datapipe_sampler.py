@@ -91,6 +91,34 @@ class AtomicListReader(Reader):
         return {"index": index}
 
 
+class SizeMetadataReader(AtomicListReader):
+    """Reader with explicit lightweight size metadata hooks.
+
+    Attributes
+    ----------
+    load_calls : int
+        Number of full sample loads.
+    bulk_size_calls : int
+        Number of bulk size metadata calls.
+    """
+
+    def __init__(self, atom_counts: list[int]) -> None:
+        """Initialize the reader and counters."""
+        super().__init__(atom_counts)
+        self.load_calls = 0
+        self.bulk_size_calls = 0
+
+    def _load_sample(self, index: int) -> dict[str, torch.Tensor]:
+        """Count full sample loads."""
+        self.load_calls += 1
+        return super()._load_sample(index)
+
+    def _get_all_sample_sizes(self) -> list[tuple[int, int]]:
+        """Return sizes without loading full samples."""
+        self.bulk_size_calls += 1
+        return [(num_atoms, 0) for num_atoms in self.atom_counts]
+
+
 def _batch_atom_counts(
     batches: list[list[int]], samples: list[tuple[int, int]]
 ) -> list[int]:
@@ -114,6 +142,17 @@ class TestSizeAwareBatchSampler:
         assert _batch_atom_counts(batches, samples) == [5, 5]
         assert all(len(batch) <= 2 for batch in batches)
         assert len(sampler) == 2
+
+    def test_sampler_uses_bulk_size_metadata(self) -> None:
+        """Sampler construction prefers bulk size metadata over sample loads."""
+        reader = SizeMetadataReader([2, 3, 4])
+        dataset = Dataset(reader, device="cpu")
+
+        SizeAwareBatchSampler(dataset, max_atoms=5, max_batch_size=2)
+
+        assert reader.bulk_size_calls == 1
+        assert reader.load_calls == 0
+        dataset.close()
 
     def test_dynamic_atom_schedule_changes_batch_sizes(self) -> None:
         """Scheduled atom budgets are resolved once per emitted batch."""
