@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Size-aware datapipes batch sampling with graph and atom capacity scheduling,
+  distributed-step-aware packing, and lightweight dataset metadata hooks for
+  high-throughput training loaders.
+
 ### Fixed
 
 - **MTK NPT barostat runaway** (#89, #90) — four bugs in
