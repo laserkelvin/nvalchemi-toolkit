@@ -238,6 +238,14 @@ class TestReaderGetSampleMetadata:
 
         assert metadata == [{"num_atoms": 2, "num_edges": 0}]
 
+    def test_public_size_aliases_delegate_to_hooks(self):
+        """Public size methods expose the reader metadata contract."""
+        data = [{"atomic_numbers": torch.ones(2, dtype=torch.long)}]
+        reader = MinimalReader(data)
+
+        assert reader.get_sample_size(0) == (2, 0)
+        assert reader.get_all_sample_sizes() == [(2, 0)]
+
 
 # ---------------------------------------------------------------------------
 # TestReaderIteration

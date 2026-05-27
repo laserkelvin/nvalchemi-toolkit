@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from torch.utils.data import SequentialSampler
+from torch.utils.data import SequentialSampler, Subset
 
 from nvalchemi.data.batch import Batch
 from nvalchemi.data.datapipes import (
@@ -54,6 +54,14 @@ class SizeOnlyDataset:
     def get_metadata(self, index: int) -> tuple[int, int]:
         """Return ``(num_atoms, num_edges)`` for ``index``."""
         return self.samples[index]
+
+    def get_sample_size(self, index: int) -> tuple[int, int]:
+        """Return ``(num_atoms, num_edges)`` for ``index``."""
+        return self.samples[index]
+
+    def get_all_sample_sizes(self) -> list[tuple[int, int]]:
+        """Return all sample sizes."""
+        return list(self.samples)
 
 
 class AtomicListReader(Reader):
@@ -181,6 +189,7 @@ class TestSizeAwareBatchSampler:
         dataset = Dataset(reader, device="cpu")
 
         SizeAwareBatchSampler(dataset, max_atoms=5, max_batch_size=2)
+        SizeAwareBatchSampler(dataset, max_atoms=6, max_batch_size=3)
 
         assert reader.bulk_size_calls == 1
         assert reader.load_calls == 0
@@ -202,6 +211,49 @@ class TestSizeAwareBatchSampler:
         assert reader.full_metadata_calls == 1
         assert reader.load_calls == 0
         dataset.close()
+
+    def test_sampler_accepts_explicit_size_metadata(self) -> None:
+        """Precomputed size rows can drive sampler planning."""
+        dataset = SizeOnlyDataset([(100, 0), (100, 0), (100, 0)])
+        sampler = SizeAwareBatchSampler(
+            dataset,
+            max_atoms=5,
+            max_batch_size=2,
+            size_metadata=[(2, 0), (3, 0), (4, 0)],
+        )
+
+        assert list(sampler) == [[0, 1], [2]]
+
+    def test_sampler_supports_metadata_preserving_subset_workflows(self) -> None:
+        """PyTorch Subset can be sampled using remapped source metadata."""
+        dataset = SizeOnlyDataset([(2, 0), (100, 0), (3, 0), (4, 0)])
+        subset = Subset(dataset, [0, 2, 3])
+        sampler = SizeAwareBatchSampler(subset, max_atoms=5, max_batch_size=2)
+
+        assert list(sampler) == [[0, 1], [2]]
+
+    @pytest.mark.parametrize(
+        ("samples", "match"),
+        [
+            ([(0, 0)], "num_atoms"),
+            ([(-1, 0)], "num_atoms"),
+            ([(True, 0)], "num_atoms"),
+            ([(1, -1)], "num_edges"),
+            ([(1.5, 0)], "num_atoms"),
+            ([(1,)], "two-item"),
+            ([(1, 0, 2)], "two-item"),
+        ],
+    )
+    def test_sampler_rejects_malformed_size_metadata(
+        self, samples: list[Any], match: str
+    ) -> None:
+        """Malformed size metadata fails at sampler construction."""
+        with pytest.raises((TypeError, ValueError), match=match):
+            SizeAwareBatchSampler(
+                SizeOnlyDataset([(1, 0)] * len(samples)),
+                max_atoms=5,
+                size_metadata=samples,  # type: ignore[arg-type]
+            )
 
     def test_dynamic_atom_schedule_changes_batch_sizes(self) -> None:
         """Scheduled atom budgets are resolved once per emitted batch."""
@@ -266,6 +318,19 @@ class TestSizeAwareBatchSampler:
         )
 
         assert list(sampler) == [[0], [1, 2, 3]]
+
+    def test_max_batch_size_none_disables_graph_budget(self) -> None:
+        """A None graph budget packs solely by atom capacity."""
+        samples = [(1, 0), (1, 0), (1, 0)]
+        sampler = SizeAwareBatchSampler(
+            SizeOnlyDataset(samples),
+            max_atoms=10,
+            max_batch_size=None,
+            drop_last=True,
+        )
+
+        assert list(sampler) == [[0, 1, 2]]
+        assert len(sampler) == 1
 
     def test_oversized_sample_raises_for_known_capacity_bound(self) -> None:
         """Samples larger than the known maximum atom budget fail at construction."""
@@ -364,6 +429,30 @@ class TestSizeAwareBatchSampler:
         assert list(rank0) == [[0, 1], [4]]
         assert list(rank1) == [[2, 3], [4]]
 
+    def test_distributed_drop_last_keeps_atom_limited_batches(self) -> None:
+        """drop_last does not drop non-final atom-limited distributed groups."""
+        samples = [(100, 0), (1, 0), (100, 0), (1, 0)]
+        dataset = SizeOnlyDataset(samples)
+        rank0 = SizeAwareBatchSampler(
+            dataset,
+            max_atoms=100,
+            max_batch_size=10,
+            num_replicas=2,
+            rank=0,
+            drop_last=True,
+        )
+        rank1 = SizeAwareBatchSampler(
+            dataset,
+            max_atoms=100,
+            max_batch_size=10,
+            num_replicas=2,
+            rank=1,
+            drop_last=True,
+        )
+
+        assert list(rank0) == [[0]]
+        assert list(rank1) == [[1]]
+
     def test_drop_last_drops_final_graph_underfilled_batch(self) -> None:
         """drop_last removes a final batch that does not reach max_batch_size."""
         samples = [(1, 0), (1, 0), (1, 0)]
@@ -460,14 +549,15 @@ class TestDataLoaderBatchSamplerIntegration:
         strategy = TrainingStrategy(
             models=DemoModelWrapper(DemoModel(num_atom_types=4, hidden_dim=4)),
             optimizer_configs=OptimizerConfig(optimizer_cls=torch.optim.Adam),
-            num_epochs=1,
+            num_epochs=2,
             training_fn=default_training_fn,
             loss_fn=EnergyLoss() + ForceLoss(normalize_by_atom_count=True),
         )
 
         strategy.run(loader)
 
-        assert strategy.step_count == 2
+        assert sampler.epoch == 1
+        assert strategy.step_count == 4
         dataset.close()
 
     def test_batch_sampler_prefetch_path_uses_variable_batches(self) -> None:

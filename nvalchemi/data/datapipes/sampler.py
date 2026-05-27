@@ -19,12 +19,12 @@ from __future__ import annotations
 import bisect
 import math
 import operator
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias
 
 import torch
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, Subset
 
 
 class _SizedDataset(Protocol):
@@ -39,6 +39,14 @@ class _SizedDataset(Protocol):
         ...
 
     def get_size_metadata(self) -> list[tuple[int, int]]:
+        """Return ``(num_atoms, num_edges)`` for all samples."""
+        ...
+
+    def get_sample_size(self, index: int) -> tuple[int, int]:
+        """Return ``(num_atoms, num_edges)`` for a sample."""
+        ...
+
+    def get_all_sample_sizes(self) -> list[tuple[int, int]]:
         """Return ``(num_atoms, num_edges)`` for all samples."""
         ...
 
@@ -57,6 +65,65 @@ def _coerce_positive_int(value: Any, *, name: str) -> int:
     if integer < 1:
         raise ValueError(f"{name} must be >= 1, got {integer}")
     return integer
+
+
+def _coerce_nonnegative_int(value: Any, *, name: str) -> int:
+    """Coerce an integer-like value and require it to be non-negative."""
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer, got bool")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must resolve to an integer, got {value!r}") from exc
+    if integer < 0:
+        raise ValueError(f"{name} must be >= 0, got {integer}")
+    return integer
+
+
+def _coerce_sample_size(value: Any, *, index: int) -> tuple[int, int]:
+    """Validate and normalize one ``(num_atoms, num_edges)`` row."""
+    try:
+        num_atoms, num_edges = value
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "size metadata rows must be two-item iterables "
+            f"(num_atoms, num_edges); row {index} is {value!r}"
+        ) from exc
+    return (
+        _coerce_positive_int(num_atoms, name=f"size_metadata[{index}].num_atoms"),
+        _coerce_nonnegative_int(num_edges, name=f"size_metadata[{index}].num_edges"),
+    )
+
+
+def _get_one_sample_size(dataset: Any, index: int) -> tuple[int, int]:
+    """Return one sample size from any supported dataset-like object."""
+    if isinstance(dataset, Subset):
+        return _get_one_sample_size(
+            dataset.dataset, operator.index(dataset.indices[index])
+        )
+    if hasattr(dataset, "get_sample_size"):
+        return dataset.get_sample_size(index)
+    if hasattr(dataset, "get_metadata"):
+        return dataset.get_metadata(index)
+    raise TypeError(
+        "dataset must implement get_sample_size(index) or "
+        "get_metadata(index) -> (num_atoms, num_edges)"
+    )
+
+
+def _get_all_sample_sizes(dataset: Any) -> list[tuple[int, int]]:
+    """Return size metadata for any supported dataset-like object."""
+    if isinstance(dataset, Subset):
+        source_sizes = _get_all_sample_sizes(dataset.dataset)
+        return [
+            source_sizes[operator.index(source_index)]
+            for source_index in dataset.indices
+        ]
+    if hasattr(dataset, "get_all_sample_sizes"):
+        return list(dataset.get_all_sample_sizes())
+    if hasattr(dataset, "get_size_metadata"):
+        return list(dataset.get_size_metadata())
+    return [_get_one_sample_size(dataset, index) for index in range(len(dataset))]
 
 
 @dataclass(frozen=True)
@@ -244,7 +311,7 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
     Parameters
     ----------
     dataset : object
-        Dataset with ``__len__`` and ``get_metadata(index) -> (num_atoms, num_edges)``.
+        Dataset with ``__len__`` and sample-size metadata access.
     max_atoms : int | Callable[[int, int], int]
         Maximum total atoms per emitted batch.  Callable schedules receive
         ``(step, epoch)`` where ``step`` is the sampler-local batch index.
@@ -261,6 +328,10 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
         Number of distributed replicas.  Defaults to 1.
     rank : int | None, default=None
         Replica rank.  Defaults to 0.
+    size_metadata : Sequence[tuple[int, int]] | None, default=None
+        Optional precomputed ``(num_atoms, num_edges)`` rows aligned to
+        ``dataset`` indices. When provided, the sampler does not query the
+        dataset for size metadata.
 
     Attributes
     ----------
@@ -283,14 +354,11 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
         seed: int = 0,
         num_replicas: int | None = None,
         rank: int | None = None,
+        size_metadata: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         """Initialize the size-aware batch sampler."""
         if not hasattr(dataset, "__len__"):
             raise TypeError("dataset must implement __len__")
-        if not hasattr(dataset, "get_metadata"):
-            raise TypeError(
-                "dataset must implement get_metadata(index) -> (num_atoms, num_edges)"
-            )
         self._validate_capacity(max_atoms, name="max_atoms")
         if max_batch_size is not None:
             self._validate_capacity(max_batch_size, name="max_batch_size")
@@ -318,12 +386,14 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
         self.epoch = 0
         self._len_cache: dict[int, int] = {}
 
-        if hasattr(dataset, "get_size_metadata"):
-            self._sample_meta = list(dataset.get_size_metadata())
+        if size_metadata is not None:
+            sample_meta = list(size_metadata)
         else:
-            self._sample_meta = [
-                dataset.get_metadata(index) for index in range(len(dataset))
-            ]
+            sample_meta = _get_all_sample_sizes(dataset)
+        self._sample_meta = [
+            _coerce_sample_size(value, index=index)
+            for index, value in enumerate(sample_meta)
+        ]
         if len(self._sample_meta) != len(dataset):
             raise RuntimeError(
                 "size metadata length must match dataset length; got "
@@ -525,12 +595,31 @@ class SizeAwareBatchSampler(Sampler[list[int]]):
 
             if not group:
                 break
-            if self.drop_last and (
-                len(group) < self.num_replicas
-                or any(len(batch) < graph_budget for batch in group)
+            if self.drop_last and len(group) < self.num_replicas:
+                break
+            if self.drop_last and self._should_drop_final_distributed_group(
+                group,
+                cursor=cursor,
+                graph_budget=graph_budget,
+                total_count=len(indices),
             ):
                 break
             while len(group) < self.num_replicas:
                 group.append(group[-1])
             yield group[self.rank]
             step += 1
+
+    def _should_drop_final_distributed_group(
+        self,
+        group: list[list[int]],
+        *,
+        cursor: int,
+        graph_budget: int,
+        total_count: int,
+    ) -> bool:
+        """Return whether a final distributed group is graph-underfilled."""
+        return (
+            self.max_batch_size is not None
+            and cursor >= total_count
+            and any(len(batch) < graph_budget for batch in group)
+        )

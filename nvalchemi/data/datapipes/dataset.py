@@ -185,6 +185,7 @@ class Dataset:
         # Prefetch state
         self._prefetch_futures: dict[int, Future[_PrefetchResult]] = {}
         self._executor: ThreadPoolExecutor | None = None
+        self._size_metadata_cache: list[tuple[int, int]] | None = None
         self._full_metadata_cache: list[dict[str, Any]] | None = None
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
@@ -201,6 +202,18 @@ class Dataset:
                 thread_name_prefix="datapipe_prefetch",
             )
         return self._executor
+
+    def _load_raw_sample(
+        self, index: int
+    ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """Load raw tensors and metadata through the reader policy."""
+        data_dict = self.reader._load_sample(index)
+        metadata = dict(self.reader._get_sample_metadata(index))
+        if getattr(self.reader, "include_index_in_metadata", False):
+            metadata["index"] = index
+        if getattr(self.reader, "pin_memory", False):
+            data_dict = {key: value.pin_memory() for key, value in data_dict.items()}
+        return data_dict, metadata
 
     def _load_and_transform(
         self,
@@ -227,8 +240,7 @@ class Dataset:
 
         try:
             # Load raw dict from reader (CPU, potentially slow IO)
-            data_dict = self.reader._load_sample(index)
-            metadata = self.reader._get_sample_metadata(index)
+            data_dict, metadata = self._load_raw_sample(index)
 
             # Construct AtomicData directly from dict
             data = AtomicData.model_validate(data_dict)
@@ -346,8 +358,7 @@ class Dataset:
             return result.data, result.metadata
 
         # Not prefetched, load synchronously
-        data_dict = self.reader._load_sample(index)
-        metadata = self.reader._get_sample_metadata(index)
+        data_dict, metadata = self._load_raw_sample(index)
 
         # Construct AtomicData directly from dict
         data = AtomicData.model_validate(data_dict)
@@ -368,8 +379,8 @@ class Dataset:
         """
         return len(self.reader)
 
-    def get_metadata(self, index: int) -> tuple[int, int]:
-        """Return lightweight metadata for a sample without full construction.
+    def get_sample_size(self, index: int) -> tuple[int, int]:
+        """Return lightweight size metadata for a sample.
 
         Delegates to the reader's size-metadata hook. Backends with pointer
         metadata can answer this without loading full sample tensors; generic
@@ -392,10 +403,14 @@ class Dataset:
         KeyError
             If the sample dict does not contain ``"atomic_numbers"``.
         """
+        if self._size_metadata_cache is not None:
+            return self._size_metadata_cache[index]
         if self._full_metadata_cache is not None:
             metadata = self._full_metadata_cache[index]
             return int(metadata["num_atoms"]), int(metadata["num_edges"])
 
+        if hasattr(self.reader, "get_sample_size"):
+            return self.reader.get_sample_size(index)
         if hasattr(self.reader, "_get_sample_size"):
             return self.reader._get_sample_size(index)
 
@@ -406,7 +421,24 @@ class Dataset:
             num_edges = data_dict["neighbor_list"].shape[0]
         return num_atoms, num_edges
 
-    def get_size_metadata(self) -> list[tuple[int, int]]:
+    def get_metadata(self, index: int) -> tuple[int, int]:
+        """Return lightweight size metadata for a sample.
+
+        This is a compatibility alias for :meth:`get_sample_size`.
+
+        Parameters
+        ----------
+        index : int
+            Sample index.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(num_atoms, num_edges)`` for the sample.
+        """
+        return self.get_sample_size(index)
+
+    def get_all_sample_sizes(self) -> list[tuple[int, int]]:
         """Return lightweight size metadata for all samples.
 
         Returns
@@ -414,17 +446,36 @@ class Dataset:
         list[tuple[int, int]]
             ``(num_atoms, num_edges)`` for each sample.
         """
+        if self._size_metadata_cache is not None:
+            return list(self._size_metadata_cache)
         if self._full_metadata_cache is not None:
-            return [
+            self._size_metadata_cache = [
                 (int(metadata["num_atoms"]), int(metadata["num_edges"]))
                 for metadata in self._full_metadata_cache
             ]
-        if hasattr(self.reader, "_get_all_sample_sizes"):
-            return self.reader._get_all_sample_sizes()
-        return [
-            (int(metadata["num_atoms"]), int(metadata["num_edges"]))
-            for metadata in self.get_full_metadata()
-        ]
+            return list(self._size_metadata_cache)
+        if hasattr(self.reader, "get_all_sample_sizes"):
+            self._size_metadata_cache = list(self.reader.get_all_sample_sizes())
+        elif hasattr(self.reader, "_get_all_sample_sizes"):
+            self._size_metadata_cache = list(self.reader._get_all_sample_sizes())
+        else:
+            self._size_metadata_cache = [
+                (int(metadata["num_atoms"]), int(metadata["num_edges"]))
+                for metadata in self.get_full_metadata()
+            ]
+        return list(self._size_metadata_cache)
+
+    def get_size_metadata(self) -> list[tuple[int, int]]:
+        """Return lightweight size metadata for all samples.
+
+        This is a compatibility alias for :meth:`get_all_sample_sizes`.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            ``(num_atoms, num_edges)`` for each sample.
+        """
+        return self.get_all_sample_sizes()
 
     def get_full_metadata(self) -> list[dict[str, Any]]:
         """Return full metadata dictionaries for all samples.
@@ -446,9 +497,11 @@ class Dataset:
             If size metadata cannot be derived from the sample payload.
         """
         if self._full_metadata_cache is not None:
-            return self._full_metadata_cache
+            return [dict(metadata) for metadata in self._full_metadata_cache]
 
-        if hasattr(self.reader, "_get_all_sample_metadata"):
+        if hasattr(self.reader, "get_all_sample_metadata"):
+            metadata_rows = [dict(row) for row in self.reader.get_all_sample_metadata()]
+        elif hasattr(self.reader, "_get_all_sample_metadata"):
             metadata_rows = [
                 dict(row) for row in self.reader._get_all_sample_metadata()
             ]
@@ -483,7 +536,25 @@ class Dataset:
                 metadata.setdefault("num_edges", num_edges)
 
         self._full_metadata_cache = metadata_rows
-        return metadata_rows
+        self._size_metadata_cache = [
+            (int(metadata["num_atoms"]), int(metadata["num_edges"]))
+            for metadata in metadata_rows
+        ]
+        return [dict(metadata) for metadata in metadata_rows]
+
+    def clear_metadata_cache(self) -> None:
+        """Clear cached size and full metadata."""
+        self._size_metadata_cache = None
+        self._full_metadata_cache = None
+
+    def refresh(self) -> None:
+        """Refresh the reader when supported and clear cached metadata.
+
+        Call this after external changes to a mutable backing store.
+        """
+        if hasattr(self.reader, "refresh"):
+            self.reader.refresh()
+        self.clear_metadata_cache()
 
     def __iter__(self) -> Iterator[tuple[AtomicData, dict[str, Any]]]:
         """Iterate over all samples in the dataset.
@@ -516,7 +587,7 @@ class Dataset:
             self._executor = None
 
         # Close reader
-        self._full_metadata_cache = None
+        self.clear_metadata_cache()
         self.reader.close()
 
     def __enter__(self) -> Dataset:

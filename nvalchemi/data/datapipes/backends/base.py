@@ -172,6 +172,31 @@ class Reader(ABC):
         """
         return [self._get_sample_size(index) for index in range(len(self))]
 
+    def get_sample_size(self, index: int) -> tuple[int, int]:
+        """Return atom and edge counts for a sample.
+
+        Parameters
+        ----------
+        index : int
+            Sample index.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(num_atoms, num_edges)`` for the sample.
+        """
+        return self._get_sample_size(index)
+
+    def get_all_sample_sizes(self) -> list[tuple[int, int]]:
+        """Return atom and edge counts for all samples.
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            ``(num_atoms, num_edges)`` for each sample.
+        """
+        return self._get_all_sample_sizes()
+
     def _get_all_sample_metadata(self) -> list[dict[str, Any]]:
         """Return metadata dictionaries for all samples.
 
@@ -195,6 +220,16 @@ class Reader(ABC):
             metadata["num_edges"] = num_edges
             metadata_rows.append(metadata)
         return metadata_rows
+
+    def get_all_sample_metadata(self) -> list[dict[str, Any]]:
+        """Return metadata dictionaries for all samples.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Metadata dictionary for each sample.
+        """
+        return self._get_all_sample_metadata()
 
     @property
     def field_names(self) -> list[str]:

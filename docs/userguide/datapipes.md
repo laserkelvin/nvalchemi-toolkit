@@ -87,12 +87,27 @@ while the model is processing the current one.
 
 Samplers often need to know sample sizes (how many atoms? how many edges?) before
 deciding which samples to group into a batch.
-{py:meth}`~nvalchemi.data.datapipes.dataset.Dataset.get_metadata` returns
+{py:meth}`~nvalchemi.data.datapipes.dataset.Dataset.get_sample_size` returns
 `(num_atoms, num_edges)` for a given index without constructing the full
 `AtomicData`, keeping the overhead low.
 {py:meth}`~nvalchemi.data.datapipes.dataset.Dataset.get_full_metadata` returns
 all sample metadata in one call and caches it on the dataset, so backends such
-as Zarr can amortize metadata I/O through pointer-array reads.
+as Zarr can amortize metadata I/O through pointer-array reads. The returned rows
+are defensive copies, so callers can sort, filter, or annotate them without
+mutating the dataset cache.
+
+For Zarr-backed datasets, full metadata rows include:
+
+| Field | Meaning |
+|------------------|----------------------------------------------------------|
+| `index` | Logical dataset index, when enabled by the reader |
+| `physical_index` | Physical Zarr sample index before deleted-sample masking |
+| `source_file` | Zarr store path |
+| `num_atoms` | Number of atoms in the sample |
+| `num_edges` | Number of neighbor-list edges in the sample |
+
+Use {py:meth}`~nvalchemi.data.datapipes.dataset.Dataset.refresh` after external
+store mutations to refresh the reader and clear cached metadata.
 
 ## DataLoader: batching and iteration
 
@@ -155,6 +170,24 @@ Instead of grouping a fixed count of graphs, the sampler fills each batch until
 adding another sample would exceed `max_atoms` or `max_batch_size`. It yields
 lists of dataset indices; the DataLoader still owns sample loading, stream
 prefetching, and `Batch.from_data_list` collation.
+
+Metadata-driven splits compose with the sampler through
+`torch.utils.data.Subset`:
+
+```python
+from torch.utils.data import Subset
+
+metadata = dataset.get_full_metadata()
+small_indices = [row["index"] for row in metadata if row["num_atoms"] <= 128]
+small_dataset = Subset(dataset, small_indices)
+
+batch_sampler = SizeAwareBatchSampler(
+    dataset=small_dataset,
+    max_atoms=4096,
+    max_batch_size=64,
+)
+loader = DataLoader(dataset=small_dataset, batch_sampler=batch_sampler)
+```
 
 ### Capacity schedules
 

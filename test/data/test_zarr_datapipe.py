@@ -1214,9 +1214,76 @@ class TestDataset:
                 one_size = dataset.get_metadata(1)
 
         assert get_all_metadata.call_count == 1
-        assert metadata_again is metadata
+        assert metadata_again == metadata
+        assert metadata_again is not metadata
         assert size_metadata == [(2, 3), (4, 5)]
         assert one_size == (4, 5)
+
+    def test_dataset_full_metadata_returns_defensive_copies(
+        self, tmp_path: Path
+    ) -> None:
+        """Mutating returned metadata does not corrupt dataset caches."""
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write([_make_atomic_data(2, 3), _make_atomic_data(4, 5)])
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            dataset = Dataset(reader, device="cpu")
+            metadata = dataset.get_full_metadata()
+            metadata[0]["num_atoms"] = 999
+            metadata.reverse()
+
+            assert dataset.get_metadata(0) == (2, 3)
+            assert dataset.get_size_metadata() == [(2, 3), (4, 5)]
+            assert dataset.get_full_metadata()[0]["num_atoms"] == 2
+
+    def test_dataset_refresh_clears_metadata_caches(self, tmp_path: Path) -> None:
+        """Dataset.refresh updates mutable reader state and metadata caches."""
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write([_make_atomic_data(2, 3), _make_atomic_data(4, 5)])
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            dataset = Dataset(reader, device="cpu")
+            assert len(dataset.get_full_metadata()) == 2
+
+            writer.delete([1])
+            dataset.refresh()
+
+            assert len(dataset) == 1
+            assert dataset.get_size_metadata() == [(2, 3)]
+            assert len(dataset.get_full_metadata()) == 1
+
+    def test_dataset_get_size_metadata_uses_fresh_zarr_fast_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Fresh size metadata uses Zarr pointers and skips deleted samples."""
+        data_list = [
+            _make_atomic_data(2, 3),
+            _make_atomic_data(5, 7),
+            _make_atomic_data(4, 6),
+        ]
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(data_list)
+        writer.delete([1])
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            dataset = Dataset(reader, device="cpu")
+            with (
+                patch.object(
+                    reader,
+                    "_load_sample",
+                    side_effect=AssertionError("sample payload should not load"),
+                ),
+                patch.object(
+                    reader,
+                    "_get_all_sample_metadata",
+                    side_effect=AssertionError("full metadata should not load"),
+                ),
+            ):
+                size_metadata = dataset.get_size_metadata()
+                size_metadata_again = dataset.get_size_metadata()
+
+        assert size_metadata == [(2, 3), (4, 6)]
+        assert size_metadata_again == [(2, 3), (4, 6)]
 
 
 def test_dataset_returns_atomic_data(tmp_path: Path) -> None:
@@ -2179,6 +2246,21 @@ class TestDatasetCoverage:
         data, _ = ds[0]
         assert data.positions.device.type == torch.device(device).type
 
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="pin_memory requires CUDA"
+    )
+    def test_getitem_applies_reader_pin_memory_policy(self):
+        """Dataset direct loads honor reader pinning without Reader.__getitem__."""
+
+        class _PinningReader(_SimpleReader):
+            pin_memory = True
+
+        ds = Dataset(_PinningReader(), device="cpu")
+        data, _ = ds[0]
+
+        assert data.atomic_numbers.is_pinned()
+        assert data.positions.is_pinned()
+
     # ------------------------------------------------------------------
     # prefetch / cancel_prefetch
     # ------------------------------------------------------------------
@@ -2264,7 +2346,8 @@ class TestDatasetCoverage:
         metadata = ds.get_full_metadata()
         metadata_again = ds.get_full_metadata()
 
-        assert metadata_again is metadata
+        assert metadata_again == metadata
+        assert metadata_again is not metadata
         assert reader.load_calls == 2
         assert metadata == [
             {"src_index": 0, "num_atoms": 1, "num_edges": 0},
