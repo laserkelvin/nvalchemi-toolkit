@@ -739,6 +739,59 @@ class TestAtomicDataZarrReader:
         with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
             assert len(reader) == len(data_list) - 1
 
+    def test_full_metadata_skips_deleted_without_loading_samples(
+        self, tmp_path: Path
+    ) -> None:
+        """Bulk metadata uses pointer arrays and active logical indices."""
+        data_list = [
+            _make_atomic_data(2, 3),
+            _make_atomic_data(5, 7),
+            _make_atomic_data(4, 6),
+        ]
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(data_list)
+        writer.delete([1])
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            with patch.object(
+                reader,
+                "_load_sample",
+                side_effect=AssertionError("sample payload should not load"),
+            ) as load_sample:
+                metadata = reader._get_all_sample_metadata()
+
+        assert load_sample.call_count == 0
+        assert metadata == [
+            {
+                "source_file": str(tmp_path / "test.zarr"),
+                "physical_index": "0",
+                "num_atoms": 2,
+                "num_edges": 3,
+                "index": 0,
+            },
+            {
+                "source_file": str(tmp_path / "test.zarr"),
+                "physical_index": "2",
+                "num_atoms": 4,
+                "num_edges": 6,
+                "index": 1,
+            },
+        ]
+
+    def test_full_metadata_respects_index_metadata_flag(self, tmp_path: Path) -> None:
+        """Bulk metadata omits logical index when requested by the reader."""
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(_make_atomic_data(2, 3))
+
+        with AtomicDataZarrReader(
+            tmp_path / "test.zarr", include_index_in_metadata=False
+        ) as reader:
+            metadata = reader._get_all_sample_metadata()
+
+        assert "index" not in metadata[0]
+        assert metadata[0]["num_atoms"] == 2
+        assert metadata[0]["num_edges"] == 3
+
     @pytest.mark.parametrize("num_samples", [1, 3, 5])
     def test_variable_size_samples(self, num_samples: int, tmp_path: Path) -> None:
         """Verify samples with very different sizes load correctly."""
@@ -1141,6 +1194,29 @@ class TestDataset:
             assert (
                 loaded1.atomic_numbers.shape[0] == data_list[2].atomic_numbers.shape[0]
             )
+
+    def test_dataset_caches_full_metadata(self, tmp_path: Path) -> None:
+        """Dataset full metadata is loaded once and reused for size access."""
+        data_list = [_make_atomic_data(2, 3), _make_atomic_data(4, 5)]
+        writer = AtomicDataZarrWriter(tmp_path / "test.zarr")
+        writer.write(data_list)
+
+        with AtomicDataZarrReader(tmp_path / "test.zarr") as reader:
+            dataset = Dataset(reader, device="cpu")
+            with patch.object(
+                reader,
+                "_get_all_sample_metadata",
+                wraps=reader._get_all_sample_metadata,
+            ) as get_all_metadata:
+                metadata = dataset.get_full_metadata()
+                metadata_again = dataset.get_full_metadata()
+                size_metadata = dataset.get_size_metadata()
+                one_size = dataset.get_metadata(1)
+
+        assert get_all_metadata.call_count == 1
+        assert metadata_again is metadata
+        assert size_metadata == [(2, 3), (4, 5)]
+        assert one_size == (4, 5)
 
 
 def test_dataset_returns_atomic_data(tmp_path: Path) -> None:
@@ -2170,6 +2246,30 @@ class TestDatasetCoverage:
         num_atoms, num_edges = ds.get_metadata(0)
         assert num_atoms == 2
         assert num_edges == 2
+
+    def test_get_full_metadata_fallback_enriches_and_caches(self):
+        """Duck-typed readers get cached full metadata from one sample pass."""
+
+        class _TrackingReader(_SimpleReader):
+            def __init__(self, n: int = 3) -> None:
+                super().__init__(n)
+                self.load_calls = 0
+
+            def _load_sample(self, index: int) -> dict:
+                self.load_calls += 1
+                return super()._load_sample(index)
+
+        reader = _TrackingReader(n=2)
+        ds = Dataset(reader, device="cpu")
+        metadata = ds.get_full_metadata()
+        metadata_again = ds.get_full_metadata()
+
+        assert metadata_again is metadata
+        assert reader.load_calls == 2
+        assert metadata == [
+            {"src_index": 0, "num_atoms": 1, "num_edges": 0},
+            {"src_index": 1, "num_atoms": 1, "num_edges": 0},
+        ]
 
     # ------------------------------------------------------------------
     # __iter__

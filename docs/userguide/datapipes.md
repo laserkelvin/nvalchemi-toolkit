@@ -90,6 +90,9 @@ deciding which samples to group into a batch.
 {py:meth}`~nvalchemi.data.datapipes.dataset.Dataset.get_metadata` returns
 `(num_atoms, num_edges)` for a given index without constructing the full
 `AtomicData`, keeping the overhead low.
+{py:meth}`~nvalchemi.data.datapipes.dataset.Dataset.get_full_metadata` returns
+all sample metadata in one call and caches it on the dataset, so backends such
+as Zarr can amortize metadata I/O through pointer-array reads.
 
 ## DataLoader: batching and iteration
 

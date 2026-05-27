@@ -203,6 +203,41 @@ class TestReaderGetSampleMetadata:
         reader = MinimalReader()
         assert reader._get_sample_metadata(0) == {}
 
+    def test_get_all_sample_metadata_includes_sizes_and_index(self):
+        """Bulk metadata includes sample metadata, index, and size fields."""
+
+        class MetadataReader(MinimalReader):
+            def _get_sample_metadata(self, index: int) -> dict[str, int]:
+                return {"source_index": index}
+
+        data = [
+            {
+                "atomic_numbers": torch.ones(2, dtype=torch.long),
+                "neighbor_list": torch.zeros(3, 2, dtype=torch.long),
+            },
+            {
+                "atomic_numbers": torch.ones(4, dtype=torch.long),
+                "neighbor_list": torch.zeros(5, 2, dtype=torch.long),
+            },
+        ]
+        reader = MetadataReader(data)
+
+        metadata = reader._get_all_sample_metadata()
+
+        assert metadata == [
+            {"source_index": 0, "index": 0, "num_atoms": 2, "num_edges": 3},
+            {"source_index": 1, "index": 1, "num_atoms": 4, "num_edges": 5},
+        ]
+
+    def test_get_all_sample_metadata_respects_index_flag(self):
+        """Bulk metadata omits index when include_index_in_metadata=False."""
+        data = [{"atomic_numbers": torch.ones(2, dtype=torch.long)}]
+        reader = MinimalReader(data, include_index_in_metadata=False)
+
+        metadata = reader._get_all_sample_metadata()
+
+        assert metadata == [{"num_atoms": 2, "num_edges": 0}]
+
 
 # ---------------------------------------------------------------------------
 # TestReaderIteration

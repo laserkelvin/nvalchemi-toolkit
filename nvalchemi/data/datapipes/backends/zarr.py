@@ -1427,6 +1427,43 @@ class AtomicDataZarrReader(Reader):
         )
         return list(zip(atom_counts.tolist(), edge_counts.tolist(), strict=True))
 
+    def _get_all_sample_metadata(self) -> list[dict[str, Any]]:
+        """Return metadata dictionaries for all active samples.
+
+        Uses the cached Zarr pointer arrays and active-index mapping to avoid
+        loading sample payloads or reopening the store.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Metadata dictionary for each active sample.
+        """
+        physical_indices = self._active_indices
+        atom_counts = (
+            self._atoms_ptr[physical_indices + 1] - self._atoms_ptr[physical_indices]
+        ).tolist()
+        edge_counts = (
+            self._edges_ptr[physical_indices + 1] - self._edges_ptr[physical_indices]
+        ).tolist()
+        physical_indices_list = physical_indices.tolist()
+        source_file = str(self._store)
+
+        metadata_rows: list[dict[str, Any]] = []
+        for index, (physical_idx, num_atoms, num_edges) in enumerate(
+            zip(physical_indices_list, atom_counts, edge_counts, strict=True)
+        ):
+            metadata: dict[str, Any] = {
+                "source_file": source_file,
+                "physical_index": str(physical_idx),
+                "num_atoms": int(num_atoms),
+                "num_edges": int(num_edges),
+            }
+            if self.include_index_in_metadata:
+                metadata["index"] = index
+            metadata_rows.append(metadata)
+
+        return metadata_rows
+
     def __len__(self) -> int:
         """Return the number of active (non-deleted) samples.
 

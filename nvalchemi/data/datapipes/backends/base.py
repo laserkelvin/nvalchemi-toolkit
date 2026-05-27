@@ -172,6 +172,30 @@ class Reader(ABC):
         """
         return [self._get_sample_size(index) for index in range(len(self))]
 
+    def _get_all_sample_metadata(self) -> list[dict[str, Any]]:
+        """Return metadata dictionaries for all samples.
+
+        The base implementation builds metadata one sample at a time and
+        enriches each row with ``"num_atoms"`` and ``"num_edges"``. Storage
+        backends with compact metadata arrays should override this method to
+        amortize metadata I/O.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Metadata dictionary for each sample.
+        """
+        metadata_rows: list[dict[str, Any]] = []
+        for index in range(len(self)):
+            metadata = dict(self._get_sample_metadata(index))
+            if self.include_index_in_metadata:
+                metadata["index"] = index
+            num_atoms, num_edges = self._get_sample_size(index)
+            metadata["num_atoms"] = num_atoms
+            metadata["num_edges"] = num_edges
+            metadata_rows.append(metadata)
+        return metadata_rows
+
     @property
     def field_names(self) -> list[str]:
         """Field names available in each sample.

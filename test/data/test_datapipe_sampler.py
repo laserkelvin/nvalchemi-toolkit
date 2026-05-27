@@ -120,6 +120,37 @@ class SizeMetadataReader(AtomicListReader):
         return [(num_atoms, 0) for num_atoms in self.atom_counts]
 
 
+class FullMetadataReader(AtomicListReader):
+    """Reader with explicit full metadata hooks.
+
+    Attributes
+    ----------
+    load_calls : int
+        Number of full sample loads.
+    full_metadata_calls : int
+        Number of bulk full metadata calls.
+    """
+
+    def __init__(self, atom_counts: list[int]) -> None:
+        """Initialize the reader and counters."""
+        super().__init__(atom_counts)
+        self.load_calls = 0
+        self.full_metadata_calls = 0
+
+    def _load_sample(self, index: int) -> dict[str, torch.Tensor]:
+        """Count full sample loads."""
+        self.load_calls += 1
+        return super()._load_sample(index)
+
+    def _get_all_sample_metadata(self) -> list[dict[str, Any]]:
+        """Return full metadata without loading full samples."""
+        self.full_metadata_calls += 1
+        return [
+            {"index": index, "num_atoms": num_atoms, "num_edges": 0}
+            for index, num_atoms in enumerate(self.atom_counts)
+        ]
+
+
 def _batch_atom_counts(
     batches: list[list[int]], samples: list[tuple[int, int]]
 ) -> list[int]:
@@ -152,6 +183,23 @@ class TestSizeAwareBatchSampler:
         SizeAwareBatchSampler(dataset, max_atoms=5, max_batch_size=2)
 
         assert reader.bulk_size_calls == 1
+        assert reader.load_calls == 0
+        dataset.close()
+
+    def test_sampler_uses_cached_full_metadata_for_sizes(self) -> None:
+        """Sampler size metadata projects from cached full metadata."""
+        reader = FullMetadataReader([2, 3, 4])
+        dataset = Dataset(reader, device="cpu")
+        metadata = dataset.get_full_metadata()
+
+        SizeAwareBatchSampler(dataset, max_atoms=5, max_batch_size=2)
+
+        assert metadata == [
+            {"index": 0, "num_atoms": 2, "num_edges": 0},
+            {"index": 1, "num_atoms": 3, "num_edges": 0},
+            {"index": 2, "num_atoms": 4, "num_edges": 0},
+        ]
+        assert reader.full_metadata_calls == 1
         assert reader.load_calls == 0
         dataset.close()
 

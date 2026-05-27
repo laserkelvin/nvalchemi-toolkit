@@ -185,6 +185,7 @@ class Dataset:
         # Prefetch state
         self._prefetch_futures: dict[int, Future[_PrefetchResult]] = {}
         self._executor: ThreadPoolExecutor | None = None
+        self._full_metadata_cache: list[dict[str, Any]] | None = None
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
         """Lazily create the thread pool executor.
@@ -391,6 +392,10 @@ class Dataset:
         KeyError
             If the sample dict does not contain ``"atomic_numbers"``.
         """
+        if self._full_metadata_cache is not None:
+            metadata = self._full_metadata_cache[index]
+            return int(metadata["num_atoms"]), int(metadata["num_edges"])
+
         if hasattr(self.reader, "_get_sample_size"):
             return self.reader._get_sample_size(index)
 
@@ -409,9 +414,76 @@ class Dataset:
         list[tuple[int, int]]
             ``(num_atoms, num_edges)`` for each sample.
         """
+        if self._full_metadata_cache is not None:
+            return [
+                (int(metadata["num_atoms"]), int(metadata["num_edges"]))
+                for metadata in self._full_metadata_cache
+            ]
         if hasattr(self.reader, "_get_all_sample_sizes"):
             return self.reader._get_all_sample_sizes()
-        return [self.get_metadata(index) for index in range(len(self))]
+        return [
+            (int(metadata["num_atoms"]), int(metadata["num_edges"]))
+            for metadata in self.get_full_metadata()
+        ]
+
+    def get_full_metadata(self) -> list[dict[str, Any]]:
+        """Return full metadata dictionaries for all samples.
+
+        The result is cached on first use so callers can amortize metadata I/O.
+        Each row includes the reader-provided sample metadata plus
+        ``"num_atoms"`` and ``"num_edges"`` size fields.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Metadata dictionary for each sample in dataset index order.
+
+        Raises
+        ------
+        RuntimeError
+            If a reader bulk metadata hook returns the wrong number of rows.
+        KeyError
+            If size metadata cannot be derived from the sample payload.
+        """
+        if self._full_metadata_cache is not None:
+            return self._full_metadata_cache
+
+        if hasattr(self.reader, "_get_all_sample_metadata"):
+            metadata_rows = [
+                dict(row) for row in self.reader._get_all_sample_metadata()
+            ]
+        else:
+            metadata_rows = []
+            for index in range(len(self)):
+                metadata = dict(self.reader._get_sample_metadata(index))
+                if getattr(self.reader, "include_index_in_metadata", False):
+                    metadata["index"] = index
+                data_dict = self.reader._load_sample(index)
+                metadata["num_atoms"] = len(data_dict["atomic_numbers"])
+                metadata["num_edges"] = (
+                    data_dict["neighbor_list"].shape[0]
+                    if "neighbor_list" in data_dict
+                    and data_dict["neighbor_list"] is not None
+                    else 0
+                )
+                metadata_rows.append(metadata)
+
+        if len(metadata_rows) != len(self):
+            raise RuntimeError(
+                "full metadata length must match dataset length; got "
+                f"{len(metadata_rows)} metadata rows for {len(self)} samples"
+            )
+
+        for index, metadata in enumerate(metadata_rows):
+            if getattr(self.reader, "include_index_in_metadata", False):
+                metadata.setdefault("index", index)
+            if "num_atoms" not in metadata or "num_edges" not in metadata:
+                num_atoms, num_edges = self.get_metadata(index)
+                metadata.setdefault("num_atoms", num_atoms)
+                metadata.setdefault("num_edges", num_edges)
+
+        self._full_metadata_cache = metadata_rows
+        return metadata_rows
 
     def __iter__(self) -> Iterator[tuple[AtomicData, dict[str, Any]]]:
         """Iterate over all samples in the dataset.
@@ -444,6 +516,7 @@ class Dataset:
             self._executor = None
 
         # Close reader
+        self._full_metadata_cache = None
         self.reader.close()
 
     def __enter__(self) -> Dataset:
