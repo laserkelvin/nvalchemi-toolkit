@@ -221,6 +221,8 @@ class EnergyLoss(BaseLossFunction):
         every target entry is ``NaN`` the loss is ``0.0``.
     """
 
+    requires_eval_grad: bool = False
+
     def __init__(
         self,
         *,
@@ -378,6 +380,8 @@ class ForceLoss(BaseLossFunction):
         graph whose entire force tensor is ``NaN`` contributes ``0.0``
         to the loss.
     """
+
+    requires_eval_grad: bool = True
 
     def __init__(
         self,
@@ -657,6 +661,8 @@ class StressLoss(BaseLossFunction):
         A graph whose entire stress tensor is ``NaN`` contributes
         ``0.0`` to the loss.
     """
+
+    requires_eval_grad: bool = True
 
     def __init__(
         self,
