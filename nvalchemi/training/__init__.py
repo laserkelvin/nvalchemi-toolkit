@@ -28,7 +28,7 @@ from nvalchemi.training._spec import (
     register_type_serializer,
 )
 from nvalchemi.training._stages import TrainingStage
-from nvalchemi.training.hooks import EMAHook
+from nvalchemi.training.hooks import EMAHook, EvaluateHook
 from nvalchemi.training.losses import (
     BaseLossFunction,
     ComposedLossFunction,
@@ -68,6 +68,7 @@ __all__ = [
     "CosineWeight",
     "EMAHook",
     "EnergyLoss",
+    "EvaluateHook",
     "ForceLoss",
     "LinearWeight",
     "LossWeightSchedule",
