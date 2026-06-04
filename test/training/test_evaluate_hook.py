@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from nvalchemi.data import Batch
 from nvalchemi.hooks._context import TrainContext
 from nvalchemi.models.base import BaseModelMixin
-from nvalchemi.training import EnergyLoss, TrainingStage
+from nvalchemi.training import EnergyMSELoss, TrainingStage
 from nvalchemi.training.hooks import (
     EMAHook,
     EvaluateHook,
@@ -77,7 +77,7 @@ def _energy_strategy_kwargs(model: BaseModelMixin | None = None) -> dict[str, An
     return {
         **_build_baseline_strategy_kwargs(models=model or _build_demo_model()),
         "training_fn": energy_only_training_fn,
-        "loss_fn": EnergyLoss(),
+        "loss_fn": EnergyMSELoss(),
     }
 
 
@@ -265,8 +265,8 @@ class TestEvaluateHookValidationLoop:
         assert strategy.validation["num_batches"] == 1
         assert strategy.validation["model_source"] == "live"
         assert "total_loss" in strategy.validation
-        assert "EnergyLoss" in strategy.validation["per_component_total"]
-        assert "ForceLoss" in strategy.validation["per_component_total"]
+        assert "EnergyMSELoss" in strategy.validation["per_component_total"]
+        assert "ForceMSELoss" in strategy.validation["per_component_total"]
 
     def test_default_epoch_schedule_runs_at_training_end_for_num_steps(
         self, batch: Batch
@@ -274,7 +274,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
         )
         strategy = TrainingStrategy(
@@ -303,7 +303,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             every_n_steps=2,
             grad_mode="disabled",
         )
@@ -334,7 +334,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             every_n_steps=1,
             grad_mode="disabled",
         )
@@ -365,7 +365,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             every_n_epochs=2,
             grad_mode="disabled",
         )
@@ -411,7 +411,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
         )
         strategy = TrainingStrategy(
@@ -421,7 +421,7 @@ class TestEvaluateHookValidationLoop:
             },
             num_epochs=1,
             training_fn=named_energy_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             hooks=[hook],
         )
 
@@ -436,7 +436,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
         )
         strategy = TrainingStrategy(
@@ -451,7 +451,7 @@ class TestEvaluateHookValidationLoop:
         hook = EvaluateHook(
             validation_data=[],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
         )
         strategy = TrainingStrategy(**{**_energy_strategy_kwargs(), "hooks": [hook]})
@@ -476,7 +476,7 @@ class TestEvaluateHookEMA:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             every_n_steps=1,
             grad_mode="disabled",
         )
@@ -507,7 +507,7 @@ class TestEvaluateHookEMA:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             every_n_steps=1,
             grad_mode="disabled",
         )
@@ -526,7 +526,7 @@ class TestEvaluateHookEMA:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             stage=TrainingStage.BEFORE_TRAINING,
             grad_mode="disabled",
             use_ema="always",
@@ -556,7 +556,7 @@ class TestEvaluateHookMixedPrecision:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=validation_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             every_n_steps=1,
             grad_mode="disabled",
         )
@@ -578,7 +578,7 @@ class TestEvaluateHookMixedPrecision:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             use_mixed_precision="always",
             grad_mode="disabled",
         )
@@ -595,7 +595,7 @@ class TestEvaluateHookSinks:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
             sink=sink,
             include_predictions=True,
@@ -614,8 +614,8 @@ class TestEvaluateHookSinks:
         assert sample_meta["batch_count"] == 0
         assert output_batch is not batch
         assert "eval_total_loss" in output_batch
-        assert "eval_loss_EnergyLoss" in output_batch
-        assert "eval_component_total_EnergyLoss" in output_batch
+        assert "eval_loss_EnergyMSELoss" in output_batch
+        assert "eval_component_total_EnergyMSELoss" in output_batch
         assert "eval_prediction_predicted_energy" in output_batch
         assert output_batch.eval_total_loss.shape[0] == batch.num_graphs
         assert (
@@ -623,18 +623,18 @@ class TestEvaluateHookSinks:
         )
         assert "eval_total_loss" not in batch
         assert len(sink.batch_summaries) == 1
-        assert "eval_loss_mean_EnergyLoss" in sink.batch_summaries[0][0]
+        assert "eval_loss_mean_EnergyMSELoss" in sink.batch_summaries[0][0]
         assert len(sink.epoch_summaries) == 1
         _epoch_batch, epoch_meta = sink.epoch_summaries[0]
-        assert set(epoch_meta["local_summary"]) == {"EnergyLoss", "total_loss"}
-        assert set(epoch_meta["global_summary"]) == {"EnergyLoss", "total_loss"}
+        assert set(epoch_meta["local_summary"]) == {"EnergyMSELoss", "total_loss"}
+        assert set(epoch_meta["global_summary"]) == {"EnergyMSELoss", "total_loss"}
 
     def test_write_only_sink_gets_sample_batch_fallback(self, batch: Batch) -> None:
         sink = _WriteOnlySink()
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
             sink=sink,
             write_epoch_summary=False,
@@ -645,14 +645,14 @@ class TestEvaluateHookSinks:
 
         assert len(sink.batches) == 1
         assert "eval_total_loss" in sink.batches[0]
-        assert "eval_loss_EnergyLoss" in sink.batches[0]
+        assert "eval_loss_EnergyMSELoss" in sink.batches[0]
 
     def test_sample_writes_can_be_coalesced(self, batch: Batch) -> None:
         sink = _RecordingEvaluationSink()
         hook = EvaluateHook(
             validation_data=[batch, batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
             sink=sink,
             write_batch_size=2,
@@ -676,7 +676,7 @@ class TestEvaluateHookSinks:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
             sink=sink,
             include_predictions=True,
@@ -691,14 +691,14 @@ class TestEvaluateHookSinks:
         step_group = root[step_key]
         sample_group = step_group["0"]["0"]
         assert "eval_total_loss" in sample_group["core"]
-        assert "eval_loss_EnergyLoss" in sample_group["core"]
+        assert "eval_loss_EnergyMSELoss" in sample_group["core"]
         assert "eval_prediction_predicted_energy" in sample_group["core"]
         assert (
-            "eval_loss_mean_EnergyLoss"
+            "eval_loss_mean_EnergyMSELoss"
             in step_group["0"]["batch_summaries"]["0"]["core"]
         )
         assert step_group["rank_means"]["total_loss"].shape == (1,)
-        assert step_group["rank_means"]["EnergyLoss"].shape == (1,)
+        assert step_group["rank_means"]["EnergyMSELoss"].shape == (1,)
         assert step_group["summary"]["total_loss"].shape == ()
         assert "summary_batch" in step_group
 
@@ -711,7 +711,7 @@ class TestEvaluateHookSinks:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
             sink=sink,
         )
@@ -782,7 +782,7 @@ class TestEvaluateHookDistributedSummary:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
         )
         strategy = TrainingStrategy(**{**_energy_strategy_kwargs(), "hooks": [hook]})
@@ -814,7 +814,7 @@ class TestEvaluateHookDistributedSummary:
         hook = EvaluateHook(
             validation_data=[batch],
             validation_fn=energy_only_training_fn,
-            loss_fn=EnergyLoss(),
+            loss_fn=EnergyMSELoss(),
             grad_mode="disabled",
         )
         strategy = TrainingStrategy(**{**_energy_strategy_kwargs(), "hooks": [hook]})
