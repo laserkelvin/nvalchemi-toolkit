@@ -60,6 +60,9 @@ responsibilities:
 
 1. **Validation**: Raw dictionaries are validated into
    {py:class}`nvalchemi.data.AtomicData` objects, catching schema issues early.
+   Pass `skip_validation=True` to bypass Pydantic validation when the backing
+   store is already known to be well-formed (see
+   [Read performance tuning](read_performance_tuning)).
 2. **Async prefetching**: A background `ThreadPoolExecutor` loads and transfers
    samples to the target device ahead of time, so the GPU is never starved.
 
@@ -118,13 +121,17 @@ Key parameters:
 | Parameter | Purpose |
 |---------------------|--------------------------------------------------------------|
 | `batch_size` | Number of graphs per batch |
-| `prefetch_factor` | How many **batches** to load ahead of the current one |
-| `num_streams` | Number of CUDA streams used for overlapping transfers |
+| `prefetch_factor` | How many **batches** to fuse into each background read ([tuning guide](read_performance_tuning)) |
+| `num_streams` | Number of CUDA streams used for overlapping transfers when CUDA is available |
+| `use_streams` | Whether prefetched CUDA transfers use CUDA streams; mega-read prefetch still runs when `False` |
 | `sampler` | Controls index ordering (defaults to sequential or random) |
 
 Unlike PyTorch's `torch.utils.data.DataLoader`, this implementation returns
 {py:class}`nvalchemi.data.Batch` objects (disjoint graphs with proper node-index
 offsets) rather than generic collated tensors.
+
+Mega-read prefetching is the default path whenever `prefetch_factor > 0`.
+Set `prefetch_factor=0` only when you need fully synchronous reads.
 
 ## SizeAwareSampler: memory-safe batching
 
@@ -202,5 +209,5 @@ for batch in loader:
 - **Compression**: The [Zarr Compression Tuning Guide](zarr_compression_guide)
   covers how to configure compression and chunking when writing Zarr stores.
 - **I/O benchmark**: The [I/O benchmark tool](io_benchmark_section) lets you
-  measure write throughput and compression ratios on synthetic data before
-  choosing a configuration.
+  measure write throughput, readback throughput, and compression ratios on
+  synthetic data before choosing a configuration.
