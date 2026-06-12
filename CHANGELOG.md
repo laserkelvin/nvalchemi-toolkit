@@ -4,6 +4,9 @@
 
 ### Added
 
+- Checkpointable training hooks. Hooks such as EMA can now save restart
+  state with strategy checkpoints, so resumed training keeps averaged
+  weights instead of starting them over.
 - Training strategy checkpoint restart support, including a periodic
   checkpoint hook for step- or epoch-based saves and restart loading with
   models, optimizers, schedulers, runtime counters, and restart-safe device
@@ -15,7 +18,7 @@
   in a public, context-managed `ValidationLoop` that can also be run
   standalone outside training. An `inference_model` slot lets EMA (or SWA /
   a distillation teacher) publish averaged weights for validation to read.
-   A new `AFTER_VALIDATION` hook stage fires immediately after each pass so
+  A new `AFTER_VALIDATION` hook stage fires immediately after each pass so
    loggers can read the live summary. For per-batch logging, pass a
    `batch_callback` (any object matching the `BatchValidationCallback`
    protocol) on the config; it is invoked once per validation batch with the
@@ -25,6 +28,19 @@
   key string or a callable). Time-based schedulers step every optimizer
   step as before; metric-driven schedulers step only at validation
   checkpoints, where the validation summary supplies the metric.
+
+### Core Data Layer
+
+- **User-specified transforms** - `Dataset` accepts a `transforms=` kwarg
+  (per-sample `(AtomicData, metadata) -> (AtomicData, metadata)`) and
+  `DataLoader` accepts a `batch_transforms=` kwarg (per-batch `Batch -> Batch`).
+  Both default to `None` (backward compatible). New `nvalchemi.data.transforms`
+  subpackage exposes a polymorphic `Compose` utility plus `SampleTransform`
+  and `BatchTransform` type aliases, re-exported from `nvalchemi.data`.
+  Per-sample transforms run after device transfer on both sync and prefetch
+  paths; per-batch transforms run on the consumer thread after `Batch.from_data_list`.
+  Transform failures are wrapped in `RuntimeError` with `transform[<i>]`
+  breadcrumb and `__cause__` preserved.
 
 ### Fixed
 
