@@ -9,14 +9,14 @@ authors = [
 ]
 description = "High-performance open-source deep-learning framework for exploring, building and deploying AI atomic simulation workflows."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<=3.15"
 license = {file="LICENSE"}
 dependencies = [
     "nvalchemi-toolkit-ops>=0.4.1",
     "torch>=2.8",
     "click",
     "loguru",
-    "numpy<2.4",
+    "numpy>=2,<3",
     "jaxtyping>=0.3.2",
     "tensordict>=0.11.0",
     "pydantic>=2.11.7",
@@ -68,16 +68,16 @@ ase = [
 ]
 cu12 = [
     "nvalchemi-toolkit-ops[torch-cu12]>=0.4.1; sys_platform != 'darwin'",
-    "nvidia-physicsnemo[cu12]>=2.2.0; sys_platform != 'darwin'",
-    "cuml-cu12>=25.6.0; sys_platform != 'darwin'",
+    "nvidia-physicsnemo[cu12]>=2.2.0; sys_platform != 'darwin' and python_version < '3.14'",
+    "cuml-cu12>=25.6.0; sys_platform != 'darwin' and python_version < '3.14'",
     "torch; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu12>=0.8.0; sys_platform != 'darwin'",
 ]
 cu13 = [
     "nvalchemi-toolkit-ops[torch-cu13]>=0.4.1; sys_platform != 'darwin'",
-    "nvidia-physicsnemo[cu13]>=2.2.0; sys_platform != 'darwin'",
-    "cuml-cu13>=25.6.0; sys_platform != 'darwin'",
+    "nvidia-physicsnemo[cu13]>=2.2.0; sys_platform != 'darwin' and python_version < '3.14'",
+    "cuml-cu13>=25.6.0; sys_platform != 'darwin' and python_version < '3.14'",
     "torch; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu13>=0.8.0; sys_platform != 'darwin'",
