@@ -68,16 +68,16 @@ ase = [
 ]
 cu12 = [
     "nvalchemi-toolkit-ops[torch-cu12]>=0.4.1; sys_platform != 'darwin'",
-    "nvidia-physicsnemo[cu12]>=2.2.0; sys_platform != 'darwin' and python_version < '3.14'",
-    "cuml-cu12>=25.6.0; sys_platform != 'darwin' and python_version < '3.14'",
+    "nvidia-physicsnemo[cu12]>=2.2.0; sys_platform != 'darwin'",
+    "cuml-cu12>=26.4.0; sys_platform != 'darwin'",
     "torch; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu12>=0.8.0; sys_platform != 'darwin'",
 ]
 cu13 = [
     "nvalchemi-toolkit-ops[torch-cu13]>=0.4.1; sys_platform != 'darwin'",
-    "nvidia-physicsnemo[cu13]>=2.2.0; sys_platform != 'darwin' and python_version < '3.14'",
-    "cuml-cu13>=25.6.0; sys_platform != 'darwin' and python_version < '3.14'",
+    "nvidia-physicsnemo[cu13]>=2.2.0; sys_platform != 'darwin'",
+    "cuml-cu13>=26.4.0; sys_platform != 'darwin'",
     "torch; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu13>=0.8.0; sys_platform != 'darwin'",
@@ -129,7 +129,12 @@ conflicts = [
   ],
 ]
 override-dependencies = [
-  "python-hostlist; sys_platform == 'never'"
+  "python-hostlist; sys_platform == 'never'",
+  # physicsnemo[cu12]/[cu13] pins cupy<14, but cupy <14 has no cp314 wheel and
+  # no sdist; cupy 14 is the only way onto Python 3.14. cuml >=26.4 requires
+  # cupy >=14.0.1,!=14.1.0 anyway, so override the pin for both flavors.
+  "cupy-cuda12x>=14.0.1,!=14.1.0; sys_platform != 'darwin'",
+  "cupy-cuda13x>=14.0.1,!=14.1.0; sys_platform != 'darwin'",
 ]
 dependency-metadata = [
   { name = "nvalchemi-toolkit-ops", version = "0.4.1", requires-dist = [
@@ -175,7 +180,7 @@ dev = [
     "nvtx",
     "hypothesis>=6.135.10",
     "hypothesis-torch>=1.0.11",
-    "rdkit>=2025.3.3",
+    "rdkit>=2025.3.3; python_version < '3.15'",  # probe: no cp315 x86_64 wheel yet (2026.3.6 has aarch64/mac only)
     "pytest-dependency>=0.6.0",
     "pytest-testmon>=2.2.0",
 ]
