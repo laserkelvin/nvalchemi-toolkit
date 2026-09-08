@@ -25,7 +25,8 @@ dependencies = [
     "zarr>=3",
     "periodictable==2.0.2",
     "rich>=13.0.0",
-    "plotext",
+    # plotext 6 removed clf(), which hooks/reporting and training/cli call.
+    "plotext<6",
     "nvidia-physicsnemo>=2.2.0",
 ]
 keywords = [
