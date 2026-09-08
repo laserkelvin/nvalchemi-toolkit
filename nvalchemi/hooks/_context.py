@@ -24,7 +24,7 @@ from torch.nn import ModuleDict
 from torch.optim.lr_scheduler import LRScheduler
 
 if TYPE_CHECKING:
-    from tensordict import TensorDictBase
+    from tensordict import TensorDict, TensorDictBase
 
     from nvalchemi.data.batch import Batch
     from nvalchemi.models.base import BaseModelMixin
@@ -174,11 +174,28 @@ class GenerationContext(HookContext):
         conditioning embedding computed at ``AFTER_CONDITION`` and consumed
         at ``AFTER_GENERATE``).
     step_count : int
+    step_count : int
         Which generation call this is within a stream; ``0`` for a one-shot
         call. Drives hook frequency gating.
+    sample : Any
+        The raw sample for this call, set when the generating function
+        returns and exposed to hooks at ``AFTER_SAMPLE``; the driver re-reads
+        it after that dispatch and hands it to the materialization callable,
+        and it stays populated through ``AFTER_GENERATE``. A
+        :class:`~tensordict.TensorDict` for tensor-native families; otherwise
+        any container the materialization callable understands.
+    accepted_mask : torch.Tensor | None
+        Boolean mask recording which of the call's candidates were accepted,
+        written by filtering hooks or the materialization callable. ``None``
+        when acceptance has not been recorded for this dispatch. Mirrors the
+        :attr:`~nvalchemi.hooks.DynamicsContext.converged_mask` convention so
+        acceptance-aware reporting and resampling loops have a stable
+        channel.
     """
 
     batch: Batch | TensorDictBase | None = None
     cond: Any = None
     intermediates: dict[str, Any] = field(default_factory=dict)
     step_count: int = 0
+    sample: TensorDict | Any = None
+    accepted_mask: torch.Tensor | None = None

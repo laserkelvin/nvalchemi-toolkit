@@ -282,16 +282,19 @@ class GenerativeModelMixin(abc.ABC):
     provide them, so the :class:`~nvalchemi.gen.generator.AtomGenerator`
     raises :class:`TypeError` when they are absent):
 
-    - ``to_batch(sample, cond_batch) -> Batch`` — map a sample
-      :class:`~tensordict.TensorDict` (e.g. the denoised endpoint under
-      ``"x1"``) into a :class:`Batch`. ``cond_batch``
+    - ``to_batch(sample, cond_batch) -> Batch`` — map the raw sample into a
+      :class:`Batch`. The sample is whatever container the generating
+      function produced: a :class:`~tensordict.TensorDict` for tensor-native
+      families (e.g. the denoised endpoint under ``"x1"``), otherwise any
+      container this method understands. ``cond_batch``
       is ``None`` for unconditional generation. Built by the
       :class:`~nvalchemi.gen.generator.AtomGenerator` via
       ``model.condition`` and passed here for materialization context.
     - ``generate(*, num_samples=1, rng=None, cond=None, **kwargs)
-      -> TensorDict`` — a model-supplied
+      -> Any`` — a model-supplied
       :class:`~nvalchemi.gen.generator.GeneratingFunction` (without the
-      leading ``model`` argument, since it is a method). When present, the
+      leading ``model`` argument, since it is a method), with the same
+      relaxed sample-container contract. When present, the
       :class:`~nvalchemi.gen.generator.AtomGenerator` uses it as the fallback
       generation source when no ``generator_func`` is supplied.
 

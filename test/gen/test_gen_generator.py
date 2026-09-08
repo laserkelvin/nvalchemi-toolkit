@@ -15,9 +15,9 @@
 """Structural tests for the generative API.
 
 Covers the abstract :class:`~nvalchemi.gen.generator.AtomGenerator`
-with its fixed two-step core and
+with its fixed condition → generate → materialize core and
 :class:`~nvalchemi.gen.stages.GenerationStage` hooks: the defaults-everywhere
-model contract, the :class:`~tensordict.TensorDict` sample contract, hook
+model contract, the relaxed sample-container contract, hook
 firing order / frequency gating /
 mutation-by-replacement / filter-by-subsetting, ``stream()`` semantics, the
 ``sample()``/``__call__`` sugar split, the ``torch.compile`` surface, and
@@ -155,21 +155,27 @@ class TestBaseGenerator:
         with pytest.raises(TypeError, match="materialization target"):
             AtomGenerator(model=_PlainModel(), generator_func=trivial_generate)
 
-    def test_generate_must_return_tensordict(self) -> None:
-        """A generating function returning a bare tensor raises ``TypeError``."""
+    def test_non_tensordict_sample_flows_through(self) -> None:
+        """A generating function may return any container the recon understands."""
 
-        def _bad_generate(model, *, num_samples=1, rng=None, cond=None, **kwargs):
-            """Return a bare tensor, violating the TensorDict contract."""
-            del model, num_samples, rng, cond, kwargs
-            return torch.zeros(1, 1, 3)
+        def _compact_generate(model, *, num_samples=1, rng=None, cond=None, **kwargs):
+            """Return a plain dict as a compact stand-in sample container."""
+            del model, rng, cond, kwargs
+            return {"rows": torch.zeros(num_samples, 2)}
+
+        def _compact_recon(sample, batch) -> Batch:
+            """Materialize a dict sample: one graph per row."""
+            del batch
+            return make_batch(sample["rows"].shape[0])
 
         gen = AtomGenerator(
             model=_PlainModel(),
-            generator_func=_bad_generate,
-            output_to_batch_func=zeros_to_batch,
+            generator_func=_compact_generate,
+            output_to_batch_func=_compact_recon,
         )
-        with pytest.raises(TypeError, match="TensorDict"):
-            gen()
+        out = gen(num_samples_per_batch=3)
+        assert isinstance(out, Batch)
+        assert out.num_graphs == 3
 
     def test_materialization_must_return_batch(self) -> None:
         """A materialization callable returning a non-Batch raises ``TypeError``."""
@@ -219,7 +225,7 @@ class TestBaseGenerator:
 
 
 class TestGenerationHooks:
-    """Hook dispatch, mutation, and filtering on the three generation stages."""
+    """Hook dispatch, mutation, and filtering on the generation stages."""
 
     def _generator(self, hooks: list) -> AtomGenerator:
         """Build a demo generator carrying ``hooks``.
@@ -255,6 +261,7 @@ class TestGenerationHooks:
         assert log == [
             GenerationStage.BEFORE_CONDITION,
             GenerationStage.AFTER_CONDITION,
+            GenerationStage.AFTER_SAMPLE,
             GenerationStage.AFTER_GENERATE,
         ]
 
@@ -374,6 +381,150 @@ class TestGenerationHooks:
         gen = self._generator([_RejectAll()])
         with pytest.raises(IndexError, match="Index is empty"):
             gen(make_batch(num_graphs=3))
+
+    def test_after_sample_hook_sees_pre_materialization_state(self) -> None:
+        """At AFTER_SAMPLE, ``ctx.sample`` holds the raw sample, ``ctx.batch`` the cond."""
+
+        class _Observe:
+            stage = GenerationStage.AFTER_SAMPLE
+            frequency = 1
+
+            def __init__(self) -> None:
+                self.sample = None
+                self.batch = None
+
+            def __call__(self, ctx, stage) -> None:
+                """Record the sample and batch visible at this stage."""
+                self.sample = ctx.sample
+                self.batch = ctx.batch
+
+        probe = _Observe()
+        capture = _CaptureRecon()
+        gen = AtomGenerator(
+            model=_PlainModel(),
+            generator_func=trivial_generate,
+            output_to_batch_func=capture,
+            hooks=[probe],
+        )
+        gen(make_batch(num_graphs=3))
+        assert probe.batch.num_graphs == 3  # still the conditioning batch
+        assert probe.sample is capture.samples[0]  # materialization saw it as-is
+
+    def test_after_sample_hook_replaces_sample(self) -> None:
+        """An AFTER_SAMPLE hook's replacement is what materialization receives."""
+        replacement = TensorDict({"x1": torch.ones(2, 1, 3)}, batch_size=[2])
+
+        class _SwapSample:
+            stage = GenerationStage.AFTER_SAMPLE
+            frequency = 1
+
+            def __call__(self, ctx, stage) -> None:
+                """Replace the raw sample outright."""
+                ctx.sample = replacement
+
+        capture = _CaptureRecon()
+        gen = AtomGenerator(
+            model=_PlainModel(),
+            generator_func=trivial_generate,
+            output_to_batch_func=capture,
+            hooks=[_SwapSample()],
+        )
+        out = gen(make_batch(num_graphs=3))
+        assert capture.samples[0] is replacement
+        assert out.num_graphs == 2
+
+    def test_after_sample_string_stage_coerced(self) -> None:
+        """A string ``\"AFTER_SAMPLE\"`` stage is coerced at construction."""
+
+        class _StringStage:
+            frequency = 1
+
+            def __init__(self) -> None:
+                self.stage = "AFTER_SAMPLE"
+                self.fired = False
+
+            def __call__(self, ctx, stage) -> None:
+                """Record firing."""
+                self.fired = True
+
+        hook = _StringStage()
+        gen = self._generator([hook])
+        assert hook.stage is GenerationStage.AFTER_SAMPLE
+        gen()
+        assert hook.fired
+
+    def test_zero_graph_materialization_returned(self) -> None:
+        """A recon returning a zero-graph ``Batch`` signals total rejection."""
+
+        def _empty_recon(sample, batch) -> Batch:
+            """Materialize to an explicitly empty batch."""
+            del sample, batch
+            return Batch.empty(num_systems=0, num_nodes=0, num_edges=0)
+
+        gen = AtomGenerator(
+            model=_PlainModel(),
+            generator_func=trivial_generate,
+            output_to_batch_func=_empty_recon,
+        )
+        out = gen(make_batch(num_graphs=3))
+        assert isinstance(out, Batch)
+        assert out.num_graphs == 0
+
+    def test_accepted_mask_recorded_and_visible_later(self) -> None:
+        """``accepted_mask`` written at AFTER_SAMPLE is readable at AFTER_GENERATE."""
+
+        class _Accept:
+            stage = GenerationStage.AFTER_SAMPLE
+            frequency = 1
+
+            def __call__(self, ctx, stage) -> None:
+                """Accept every draw."""
+                ctx.accepted_mask = torch.ones(
+                    ctx.sample.batch_size[0], dtype=torch.bool
+                )
+
+        seen: list = []
+
+        class _Read:
+            stage = GenerationStage.AFTER_GENERATE
+            frequency = 1
+
+            def __call__(self, ctx, stage) -> None:
+                """Read the recorded mask."""
+                seen.append(ctx.accepted_mask)
+
+        gen = self._generator([_Accept(), _Read()])
+        out = gen(make_batch(num_graphs=2))
+        assert len(seen) == 1
+        assert seen[0] is not None
+        assert int(seen[0].sum()) == out.num_graphs == 2
+
+    def test_after_sample_dispatch_inside_session_stream(self, device: str) -> None:
+        """AFTER_SAMPLE hooks dispatch on the session CUDA stream, when any."""
+
+        class _Probe:
+            stage = GenerationStage.AFTER_SAMPLE
+            frequency = 1
+
+            def __init__(self) -> None:
+                self.cuda_stream = None
+
+            def __call__(self, ctx, stage) -> None:
+                """Record the active CUDA stream pointer, when any."""
+                if torch.cuda.is_available():
+                    self.cuda_stream = torch.cuda.current_stream().cuda_stream
+
+        probe = _Probe()
+        gen = self._generator([probe])
+        gen.model.to(device)
+        with gen:
+            session_stream = gen._stream
+            gen(make_batch(num_graphs=1).to(device))
+        if device == "cuda":
+            assert session_stream is not None
+            assert probe.cuda_stream == session_stream.cuda_stream
+        else:
+            assert session_stream is None
 
     def test_wrong_stage_enum_rejected(self) -> None:
         """A hook with a non-GenerationStage stage is rejected at construction."""
@@ -519,7 +670,7 @@ class TestSampleSugar:
         assert torch.equal(capture_a.samples[0]["x1"], capture_b.samples[0]["x1"])
 
     def test_sample_runs_full_dispatch(self) -> None:
-        """``sample()`` fires all three stages in pipeline order."""
+        """``sample()`` fires every stage in pipeline order."""
 
         class _Recorder:
             def __init__(self, stage: GenerationStage, log: list) -> None:
