@@ -135,6 +135,13 @@ override-dependencies = [
   # cupy >=14.0.1,!=14.1.0 anyway, so override the pin for both flavors.
   "cupy-cuda12x>=14.0.1,!=14.1.0; sys_platform != 'darwin'",
   "cupy-cuda13x>=14.0.1,!=14.1.0; sys_platform != 'darwin'",
+  # fairchem-core pins lmdb<=1.7.3, which has no cp314 wheel; lmdb>=2.0.0
+  # ships cp314 wheels. Nothing in our fairchem usage touches lmdb, so from
+  # 3.14 on override the pin; below 3.14 re-state fairchem's original pin.
+  # (A marker-scoped override alone would DROP lmdb on older Pythons, since
+  # uv replaces the requirement outright — hence the explicit pair.)
+  "lmdb>=1.6.2,<=1.7.3; python_version < '3.14'",
+  "lmdb>=2.0.0; python_version >= '3.14'",
 ]
 dependency-metadata = [
   { name = "nvalchemi-toolkit-ops", version = "0.4.1", requires-dist = [
