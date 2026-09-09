@@ -152,7 +152,7 @@ artifact kinds a model may ingest or emit:
 | ------------ | ---------- |
 | `POINT_CLOUD` | Unordered atoms (coordinates + numbers) |
 | `GRAPH` | Atomic graph with explicit edges |
-| `CRYSTAL` | Atoms plus a lattice/cell and periodicity flags |
+| `PERIODIC` | Atoms plus a lattice/cell and periodicity flags (need not be crystalline) |
 | `TEXT` | Text / SMILES / string conditioning |
 | `SPECTRA` | One-dimensional spectroscopic or signal data |
 | `EMBEDDING` | Dense latent embedding |
@@ -166,8 +166,8 @@ artifact) — and four are *input-facing*: `CONDITION`, `COMPLETE`,
 `output_modalities` properties are derived from this split.
 
 A `GenerativeModelConfig` then binds intents to modalities
-(`intent_modality_map`; every intent must have an entry), names the primary
-`output_artifact`, and — always required — declares the batch fields the
+(`intent_modality_map`; every intent must have an entry), names the
+`output_artifacts` it can produce, and — always required — declares the batch fields the
 model's conditioning reads (`consumes_fields`; empty means unconditional) and
 the fields its generated output carries (`produces_fields`). These
 declarations are what lets a [pipeline](#chaining-generators) validate stage
@@ -326,7 +326,7 @@ class ToyDecoder(nn.Module, GenerativeModelMixin):
         self.model_config = GenerativeModelConfig(
             intents={GenerativeIntent.CREATE, GenerativeIntent.SAMPLE},
             supports_variable_atoms=False,
-            output_artifact=Modality.POINT_CLOUD,
+            output_artifacts={Modality.POINT_CLOUD},
             intent_modality_map={
                 GenerativeIntent.CREATE: frozenset({Modality.POINT_CLOUD}),
                 GenerativeIntent.SAMPLE: frozenset({Modality.POINT_CLOUD}),

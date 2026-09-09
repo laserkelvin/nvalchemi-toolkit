@@ -62,11 +62,11 @@ __all__ = [
 ]
 
 
-#: Type alias for the output artifact field of :class:`GenerativeModelConfig`.
+#: Type alias for the output artifacts field of :class:`GenerativeModelConfig`.
 #:
-#: The artifact a generative model produces is identified by a
-#: :class:`Modality` member from the shipped default vocabulary (e.g.
-#: :attr:`Modality.CRYSTAL`) or by any custom string.
+#: Artifacts a generative model produces are identified by
+#: :class:`Modality` members from the shipped default vocabulary (e.g.
+#: :attr:`Modality.PERIODIC`) or by any custom strings.
 ArtifactT: TypeAlias = str | Modality
 
 #: Intents that *produce* an output artifact. Used to split
@@ -102,9 +102,10 @@ class GenerativeModelConfig(BaseModel):
         accepted.
     supports_variable_atoms
         Whether the model accepts systems with varying atom counts.
-    output_artifact
-        The primary output artifact modality — a :class:`Modality` member
-        (e.g. :attr:`Modality.CRYSTAL`) or any custom string.
+    output_artifacts
+        The output artifact modalities the model can produce —
+        :class:`Modality` members (e.g. :attr:`Modality.PERIODIC`) or any
+        custom strings.
     intent_modality_map
         Mapping from each supported intent to the modalities that intent
         operates on. Every intent in :attr:`intents` must have an entry here.
@@ -131,15 +132,15 @@ class GenerativeModelConfig(BaseModel):
     >>> cfg = GenerativeModelConfig(
     ...     intents={GenerativeIntent.CREATE, GenerativeIntent.SAMPLE},
     ...     supports_variable_atoms=True,
-    ...     output_artifact=Modality.CRYSTAL,
+    ...     output_artifacts={Modality.PERIODIC},
     ...     intent_modality_map={
-    ...         GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
-    ...         GenerativeIntent.SAMPLE: frozenset({Modality.CRYSTAL}),
+    ...         GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
+    ...         GenerativeIntent.SAMPLE: frozenset({Modality.PERIODIC}),
     ...     },
     ...     consumes_fields=frozenset({"positions", "atomic_numbers"}),
     ...     produces_fields=frozenset({"positions", "atomic_numbers", "cell"}),
     ... )
-    >>> Modality.CRYSTAL in cfg.output_modalities
+    >>> Modality.PERIODIC in cfg.output_modalities
     True
 
     Notes
@@ -173,9 +174,14 @@ class GenerativeModelConfig(BaseModel):
         bool,
         Field(description="Whether the model accepts variable atom counts."),
     ]
-    output_artifact: Annotated[
-        ArtifactT,
-        Field(description="Primary output artifact modality."),
+    output_artifacts: Annotated[
+        set[ArtifactT],
+        Field(
+            description=(
+                "Output artifact modalities the model can produce (shipped "
+                "Modality members or custom strings)."
+            )
+        ),
     ]
     intent_modality_map: Annotated[
         dict[str | GenerativeIntent, frozenset[str | Modality]],
@@ -266,7 +272,7 @@ class GenerativeModelConfig(BaseModel):
         frozenset of Modality or str
             Union of modalities over output-producing intents
             (``create``, ``sample``, ``propose``, ``decode``), plus
-            :attr:`output_artifact`.
+            :attr:`output_artifacts`.
         """
         output_intents = self.intents & _OUTPUT_INTENTS
         produced = (
@@ -274,7 +280,7 @@ class GenerativeModelConfig(BaseModel):
             if output_intents
             else frozenset()
         )
-        return produced | {self.output_artifact}
+        return produced | self.output_artifacts
 
 
 class GenerativeModelMixin(abc.ABC):
@@ -448,11 +454,13 @@ class GenerativeModelMixin(abc.ABC):
         Returns
         -------
         str
-            A short summary of intents and output artifact.
+            A short summary of intents and output artifacts.
         """
         cfg = getattr(self, "model_config", None)
         if not isinstance(cfg, GenerativeModelConfig):
             return "model_config=<not set>"
         intents = ", ".join(sorted(getattr(i, "value", i) for i in cfg.intents))
-        artifact = getattr(cfg.output_artifact, "value", cfg.output_artifact)
-        return f"intents={{{intents}}}, output_artifact={artifact}"
+        artifacts = ", ".join(
+            sorted(getattr(a, "value", a) for a in cfg.output_artifacts)
+        )
+        return f"intents={{{intents}}}, output_artifacts={{{artifacts}}}"

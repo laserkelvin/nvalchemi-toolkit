@@ -34,10 +34,11 @@ class Modality(str, Enum):
     """Artifact kinds a generative model may ingest or emit.
 
     The set is intentionally broad so the same config schema can describe
-    atomic point clouds, periodic crystals, and non-atomic modalities (text,
+    The set is intentionally broad so the same config schema can describe
+    atomic point clouds, periodic structures, and non-atomic modalities (text,
     spectra, embeddings, images). Atomic generative models in this toolkit
     typically operate on :attr:`point_cloud`, :attr:`graph`, or
-    :attr:`crystal`.
+    :attr:`periodic`.
 
     Attributes
     ----------
@@ -45,8 +46,9 @@ class Modality(str, Enum):
         An unordered set of atoms without connectivity (coordinates + numbers).
     GRAPH
         An atomic graph with explicit edges (a neighbor list).
-    CRYSTAL
-        A periodic crystal: atoms plus a lattice/cell and periodicity flags.
+    PERIODIC
+        A periodic structure: atoms plus a lattice/cell and periodicity flags.
+        Not necessarily crystalline — defects, disorder, and surfaces qualify.
     TEXT
         A text / SMILES / string conditioning artifact.
     SPECTRA
@@ -59,7 +61,7 @@ class Modality(str, Enum):
 
     POINT_CLOUD = "point_cloud"
     GRAPH = "graph"
-    CRYSTAL = "crystal"
+    PERIODIC = "periodic"
     TEXT = "text"
     SPECTRA = "spectra"
     EMBEDDING = "embedding"
