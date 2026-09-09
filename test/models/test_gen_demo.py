@@ -42,7 +42,7 @@ class TestDemoGANModel:
         """The demo satisfies the mixin contract and declares its config."""
         model = DemoGANModel()
         assert isinstance(model, GenerativeModelMixin)
-        assert model.model_config.output_artifact is Modality.POINT_CLOUD
+        assert model.model_config.output_artifacts == {Modality.POINT_CLOUD}
         assert model.model_config.intents == {
             GenerativeIntent.CREATE,
             GenerativeIntent.SAMPLE,

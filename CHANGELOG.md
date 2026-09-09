@@ -9,17 +9,31 @@
   and base-model fingerprint checks for PEFT checkpoint loading.
 - Toolkit-level generative API (`nvalchemi.gen`): an abstract
   `AtomGenerator` interface for generation with a fixed condition →
-  generate pipeline — the raw sample is materialized into a `Batch` inline,
-  before `AFTER_GENERATE` hooks fire — lifecycle hooks sharing a per-call
-  `GenerationContext`, `stream()`, and session context managers (dedicated
-  CUDA stream, session RNG, lazy `torch.compile`). Generating functions
-  return `TensorDict` samples. Sequential composition via `gen_a | gen_b`
-  (`GenerationPipeline`, with construction-time field-contract validation).
+  generate → materialize pipeline, lifecycle hooks sharing a per-call
+  `GenerationContext` (`BEFORE_CONDITION` / `AFTER_CONDITION` /
+  `AFTER_SAMPLE` / `AFTER_GENERATE`), `stream()`, and session context
+  managers (dedicated CUDA stream, session RNG, lazy `torch.compile`).
+  `AFTER_SAMPLE` exposes the raw sample (`ctx.sample`) before
+  materialization, so compact-representation workflows can filter
+  candidates before paying materialization cost; generating functions may
+  return any container the materialization callable understands
+  (`TensorDict` remains the documented tensor-family case), and
+  `ctx.accepted_mask` records which candidates were accepted (mirroring the
+  dynamics `converged_mask` convention). A materialization callable may
+  return a zero-graph `Batch` (built via `Batch.empty`) to signal total
+  rejection; pipelines short-circuit the remaining stages for that item,
+  and zero-graph *selection* still raises `IndexError`. Sequential
+  composition via `gen_a | gen_b`
+  (`GenerationPipeline`, with construction-time field-contract validation)
+  and JSON spec construction (`AtomGeneratorSpec`, `GenerationPipelineSpec`),
+  with `to_spec()` on both classes for the reverse direction (capturing a
+  live generator/pipeline back to a spec for serialization and
+  reproducibility).
 - Demo generative models (`nvalchemi.models.gen.demo`): `DemoGANModel` and
   `DemoDiffusionModel` — minimal `GenerativeModelMixin` placeholders for
   testing and debugging (the generative counterpart to
   `DemoModel`/`DemoModelWrapper`) — plus `demo_nonparametric_generation`, a
-  synthetic-structure source for tests and debugging.
+  synthetic-structure source usable standalone or as a pipeline stage.
 - Domain decomposition for distributed inference and dynamics: a spatial halo
   strategy and a graph-parallel strategy, both driven by a declarative
   `MLIPSpec` a model wrapper publishes as `distribution_spec`. Ewald, PME,

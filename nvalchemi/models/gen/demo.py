@@ -54,7 +54,7 @@ def _demo_config() -> GenerativeModelConfig:
     return GenerativeModelConfig(
         intents={GenerativeIntent.CREATE, GenerativeIntent.SAMPLE},
         supports_variable_atoms=False,
-        output_artifact=Modality.POINT_CLOUD,
+        output_artifacts={Modality.POINT_CLOUD},
         intent_modality_map={
             GenerativeIntent.CREATE: frozenset({Modality.POINT_CLOUD}),
             GenerativeIntent.SAMPLE: frozenset({Modality.POINT_CLOUD}),

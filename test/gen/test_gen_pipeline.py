@@ -170,6 +170,35 @@ class TestFoldAndStream:
         with pytest.raises(IndexError, match="Index is empty"):
             pipe(make_batch(num_graphs=2))
 
+    def test_zero_graph_materialization_short_circuits(self) -> None:
+        """A stage materializing zero graphs skips the remaining stages."""
+        calls: list = []
+
+        def _empty_recon(sample, batch) -> Batch:
+            """Materialize to an explicitly empty batch (total rejection)."""
+            del sample, batch
+            return Batch.empty(num_systems=0, num_nodes=0, num_edges=0)
+
+        class _Mark:
+            stage = GenerationStage.AFTER_GENERATE
+            frequency = 1
+
+            def __call__(self, ctx, stage) -> None:
+                """Record that this stage ran."""
+                calls.append(True)
+
+        gen_empty = AtomGenerator(
+            model=DemoGANModel(),
+            output_to_batch_func=_empty_recon,
+            consumes_fields=frozenset(),
+            produces_fields=frozenset(),
+        )
+        gen_downstream = _generator(hooks=[_Mark()])
+        pipe = GenerationPipeline(stages=[gen_empty, gen_downstream])
+        out = pipe(make_batch(num_graphs=2))
+        assert out.num_graphs == 0
+        assert calls == []
+
     def test_per_stage_hooks_are_isolated(self) -> None:
         """Each stage's hooks see that stage's own context."""
         seen: list = []

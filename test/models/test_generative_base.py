@@ -33,6 +33,7 @@ from collections import OrderedDict
 
 import pytest
 import torch
+from pydantic import ValidationError
 from tensordict import TensorDict
 from torch import Tensor, nn
 
@@ -94,10 +95,10 @@ class _DemoGenerativeModel(nn.Module, GenerativeModelMixin):
         self.model_config = GenerativeModelConfig(
             intents={GenerativeIntent.CREATE, GenerativeIntent.SAMPLE},
             supports_variable_atoms=True,
-            output_artifact=Modality.CRYSTAL,
+            output_artifacts={Modality.PERIODIC},
             intent_modality_map={
-                GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
-                GenerativeIntent.SAMPLE: frozenset({Modality.CRYSTAL}),
+                GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
+                GenerativeIntent.SAMPLE: frozenset({Modality.PERIODIC}),
             },
             consumes_fields=frozenset({"positions", "atomic_numbers"}),
             produces_fields=frozenset({"positions", "atomic_numbers"}),
@@ -189,10 +190,10 @@ class TestGenerativeModelConfig:
                 GenerativeIntent.CONDITION,
             },
             supports_variable_atoms=True,
-            output_artifact=Modality.CRYSTAL,
+            output_artifacts={Modality.PERIODIC},
             intent_modality_map={
-                GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
-                GenerativeIntent.SAMPLE: frozenset({Modality.CRYSTAL}),
+                GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
+                GenerativeIntent.SAMPLE: frozenset({Modality.PERIODIC}),
                 GenerativeIntent.CONDITION: frozenset({Modality.TEXT}),
             },
             consumes_fields=frozenset({"positions", "atomic_numbers"}),
@@ -203,7 +204,7 @@ class TestGenerativeModelConfig:
         """Config accepts the documented fields and defaults."""
         cfg = self._build_cfg()
         assert cfg.supports_variable_atoms is True
-        assert cfg.output_artifact is Modality.CRYSTAL
+        assert cfg.output_artifacts == {Modality.PERIODIC}
         assert cfg.active_prediction_outputs is None
 
     def test_intents_in_map_validator_rejects_mismatch(self) -> None:
@@ -212,9 +213,9 @@ class TestGenerativeModelConfig:
             GenerativeModelConfig(
                 intents={GenerativeIntent.CREATE, GenerativeIntent.PROPOSE},
                 supports_variable_atoms=True,
-                output_artifact=Modality.CRYSTAL,
+                output_artifacts={Modality.PERIODIC},
                 intent_modality_map={
-                    GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
+                    GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
                 },
                 consumes_fields=frozenset(),
                 produces_fields=frozenset({"positions"}),
@@ -223,8 +224,71 @@ class TestGenerativeModelConfig:
     def test_input_and_output_modalities(self) -> None:
         """``output_modalities`` covers output intents + artifact; input covers the rest."""
         cfg = self._build_cfg()
-        assert cfg.output_modalities == frozenset({Modality.CRYSTAL})
+        assert cfg.output_modalities == frozenset({Modality.PERIODIC})
         assert cfg.input_modalities == frozenset({Modality.TEXT})
+
+    def test_custom_string_intents_and_modalities(self) -> None:
+        """Custom strings work alongside the shipped enums (defaults, not ground truth)."""
+        cfg = GenerativeModelConfig(
+            intents={GenerativeIntent.CREATE, "rank"},
+            supports_variable_atoms=True,
+            output_artifacts={"slab"},
+            intent_modality_map={
+                GenerativeIntent.CREATE: frozenset({"slab"}),
+                "rank": frozenset({"slab", Modality.TEXT}),
+            },
+            consumes_fields=frozenset(),
+            produces_fields=frozenset({"positions"}),
+        )
+        assert "rank" in cfg.intents
+        assert cfg.output_artifacts == {"slab"}
+        # The shipped split still classifies; custom intents are input-facing.
+        assert cfg.output_modalities == frozenset({"slab"})
+        assert cfg.input_modalities == frozenset({"slab", Modality.TEXT})
+
+    def test_custom_intents_still_require_map_entries(self) -> None:
+        """The intents ⊆ map-keys check applies to custom strings too."""
+        with pytest.raises(ValueError, match="missing from intent_modality_map"):
+            GenerativeModelConfig(
+                intents={"rank"},
+                supports_variable_atoms=True,
+                output_artifacts={"slab"},
+                intent_modality_map={},
+                consumes_fields=frozenset(),
+                produces_fields=frozenset({"positions"}),
+            )
+
+    @pytest.mark.parametrize("bad", [42, 3.14, None])
+    def test_intents_reject_non_strings(self, bad) -> None:
+        """Non-string intents fail validation."""
+        with pytest.raises(ValidationError):
+            GenerativeModelConfig(
+                intents={bad},
+                supports_variable_atoms=True,
+                output_artifacts={Modality.PERIODIC},
+                intent_modality_map={
+                    GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
+                },
+                consumes_fields=frozenset(),
+                produces_fields=frozenset({"positions"}),
+            )
+
+    def test_mixed_vocabulary_round_trip(self) -> None:
+        """Configs mixing enum members and custom strings survive a round-trip."""
+        cfg = GenerativeModelConfig(
+            intents={GenerativeIntent.CREATE, "rank"},
+            supports_variable_atoms=True,
+            output_artifacts={"slab"},
+            intent_modality_map={
+                GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
+                "rank": frozenset({"slab"}),
+            },
+            consumes_fields=frozenset(),
+            produces_fields=frozenset({"positions"}),
+        )
+        restored = GenerativeModelConfig.model_validate(cfg.model_dump())
+        assert restored == cfg
+        assert "rank" in restored.intents
 
     def test_config_round_trip(self) -> None:
         """Serialize -> deserialize -> equality ."""
@@ -239,7 +303,7 @@ class TestGenerativeModelConfig:
         cfg = GenerativeModelConfig(
             intents={GenerativeIntent.CREATE},
             supports_variable_atoms=False,
-            output_artifact=Modality.POINT_CLOUD,
+            output_artifacts={Modality.POINT_CLOUD},
             intent_modality_map={
                 GenerativeIntent.CREATE: frozenset({Modality.POINT_CLOUD}),
             },
@@ -257,9 +321,9 @@ class TestGenerativeModelConfig:
             GenerativeModelConfig(
                 intents={GenerativeIntent.CREATE},
                 supports_variable_atoms=True,
-                output_artifact=Modality.CRYSTAL,
+                output_artifacts={Modality.PERIODIC},
                 intent_modality_map={
-                    GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
+                    GenerativeIntent.CREATE: frozenset({Modality.PERIODIC}),
                 },
             )
 
@@ -338,4 +402,19 @@ class TestGenerativeModelMixin:
         model = _DemoGenerativeModel()
         rep = model.extra_repr()
         assert "create" in rep
-        assert "crystal" in rep
+        assert "periodic" in rep
+
+    def test_extra_repr_handles_custom_strings(self) -> None:
+        """``extra_repr`` works when the config uses custom string values."""
+        model = _DemoGenerativeModel()
+        model.model_config = GenerativeModelConfig(
+            intents={"rank"},
+            supports_variable_atoms=True,
+            output_artifacts={"slab"},
+            intent_modality_map={"rank": frozenset({"slab"})},
+            consumes_fields=frozenset(),
+            produces_fields=frozenset({"positions"}),
+        )
+        rep = model.extra_repr()
+        assert "rank" in rep
+        assert "slab" in rep

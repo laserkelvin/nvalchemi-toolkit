@@ -25,25 +25,27 @@ all below; this table is the map.
 
 | Component | Role |
 | ----------- | ------ |
-| {class}`~nvalchemi.gen.generator.AtomGenerator` | The abstract generation interface. Runs the fixed condition → generate pipeline, fires hooks, streams, and owns sessions |
+| {class}`~nvalchemi.gen.generator.AtomGenerator` | The abstract generation interface. Runs the fixed condition → generate → materialize pipeline, fires hooks, streams, and owns sessions |
 | {class}`~nvalchemi.gen.generator.GeneratingFunction` | The callable that owns the family-specific sampling procedure (diffusion, GAN, GA, ...) |
 | {class}`~nvalchemi.gen.stages.GenerationStage` / {class}`~nvalchemi.hooks.GenerationContext` | The hook lifecycle: when hooks fire, and the per-call state they see |
 | {class}`~nvalchemi.models.gen.base.GenerativeModelMixin` / {class}`~nvalchemi.models.gen.base.GenerativeModelConfig` | The model side: what a generative model provides, and what it declares |
 | {class}`~nvalchemi.gen.enums.Modality` / {class}`~nvalchemi.gen.enums.GenerativeIntent` | The vocabulary for what a model ingests or emits, and how it is used |
 | {class}`~nvalchemi.gen.pipeline.GenerationPipeline` | Sequential composition of generators and other batch stages (`\|` sugar) |
+| {class}`~nvalchemi.gen.spec.AtomGeneratorSpec` / {class}`~nvalchemi.gen.spec.GenerationPipelineSpec` | JSON-serializable construction for config-driven workflows |
 
-## The two steps: condition and generate
+## The pipeline: condition, generate, materialize
 
 Every call to {meth}`~nvalchemi.gen.generator.AtomGenerator.sample` runs the
-same two steps, with hook dispatch at three
+same fixed pipeline, with hook dispatch at four
 {class}`~nvalchemi.gen.stages.GenerationStage` points:
 
 ```text
 BEFORE_CONDITION    hooks
                     ctx.batch = condition(ctx.cond, num_samples_per_batch)
 AFTER_CONDITION     hooks
-                    sample = generator_func(model, ..., cond=ctx.batch)
-                    ctx.batch = to_batch(sample, ctx.batch)  # materialize
+                    ctx.sample = generator_func(model, ..., cond=ctx.batch)
+AFTER_SAMPLE        hooks  (filtering = replacing ctx.sample)
+                    ctx.batch = to_batch(ctx.sample, ctx.batch)  # materialize
 AFTER_GENERATE      hooks  (filtering = subsetting ctx.batch)
 return ctx.batch
 ```
@@ -63,25 +65,38 @@ The names carry the semantics:
 - **Generate** — run the family-specific sampling procedure. The
   {class}`~nvalchemi.gen.generator.GeneratingFunction` receives the model,
   the draw count, an optional RNG, and `ctx.batch` as `cond`, and returns the
-  sample as a {class}`~tensordict.TensorDict` of named tensors (positions,
-  atom types, lattice, ...). Nothing about the family lives in the
-  `AtomGenerator` — a GAN does one forward pass, a diffusion model integrates
-  a sampler loop, a GA runs a population loop; all behind the same signature.
-  The generator then *materializes* the sample into a
+  raw sample, exposed to hooks as `ctx.sample`. Tensor-native families return
+  a {class}`~tensordict.TensorDict` of named tensors (positions, atom types,
+  lattice, ...) — the preferred container, since it stays `torch.compile`-friendly
+  where arbitrary containers graph-break. Still, any container the
+  materialization callable understands is accepted, so a workflow can keep a
+  compact internal representation at this
+  stage. Nothing about the family lives in the `AtomGenerator` — a GAN does
+  one forward pass, a diffusion model integrates a sampler loop, a GA runs a
+  population loop; all behind the same signature.
+- **Materialize** — map the (possibly hook-filtered) sample into a
   {class}`~nvalchemi.data.Batch` — via `output_to_batch_func(sample, batch)`
   or the model's `to_batch` fallback — which replaces `ctx.batch` before
-  `AFTER_GENERATE` hooks fire and is what the call returns.
+  `AFTER_GENERATE` hooks fire and is what the call returns. Materialization
+  may return a zero-graph `Batch` (built with
+  {meth}`~nvalchemi.data.Batch.empty`) to signal that nothing was accepted.
 
-One contract governs the output: **filtering** at `AFTER_GENERATE` is
-graph-level subsetting of `ctx.batch`; note that `Batch` does not support
-zero-graph selections today, so a filter that rejects every graph raises
-`IndexError` (empty-batch semantics would be a separate data-layer change).
+Filtering happens at two levels. At `AFTER_SAMPLE`, hooks replace
+`ctx.sample` in the workflow's own container, so candidates are dropped
+before paying materialization cost; `ctx.accepted_mask` is the channel for
+recording which candidates survived (mirroring the dynamics `converged_mask`
+convention). At `AFTER_GENERATE`, filtering is graph-level subsetting of
+`ctx.batch`. Subsetting a batch to zero graphs still raises `IndexError` —
+total rejection is signalled by materialization returning an explicitly
+empty `Batch`, and filters should tolerate a batch that arrives already
+empty.
 
 | Stage | When it fires | What hooks do there |
 | ------- | --------------- | --------------------- |
 | `BEFORE_CONDITION` | Before the conditioning batch is built | Edit or replace `ctx.cond` |
 | `AFTER_CONDITION` | After conditioning | Attach conditioning metadata (e.g. text embeddings); replace the conditioning batch |
-| `AFTER_GENERATE` | After sampling and materialization | Filter or mutate the generated batch |
+| `AFTER_SAMPLE` | After generation, before materialization | Filter or replace the raw sample (`ctx.sample`); record `ctx.accepted_mask` |
+| `AFTER_GENERATE` | After materialization | Filter or mutate the generated batch |
 
 ## Hooks and the generation context
 
@@ -96,7 +111,11 @@ carries:
 - `cond` — the conditioning input (editable at `BEFORE_CONDITION`),
 - `batch` — the single canonical batch: built by conditioning, read by the
   generating function, materialized into the generated batch before
-  `AFTER_GENERATE` hooks fire.
+  `AFTER_GENERATE` hooks fire,
+- `sample` — the raw sample: set when the generating function returns,
+  editable at `AFTER_SAMPLE`, then handed to the materialization callable,
+- `accepted_mask` — an optional boolean mask recording which candidates were
+  accepted, written by filtering hooks or materialization,
 - `intermediates` — scratch space for hook-to-hook state within one call,
 - `step_count` — which generation call this is; drives `frequency` gating.
 
@@ -133,7 +152,7 @@ artifact kinds a model may ingest or emit:
 | ------------ | ---------- |
 | `POINT_CLOUD` | Unordered atoms (coordinates + numbers) |
 | `GRAPH` | Atomic graph with explicit edges |
-| `CRYSTAL` | Atoms plus a lattice/cell and periodicity flags |
+| `PERIODIC` | Atoms plus a lattice/cell and periodicity flags (need not be crystalline) |
 | `TEXT` | Text / SMILES / string conditioning |
 | `SPECTRA` | One-dimensional spectroscopic or signal data |
 | `EMBEDDING` | Dense latent embedding |
@@ -147,8 +166,8 @@ artifact) — and four are *input-facing*: `CONDITION`, `COMPLETE`,
 `output_modalities` properties are derived from this split.
 
 A `GenerativeModelConfig` then binds intents to modalities
-(`intent_modality_map`; every intent must have an entry), names the primary
-`output_artifact`, and — always required — declares the batch fields the
+(`intent_modality_map`; every intent must have an entry), names the
+`output_artifacts` it can produce, and — always required — declares the batch fields the
 model's conditioning reads (`consumes_fields`; empty means unconditional) and
 the fields its generated output carries (`produces_fields`). These
 declarations are what lets a [pipeline](#chaining-generators) validate stage
@@ -160,7 +179,9 @@ links at construction.
 at a time — one `sample()` per conditioning item in `conds`, or repeated
 unconditional draws with `conds=None` (bounded by `max_batches`). The stream
 yields batches exactly as produced, so a consumer counts graphs itself;
-retry/resample logic belongs to the consuming loop.
+retry/resample logic belongs to the consuming loop. A call whose
+materialization signals total rejection yields a zero-graph batch, so
+rejection-aware consumers should handle `num_graphs == 0`.
 {meth}`~nvalchemi.gen.generator.AtomGenerator.__iter__` is thin sugar over
 `stream()`:
 
@@ -222,9 +243,9 @@ for batch in pipe.stream(conds):
 ```
 
 Pipelines are 1→1 per stage: a filter may shrink a batch, nothing fans out,
-and should a stage ever yield a zero-graph batch the remaining stages are
-skipped for that item (a defensive contract — no current `Batch` operation
-produces one). Each `AtomGenerator` stage keeps its own hooks and context.
+and a stage that yields a zero-graph batch (materialization signalling
+total rejection) short-circuits the remaining stages for that item. Each
+`AtomGenerator` stage keeps its own hooks and context.
 `pipe.compile(**kwargs)` compiles each `AtomGenerator` stage's generating
 function, and `with pipe:` runs the fold on one CUDA stream shared by all
 stages — sequential stages serialize on it with no cross-stream sync.
@@ -236,6 +257,45 @@ the `AtomGenerator` or defaulted from the model's
 declares a field that the immediately upstream generator does not produce,
 pipeline construction fails fast — the same contract pattern as
 `ModelConfig.required_inputs` elsewhere in the toolkit.
+
+(generative-specs)=
+
+## Spec-based construction
+
+Generators and pipelines can be built from JSON specs, mirroring the
+training {mod}`nvalchemi.training` spec machinery (dotted import paths +
+JSON-safe kwargs, no pickle). The unit of spec-ability is the importable
+factory: bind family config in a module-level function, spec it with
+{func}`~nvalchemi.training._spec.create_model_spec`, and compose the pieces
+into {class}`~nvalchemi.gen.spec.AtomGeneratorSpec` /
+{class}`~nvalchemi.gen.spec.GenerationPipelineSpec`:
+
+```python
+from nvalchemi.gen.spec import AtomGeneratorSpec
+from nvalchemi.training._spec import create_model_spec
+
+func_spec = create_model_spec(make_gan_generate, latent_dim=256)
+spec = AtomGeneratorSpec(generator_func=func_spec, num_samples_per_batch=4)
+blob = spec.model_dump_json()                     # plain JSON; safe to store
+
+restored = AtomGeneratorSpec.model_validate_json(blob)
+gen = restored.build(model=model)                 # weights come from checkpoints
+```
+
+Weights are never part of a spec — models are injected at `build` time from
+the checkpoint machinery. The spec module is an opt-in import
+(`from nvalchemi.gen.spec import ...`) so that importing
+{mod}`nvalchemi.gen` stays light.
+
+The reverse direction works too:
+{meth}`~nvalchemi.gen.generator.AtomGenerator.to_spec` (and
+{meth}`~nvalchemi.gen.pipeline.GenerationPipeline.to_spec`) capture a live
+generator or pipeline back to a spec — handy for logging the exact
+construction alongside a checkpoint. Callables are captured by dotted import
+path (module-level only — lambdas, closures, and partials raise
+`TypeError`), and hooks by attribute-faithful class construction: each
+`__init__` parameter must be stored as a same-named attribute
+(`self.factor = factor`), which spec-able hooks already do.
 
 ## Building your own model
 
@@ -266,7 +326,7 @@ class ToyDecoder(nn.Module, GenerativeModelMixin):
         self.model_config = GenerativeModelConfig(
             intents={GenerativeIntent.CREATE, GenerativeIntent.SAMPLE},
             supports_variable_atoms=False,
-            output_artifact=Modality.POINT_CLOUD,
+            output_artifacts={Modality.POINT_CLOUD},
             intent_modality_map={
                 GenerativeIntent.CREATE: frozenset({Modality.POINT_CLOUD}),
                 GenerativeIntent.SAMPLE: frozenset({Modality.POINT_CLOUD}),
@@ -343,6 +403,9 @@ with gen.compile(backend="eager"):                    # session: stream + RNG + 
 
 pipe = gen | other_generator                          # composed; links validated
 ```
+
+(If `toy_generate` lives in an importable module, the same workflow is
+spec-able: `create_model_spec(my_module.make_toy_generate, ...)`.)
 
 ## Examples
 
@@ -528,3 +591,5 @@ def vae_generate(model, *, num_samples=1, rng=None, cond=None, **kwargs):
 - {class}`~nvalchemi.hooks.GenerationContext`
 - {class}`~nvalchemi.gen.pipeline.GenerationPipeline`
 - {func}`~nvalchemi.gen.default_condition`
+- {class}`~nvalchemi.gen.spec.AtomGeneratorSpec`
+- {class}`~nvalchemi.gen.spec.GenerationPipelineSpec`
