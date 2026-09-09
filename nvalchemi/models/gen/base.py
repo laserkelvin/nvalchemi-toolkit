@@ -64,14 +64,16 @@ __all__ = [
 
 #: Type alias for the output artifact field of :class:`GenerativeModelConfig`.
 #:
-#: The artifact a generative model produces is identified by its
-#: :class:`Modality` (e.g. :attr:`Modality.CRYSTAL`).
-ArtifactT: TypeAlias = Modality
+#: The artifact a generative model produces is identified by a
+#: :class:`Modality` member from the shipped default vocabulary (e.g.
+#: :attr:`Modality.CRYSTAL`) or by any custom string.
+ArtifactT: TypeAlias = str | Modality
 
 #: Intents that *produce* an output artifact. Used to split
 #: :attr:`GenerativeModelConfig.intent_modality_map` into input-facing and
 #: output-facing modalities. The remaining intents (``condition``, ``complete``,
-#: ``transform``, ``connect``) are input-facing.
+#: ``transform``, ``connect``) are input-facing. Intents outside the shipped
+#: :class:`GenerativeIntent` vocabulary are treated as input-facing.
 _OUTPUT_INTENTS: frozenset[GenerativeIntent] = frozenset(
     {
         GenerativeIntent.CREATE,
@@ -95,14 +97,18 @@ class GenerativeModelConfig(BaseModel):
     Attributes
     ----------
     intents
-        The operational roles the model can play.
+        The operational roles the model can play. :class:`GenerativeIntent`
+        members are the shipped default vocabulary; custom strings are
+        accepted.
     supports_variable_atoms
         Whether the model accepts systems with varying atom counts.
     output_artifact
-        The primary output artifact modality (e.g. :attr:`Modality.CRYSTAL`).
+        The primary output artifact modality — a :class:`Modality` member
+        (e.g. :attr:`Modality.CRYSTAL`) or any custom string.
     intent_modality_map
         Mapping from each supported intent to the modalities that intent
         operates on. Every intent in :attr:`intents` must have an entry here.
+        Keys and values may mix shipped enum members with custom strings.
     consumes_fields
         Batch fields the model's conditioning reads (empty means
         unconditional). Declared here so a
@@ -138,6 +144,14 @@ class GenerativeModelConfig(BaseModel):
 
     Notes
     -----
+    The :class:`Modality` and :class:`GenerativeIntent` enums are implemented
+    as default vocabulary: users can declare their own set of generative intents
+    and modalities as they wish. Validation only checks internal consistency
+    over the values provided (e.g. :attr:`intents` covered by
+    :attr:`intent_modality_map`). Classification into input-/output-facing
+    via ``_OUTPUT_INTENTS`` is defined for the shipped vocabulary; custom
+    intents are treated as input-facing.
+
     ``extra="forbid"``: unknown constructor keywords raise
     :class:`pydantic.ValidationError`, matching the
     :class:`~nvalchemi.models.base.ModelConfig` pattern.
@@ -146,8 +160,14 @@ class GenerativeModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
     intents: Annotated[
-        set[GenerativeIntent],
-        Field(description="Operational roles the model can play."),
+        set[str | GenerativeIntent],
+        Field(
+            description=(
+                "Operational roles the model can play. GenerativeIntent "
+                "members are the shipped default vocabulary; custom strings "
+                "are accepted."
+            )
+        ),
     ]
     supports_variable_atoms: Annotated[
         bool,
@@ -158,7 +178,7 @@ class GenerativeModelConfig(BaseModel):
         Field(description="Primary output artifact modality."),
     ]
     intent_modality_map: Annotated[
-        dict[GenerativeIntent, frozenset[Modality]],
+        dict[str | GenerativeIntent, frozenset[str | Modality]],
         Field(
             description=(
                 "Mapping from each supported intent to the modalities it "
@@ -214,19 +234,21 @@ class GenerativeModelConfig(BaseModel):
         """
         missing = self.intents - set(self.intent_modality_map)
         if missing:
-            missing_str = ", ".join(sorted(i.value for i in missing))
+            missing_str = ", ".join(sorted(getattr(i, "value", i) for i in missing))
             raise ValueError(f"intents missing from intent_modality_map: {missing_str}")
         return self
 
     @property
-    def input_modalities(self) -> frozenset[Modality]:
+    def input_modalities(self) -> frozenset[str | Modality]:
         """Modalities consumed by the model's input-facing intents.
 
         Returns
         -------
-        frozenset of Modality
+        frozenset of Modality or str
             Union of modalities over intents that are NOT output-producing
             (``condition``, ``complete``, ``transform``, ``connect``).
+            Intents outside the shipped :class:`GenerativeIntent` vocabulary
+            land here.
         """
         input_intents = self.intents - _OUTPUT_INTENTS
         return (
@@ -236,12 +258,12 @@ class GenerativeModelConfig(BaseModel):
         )
 
     @property
-    def output_modalities(self) -> frozenset[Modality]:
+    def output_modalities(self) -> frozenset[str | Modality]:
         """Modalities produced by the model's output-producing intents.
 
         Returns
         -------
-        frozenset of Modality
+        frozenset of Modality or str
             Union of modalities over output-producing intents
             (``create``, ``sample``, ``propose``, ``decode``), plus
             :attr:`output_artifact`.
@@ -431,5 +453,6 @@ class GenerativeModelMixin(abc.ABC):
         cfg = getattr(self, "model_config", None)
         if not isinstance(cfg, GenerativeModelConfig):
             return "model_config=<not set>"
-        intents = ", ".join(sorted(i.value for i in cfg.intents))
-        return f"intents={{{intents}}}, output_artifact={cfg.output_artifact.value}"
+        intents = ", ".join(sorted(getattr(i, "value", i) for i in cfg.intents))
+        artifact = getattr(cfg.output_artifact, "value", cfg.output_artifact)
+        return f"intents={{{intents}}}, output_artifact={artifact}"

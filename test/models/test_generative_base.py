@@ -33,6 +33,7 @@ from collections import OrderedDict
 
 import pytest
 import torch
+from pydantic import ValidationError
 from tensordict import TensorDict
 from torch import Tensor, nn
 
@@ -226,6 +227,69 @@ class TestGenerativeModelConfig:
         assert cfg.output_modalities == frozenset({Modality.CRYSTAL})
         assert cfg.input_modalities == frozenset({Modality.TEXT})
 
+    def test_custom_string_intents_and_modalities(self) -> None:
+        """Custom strings work alongside the shipped enums (defaults, not ground truth)."""
+        cfg = GenerativeModelConfig(
+            intents={GenerativeIntent.CREATE, "rank"},
+            supports_variable_atoms=True,
+            output_artifact="slab",
+            intent_modality_map={
+                GenerativeIntent.CREATE: frozenset({"slab"}),
+                "rank": frozenset({"slab", Modality.TEXT}),
+            },
+            consumes_fields=frozenset(),
+            produces_fields=frozenset({"positions"}),
+        )
+        assert "rank" in cfg.intents
+        assert cfg.output_artifact == "slab"
+        # The shipped split still classifies; custom intents are input-facing.
+        assert cfg.output_modalities == frozenset({"slab"})
+        assert cfg.input_modalities == frozenset({"slab", Modality.TEXT})
+
+    def test_custom_intents_still_require_map_entries(self) -> None:
+        """The intents ⊆ map-keys check applies to custom strings too."""
+        with pytest.raises(ValueError, match="missing from intent_modality_map"):
+            GenerativeModelConfig(
+                intents={"rank"},
+                supports_variable_atoms=True,
+                output_artifact="slab",
+                intent_modality_map={},
+                consumes_fields=frozenset(),
+                produces_fields=frozenset({"positions"}),
+            )
+
+    @pytest.mark.parametrize("bad", [42, 3.14, None])
+    def test_intents_reject_non_strings(self, bad) -> None:
+        """Non-string intents fail validation."""
+        with pytest.raises(ValidationError):
+            GenerativeModelConfig(
+                intents={bad},
+                supports_variable_atoms=True,
+                output_artifact=Modality.CRYSTAL,
+                intent_modality_map={
+                    GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
+                },
+                consumes_fields=frozenset(),
+                produces_fields=frozenset({"positions"}),
+            )
+
+    def test_mixed_vocabulary_round_trip(self) -> None:
+        """Configs mixing enum members and custom strings survive a round-trip."""
+        cfg = GenerativeModelConfig(
+            intents={GenerativeIntent.CREATE, "rank"},
+            supports_variable_atoms=True,
+            output_artifact="slab",
+            intent_modality_map={
+                GenerativeIntent.CREATE: frozenset({Modality.CRYSTAL}),
+                "rank": frozenset({"slab"}),
+            },
+            consumes_fields=frozenset(),
+            produces_fields=frozenset({"positions"}),
+        )
+        restored = GenerativeModelConfig.model_validate(cfg.model_dump())
+        assert restored == cfg
+        assert "rank" in restored.intents
+
     def test_config_round_trip(self) -> None:
         """Serialize -> deserialize -> equality ."""
         cfg = self._build_cfg()
@@ -339,3 +403,18 @@ class TestGenerativeModelMixin:
         rep = model.extra_repr()
         assert "create" in rep
         assert "crystal" in rep
+
+    def test_extra_repr_handles_custom_strings(self) -> None:
+        """``extra_repr`` works when the config uses custom string values."""
+        model = _DemoGenerativeModel()
+        model.model_config = GenerativeModelConfig(
+            intents={"rank"},
+            supports_variable_atoms=True,
+            output_artifact="slab",
+            intent_modality_map={"rank": frozenset({"slab"})},
+            consumes_fields=frozenset(),
+            produces_fields=frozenset({"positions"}),
+        )
+        rep = model.extra_repr()
+        assert "rank" in rep
+        assert "slab" in rep
