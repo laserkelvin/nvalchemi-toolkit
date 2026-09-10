@@ -25,8 +25,9 @@ dynamics, hooks/reporting, and training/finetuning workflows.
 - The PR template expects a short description, testing notes, changelog updates,
   docstring/docs updates where applicable, and the relevant type-of-change box.
 - When stacking PRs, use either the `gh stack` commands in GitHub CLI
-  (`gh stack init`, `gh stack add`, `gh stack submit`) or the GitHub website
-  (each pull request targets the layer below, linked with **Create stack**).
+  (`gh extension install github/gh-stack` if unavailable) or the GitHub
+  website (each pull request targets the layer below, linked with **Create
+  stack**).
   Name branches `<github handle>/<shared-stack-topic>/<layer>` (e.g.
   `octocat/batched-dynamics/01`); all branches in a stack live on this
   repository. See `CONTRIBUTING.md` for the procedure.

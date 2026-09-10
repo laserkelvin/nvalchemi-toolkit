@@ -156,10 +156,11 @@ the position in it.
 
 There are two ways to build a stack, both documented by GitHub:
 
-- With the `gh stack` commands in GitHub CLI (see the
-  [quickstart][gh-stacked-quickstart]):
+- With the `gh stack` commands in GitHub CLI, provided by the
+  `github/gh-stack` extension (see the [quickstart][gh-stacked-quickstart]):
 
   ```bash
+  gh extension install github/gh-stack  # if `gh stack` is not available
   gh stack init  # first branch, e.g. octocat/batched-dynamics/01
   gh stack add octocat/batched-dynamics/02
   gh stack submit  # push branches and open the linked pull requests
