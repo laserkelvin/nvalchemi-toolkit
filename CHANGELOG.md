@@ -49,6 +49,11 @@
   step as before; metric-driven schedulers step only at validation
   checkpoints, where the validation summary supplies the metric.
 
+- Python 3.14 support across the core package and the cu12/cu13 CUDA extras:
+  `requires-python` is now `>=3.11,<=3.15` (3.15 is forward-looking metadata;
+  internal 3.15 development is enabled via `docs/dev/python-315-internal.md`).
+- numpy relaxed to `>=2,<3` — downstream users may use any numpy 2.x.
+
 ### Model Wrappers
 
 - **Pipeline neighbor-list adaptation policy** — `PipelineModelWrapper`
@@ -95,6 +100,10 @@
   `examples/advanced/09_uma_nve.py` NVE/NVT/NPT walkthrough.
 
 ### Fixed
+
+- Cap `plotext<6`: plotext 6 removed `clf()`, which hooks/reporting and the
+  training CLI call; fresh resolves were silently installing 6.x and breaking
+  Rich dashboards and `nvalchemi-training` on all Python versions.
 
 - **UMA CUDA dependency resolution** — add standalone `uma-cu12` and
   `uma-cu13` extras. They select the matching torch build without installing
