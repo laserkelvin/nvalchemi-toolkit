@@ -50,8 +50,9 @@
   checkpoints, where the validation summary supplies the metric.
 
 - Python 3.14 support across the core package and the cu12/cu13 CUDA extras:
-  `requires-python` is now `>=3.11,<=3.15` (3.15 is forward-looking metadata;
-  internal 3.15 development is enabled via `docs/dev/python-315-internal.md`).
+  `requires-python` is now `>=3.11,<3.15`. Python 3.15 is not publicly
+  supported yet (upstream wheels missing); an internal 3.15 development recipe
+  is documented in `docs/dev/python-315-internal.md`.
 - numpy relaxed to `>=2,<3` — downstream users may use any numpy 2.x.
 
 ### Model Wrappers

@@ -9,7 +9,7 @@ authors = [
 ]
 description = "High-performance open-source deep-learning framework for exploring, building and deploying AI atomic simulation workflows."
 readme = "README.md"
-requires-python = ">=3.11,<=3.15"
+requires-python = ">=3.11,<3.15"
 license = {file="LICENSE"}
 dependencies = [
     "nvalchemi-toolkit-ops>=0.4.1",
