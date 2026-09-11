@@ -20,7 +20,6 @@ dependencies = [
     "jaxtyping>=0.3.2",
     "tensordict>=0.11.0",
     "pydantic>=2.11.7",
-    "dm-tree>=0.1.8",
     "plum-dispatch>=2.5.7",
     "zarr>=3",
     "periodictable==2.0.2",
