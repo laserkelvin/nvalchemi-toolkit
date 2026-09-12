@@ -69,16 +69,18 @@ ase = [
 ]
 cu12 = [
     "nvalchemi-toolkit-ops[torch-cu12]>=0.4.1; sys_platform != 'darwin'",
-    "nvidia-physicsnemo[cu12]>=2.2.0; sys_platform != 'darwin'",
-    "cuml-cu12>=26.4.0; sys_platform != 'darwin'",
+    # PhysicsNeMo core only: its [cuXX] extras pin cupy<14 (no cp314 wheels),
+    # and nothing in nvalchemi imports the RAPIDS stack (cuml/cupy/DALI).
+    # Users needing RAPIDS should install it directly.
+    "nvidia-physicsnemo>=2.2.0; sys_platform != 'darwin'",
     "torch; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu12>=0.8.0; sys_platform != 'darwin'",
 ]
 cu13 = [
     "nvalchemi-toolkit-ops[torch-cu13]>=0.4.1; sys_platform != 'darwin'",
-    "nvidia-physicsnemo[cu13]>=2.2.0; sys_platform != 'darwin'",
-    "cuml-cu13>=26.4.0; sys_platform != 'darwin'",
+    # PhysicsNeMo core only — see the cu12 extra note.
+    "nvidia-physicsnemo>=2.2.0; sys_platform != 'darwin'",
     "torch; sys_platform != 'darwin'",
     "torchvision; sys_platform != 'darwin'",
     "cuequivariance-ops-torch-cu13>=0.8.0; sys_platform != 'darwin'",
@@ -143,8 +145,10 @@ conflicts = [
     { extra = "cu12" },
     { extra = "cu13" },
   ],
-  # PhysicsNeMo's CUDA extras pull RAPIDS with numba<0.62, while Fairchem 2.22
-  # requires numba>=0.62. Use the standalone UMA CUDA variants instead.
+  # Historical env isolation: keep UMA and the CUDA extras in separate
+  # environments (the standalone uma-cuXX variants combine them). The original
+  # RAPIDS/numba conflict no longer applies since the cuXX extras dropped the
+  # RAPIDS stack, but the env split is kept deliberately.
   [
     { extra = "uma" },
     { extra = "cu12" },
@@ -198,11 +202,6 @@ conflicts = [
 ]
 override-dependencies = [
   "python-hostlist; sys_platform == 'never'",
-  # physicsnemo[cu12]/[cu13] pins cupy<14, but cupy <14 has no cp314 wheel and
-  # no sdist; cupy 14 is the only way onto Python 3.14. cuml >=26.4 requires
-  # cupy >=14.0.1,!=14.1.0 anyway, so override the pin for both flavors.
-  "cupy-cuda12x>=14.0.1,!=14.1.0; sys_platform != 'darwin'",
-  "cupy-cuda13x>=14.0.1,!=14.1.0; sys_platform != 'darwin'",
   # fairchem-core pins lmdb<=1.7.3, which has no cp314 wheel. lmdb>=2.0.0
   # ships cp314 wheels. Nothing in our fairchem usage touches lmdb, so from
   # 3.14 on override the pin; below 3.14, re-state fairchem's original pin.
