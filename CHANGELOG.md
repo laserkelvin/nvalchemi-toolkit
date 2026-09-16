@@ -28,12 +28,17 @@
   `gen_a | gen_b` (`GenerationPipeline`, with construction-time
   field-contract validation). Generating functions own their
   model (when there is one) and declare their own field contracts; models
-  publish a four-field frozen `GenerativeModelConfig`.
+  publish a four-field frozen `GenerativeModelConfig`. Generators and
+  pipelines round-trip through pydantic (`model_dump_json` /
+  `model_validate_json`), capturing callable fields as training
+  `BaseSpec` payloads (dotted import paths, or a callable object's own
+  `to_spec()`); weights stay in the checkpoint machinery.
 - Demo generative models (`nvalchemi.models.gen.demo`): `DemoGANModel` and
   `DemoDiffusionModel` — minimal `GenerativeModelMixin` placeholders for
   testing and debugging (the generative counterpart to
   `DemoModel`/`DemoModelWrapper`) — with factory-built generating
-  procedures (`make_demo_gan_generate`, `make_demo_diffusion_generate`),
+  procedures (`make_demo_gan_generate`, `make_demo_diffusion_generate`)
+  whose `to_spec()` captures construction,
   plus `demo_nonparametric_generation`, a synthetic-structure source
   usable standalone or as a pipeline stage.
 - Domain decomposition for distributed inference and dynamics: a spatial halo
