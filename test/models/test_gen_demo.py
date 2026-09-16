@@ -36,6 +36,7 @@ from nvalchemi.models.gen import (
     make_demo_diffusion_generate,
     make_demo_gan_generate,
 )
+from nvalchemi.training._spec import BaseSpec
 
 
 class TestDemoGANModel:
@@ -91,6 +92,18 @@ class TestDemoGANModel:
         assert gen.consumes_fields == frozenset()
         assert gen.produces_fields == frozenset({"positions", "atomic_numbers"})
 
+    def test_factory_object_to_spec(self) -> None:
+        """The factory object captures itself (model spec nested) via ``to_spec``."""
+        fn = make_demo_gan_generate(DemoGANModel(num_atoms=5, latent_dim=8, hidden=16))
+        spec = fn.to_spec()
+        assert isinstance(spec, BaseSpec)
+        assert spec.cls_path.endswith("make_demo_gan_generate")
+        rebuilt = spec.build()
+        assert rebuilt(num_samples=2).num_graphs == 2
+        assert rebuilt.model.num_atoms == 5
+        assert rebuilt.model.latent_dim == 8
+        assert rebuilt.model.hidden == 16
+
     def test_seeded_sessions_reproduce(self) -> None:
         """Same model + same seed across sessions gives identical draws."""
         model = DemoGANModel()
@@ -122,6 +135,20 @@ class TestDemoDiffusionModel:
         source = demo_nonparametric_generation(num_samples=2, num_atoms=5)
         out = gen(source, num_samples=3, num_steps=2)
         assert out.num_graphs == 6
+
+    def test_factory_object_to_spec_captures_sampler_kwargs(self) -> None:
+        """``to_spec`` records the factory-bound sampler hyperparameters."""
+        fn = make_demo_diffusion_generate(
+            DemoDiffusionModel(num_atoms=4), num_steps=8, sigma_max=3.0
+        )
+        spec = fn.to_spec()
+        assert isinstance(spec, BaseSpec)
+        assert spec.cls_path.endswith("make_demo_diffusion_generate")
+        assert spec.num_steps == 8
+        assert spec.sigma_max == 3.0
+        rebuilt = spec.build()
+        assert rebuilt.num_steps == 8
+        assert rebuilt(num_samples=1).num_graphs == 1
 
     def test_forward_physicsnemo_compatible(self) -> None:
         """The demo wraps in ``EDMPreconditioner`` and runs ``sample`` — the

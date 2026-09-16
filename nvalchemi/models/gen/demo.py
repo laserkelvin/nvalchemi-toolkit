@@ -32,7 +32,7 @@ with no ``batch_mapping``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from tensordict import TensorDict
@@ -41,6 +41,9 @@ from torch import nn
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.gen.generator import GeneratingFunction
 from nvalchemi.models.gen.base import GenerativeModelConfig, GenerativeModelMixin
+
+if TYPE_CHECKING:
+    from nvalchemi.training import BaseSpec
 
 __all__ = [
     "DemoDiffusionModel",
@@ -243,6 +246,29 @@ class _DemoGANGenerate:
         sample = TensorDict({"x1": self.model.decode(z)}, batch_size=[n])
         return self.model.to_batch(sample, inputs)
 
+    def to_spec(self) -> BaseSpec:
+        """Capture this procedure's construction as a spec.
+
+        Returns
+        -------
+        BaseSpec
+            A spec of :func:`make_demo_gan_generate` with the model captured
+            as a nested :func:`~nvalchemi.training.create_model_spec` spec.
+            Weights are never captured (they live in the checkpoint
+            machinery).
+        """
+        from nvalchemi.training import create_model_spec
+
+        return create_model_spec(
+            make_demo_gan_generate,
+            model=create_model_spec(
+                type(self.model),
+                num_atoms=self.model.num_atoms,
+                latent_dim=self.model.latent_dim,
+                hidden=self.model.hidden,
+            ),
+        )
+
 
 def make_demo_gan_generate(model: DemoGANModel) -> GeneratingFunction:
     """Build a :class:`~nvalchemi.gen.generator.GeneratingFunction` for a GAN.
@@ -423,6 +449,32 @@ class _DemoDiffusionGenerate:
             x = x + (s_next - s_cur) * drift
         sample = TensorDict({"x1": x}, batch_size=[n])
         return self.model.to_batch(sample, inputs)
+
+    def to_spec(self) -> BaseSpec:
+        """Capture this procedure's construction as a spec.
+
+        Returns
+        -------
+        BaseSpec
+            A spec of :func:`make_demo_diffusion_generate` with the model
+            captured as a nested
+            :func:`~nvalchemi.training.create_model_spec` spec and the
+            factory-bound sampler settings recorded. Weights are never
+            captured (they live in the checkpoint machinery).
+        """
+        from nvalchemi.training import create_model_spec
+
+        return create_model_spec(
+            make_demo_diffusion_generate,
+            model=create_model_spec(
+                type(self.model),
+                num_atoms=self.model.num_atoms,
+                hidden=self.model.hidden,
+            ),
+            num_steps=self.num_steps,
+            sigma_max=self.sigma_max,
+            sigma_min=self.sigma_min,
+        )
 
 
 def make_demo_diffusion_generate(
